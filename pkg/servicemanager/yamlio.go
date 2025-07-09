@@ -45,7 +45,9 @@ ProvisionedBigQueryTables:
 
 // YAMLArchitectureIO implements the ArchitectureIO interface for local YAML files.
 type YAMLArchitectureIO struct {
-	template *template.Template
+	template       *template.Template
+	inputFilePath  string
+	outputFilePath string
 }
 
 // NewYAMLArchitectureIO creates a new loader that reads and writes local YAML files.
@@ -60,15 +62,15 @@ func NewYAMLArchitectureIO() (*YAMLArchitectureIO, error) {
 }
 
 // LoadArchitecture reads the full architecture from a local file path.
-func (y *YAMLArchitectureIO) LoadArchitecture(ctx context.Context, filePath string) (*MicroserviceArchitecture, error) {
-	data, err := os.ReadFile(filePath)
+func (y *YAMLArchitectureIO) LoadArchitecture(ctx context.Context) (*MicroserviceArchitecture, error) {
+	data, err := os.ReadFile(y.inputFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read architecture file '%s': %w", filePath, err)
+		return nil, fmt.Errorf("failed to read architecture file '%s': %w", y.inputFilePath, err)
 	}
 
 	var arch MicroserviceArchitecture
 	if err := yaml.Unmarshal(data, &arch); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal architecture YAML from '%s': %w", filePath, err)
+		return nil, fmt.Errorf("failed to unmarshal architecture YAML from '%s': %w", y.inputFilePath, err)
 	}
 	return &arch, nil
 }
@@ -88,10 +90,10 @@ func (y *YAMLArchitectureIO) LoadResourceGroup(ctx context.Context, filePath str
 }
 
 // WriteProvisionedResources writes the provisioned state to a local file path.
-func (y *YAMLArchitectureIO) WriteProvisionedResources(ctx context.Context, filePath string, resources *ProvisionedResources) error {
-	file, err := os.Create(filePath)
+func (y *YAMLArchitectureIO) WriteProvisionedResources(ctx context.Context, resources *ProvisionedResources) error {
+	file, err := os.Create(y.outputFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to create output file at '%s': %w", filePath, err)
+		return fmt.Errorf("failed to create output file at '%s': %w", y.outputFilePath, err)
 	}
 	defer file.Close()
 
@@ -107,7 +109,7 @@ func (y *YAMLArchitectureIO) WriteProvisionedResources(ctx context.Context, file
 	}
 
 	if err := y.template.Execute(file, data); err != nil {
-		return fmt.Errorf("failed to execute template and write to '%s': %w", filePath, err)
+		return fmt.Errorf("failed to execute template and write to '%s': %w", y.outputFilePath, err)
 	}
 	return nil
 }
