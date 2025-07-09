@@ -51,13 +51,15 @@ type YAMLArchitectureIO struct {
 }
 
 // NewYAMLArchitectureIO creates a new loader that reads and writes local YAML files.
-func NewYAMLArchitectureIO() (*YAMLArchitectureIO, error) {
+func NewYAMLArchitectureIO(inputFilePath, outputFilePath string) (*YAMLArchitectureIO, error) {
 	tmpl, err := template.New("provisioned").Parse(defaultProvisionedTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse internal provisioned resources template: %w", err)
 	}
 	return &YAMLArchitectureIO{
-		template: tmpl,
+		template:       tmpl,
+		inputFilePath:  inputFilePath,
+		outputFilePath: outputFilePath,
 	}, nil
 }
 
