@@ -1,0 +1,16 @@
+package servicemanager
+
+import "context"
+
+// ArchitectureIO defines a generic contract for reading service architecture
+// configurations and writing provisioned resource state.
+type ArchitectureIO interface {
+	// LoadArchitecture loads the complete microservice architecture from a given source (e.g., a file path).
+	LoadArchitecture(ctx context.Context, source string) (*MicroserviceArchitecture, error)
+
+	// LoadResourceGroup loads a single resource group from a given source.
+	LoadResourceGroup(ctx context.Context, source string) (*ResourceGroup, error)
+
+	// WriteProvisionedResources writes the state of provisioned resources to a given destination (e.g., a file path).
+	WriteProvisionedResources(ctx context.Context, destination string, resources *ProvisionedResources) error
+}
