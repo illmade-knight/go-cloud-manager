@@ -1,0 +1,55 @@
+# Default environment configuration for the entire architecture.
+# These values can be overridden by specific deployment environments.
+name: e2e-full-flow
+project_id: <your-gcp-project-id>
+location: US # Default location for resources like GCS and BigQuery
+
+# A map of all dataflows managed within this architecture.
+dataflows:
+  # The key for each entry is the unique name of the dataflow.
+  enrichment-and-archival-flow:
+    name: enrichment-and-archival-flow
+    description: A full E2E dataflow from ingestion to enrichment, BigQuery, and GCS archival.
+
+    # The lifecycle policy determines how the ServiceManager handles resources during teardown.
+    lifecycle:
+      # 'ephemeral' means 'TeardownAll' will delete these resources.
+      # 'permanent' means they will be skipped during teardown.
+      strategy: ephemeral
+
+    # All cloud resources required by this specific dataflow.
+    resources:
+      topics:
+        - name: ingest-topic
+          description: Raw data from devices before any processing.
+        - name: enriched-output-topic
+          description: Enriched data ready for consumption by multiple services.
+
+      subscriptions:
+        # The enrichment service subscribes to the raw ingestion topic.
+        - name: enrichment-service-subscription
+          topic: ingest-topic
+
+        # The BigQuery service subscribes to the topic with enriched data.
+        - name: bigquery-sink-subscription
+          topic: enriched-output-topic
+
+        # The GCS archival service (IceStore) subscribes to the raw ingestion topic.
+        - name: icestore-archival-subscription
+          topic: ingest-topic
+
+      gcs_buckets:
+        - name: icestore-archive-bucket
+          location: US
+          storage_class: STANDARD
+
+      bigquery_datasets:
+        - name: iot_enriched_data
+
+      bigquery_tables:
+        - name: enriched_device_payloads
+          dataset: iot_enriched_data
+          # This identifier would be used by the manager to look up the Go struct for the schema.
+          schema_source_identifier: "EnrichedTestPayload"
+          clustering_fields:
+            - device_id

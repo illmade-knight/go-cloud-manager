@@ -4,11 +4,12 @@ go 1.23.0
 
 require (
 	cloud.google.com/go/bigquery v1.69.0
+	cloud.google.com/go/cloudbuild v1.22.2
 	cloud.google.com/go/iam v1.5.2
 	cloud.google.com/go/pubsub v1.49.0
 	cloud.google.com/go/storage v1.55.0
 	github.com/google/uuid v1.6.0
-	github.com/illmade-knight/go-iot v0.0.17
+	github.com/illmade-knight/go-iot v0.0.18
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
 	google.golang.org/api v0.240.0

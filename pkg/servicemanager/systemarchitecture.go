@@ -31,9 +31,8 @@ type ResourceGroup struct {
 // MicroserviceArchitecture is the root of the configuration structure.
 type MicroserviceArchitecture struct {
 	Environment
-	ServiceManagerResources ResourceGroup            `yaml:"service_manager,inline"`
-	Dataflows               map[string]ResourceGroup `yaml:"dataflows"`
-	DeploymentEnvironments  map[string]Environment   `yaml:"deployment_environments"`
+	Dataflows              map[string]ResourceGroup `yaml:"dataflows"`
+	DeploymentEnvironments map[string]Environment   `yaml:"deployment_environments"`
 }
 
 // Environment holds configuration specific to a single environment (e.g., test, production).
@@ -52,7 +51,30 @@ type ServiceSpec struct {
 	Description    string                 `yaml:"description,omitempty"`
 	ServiceAccount string                 `yaml:"service_account"`
 	Metadata       map[string]interface{} `yaml:"metadata,omitempty"`
+	Deployment     *DeploymentSpec        `yaml:"deployment,omitempty"` // <-- The new section
 	HealthCheck    *HealthCheckSpec       `yaml:"health_check,omitempty"`
+}
+
+// DeploymentSpec defines how a service container should be deployed.
+// This example is tailored for Google Cloud Run.
+type DeploymentSpec struct {
+	// Platform indicates the deployment target, e.g., "gcp-cloud-run".
+	Platform string `yaml:"platform"`
+
+	// Image is the full path to the Docker container image.
+	// e.g., "us-central1-docker.pkg.dev/my-project/services/my-service:latest"
+	Image string `yaml:"image"`
+
+	// CPU and Memory resource allocations.
+	CPU    string `yaml:"cpu,omitempty"`
+	Memory string `yaml:"memory,omitempty"`
+
+	// Scaling parameters for the service.
+	MinInstances int64 `yaml:"min_instances,omitempty"`
+	MaxInstances int64 `yaml:"max_instances,omitempty"`
+
+	// EnvironmentVars are key-value pairs injected into the container as environment variables.
+	EnvironmentVars map[string]string `yaml:"environment_vars,omitempty"`
 }
 
 // HealthCheckSpec defines the health check configuration for a service.

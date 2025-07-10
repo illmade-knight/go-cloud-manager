@@ -2,12 +2,16 @@ package servicemanager
 
 import "context"
 
+type ArchitectureLoader interface {
+	// LoadArchitecture loads the complete microservice architecture from a given source (e.g., a file path).
+	LoadArchitecture(ctx context.Context) (*MicroserviceArchitecture, error)
+}
+
 // ArchitectureIO defines a generic contract for reading service architecture
 // configurations and writing provisioned resource state.
 type ArchitectureIO interface {
 	// LoadArchitecture loads the complete microservice architecture from a given source (e.g., a file path).
-	LoadArchitecture(ctx context.Context) (*MicroserviceArchitecture, error)
-
+	ArchitectureLoader
 	// LoadResourceGroup loads a single resource group from a given source.
 	LoadResourceGroup(ctx context.Context, groupName string) (*ResourceGroup, error)
 

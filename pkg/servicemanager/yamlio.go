@@ -45,35 +45,51 @@ ProvisionedBigQueryTables:
 
 // YAMLArchitectureIO implements the ArchitectureIO interface for local YAML files.
 type YAMLArchitectureIO struct {
-	template       *template.Template
-	inputFilePath  string
-	outputFilePath string
+	template          *template.Template
+	hubFilePath       string
+	dataflowFilePaths []string
+	outputFilePath    string
 }
 
 // NewYAMLArchitectureIO creates a new loader that reads and writes local YAML files.
-func NewYAMLArchitectureIO(inputFilePath, outputFilePath string) (*YAMLArchitectureIO, error) {
+func NewYAMLArchitectureIO(hubFilePath string, dataflowFilePaths []string, outputFilePath string) (*YAMLArchitectureIO, error) {
 	tmpl, err := template.New("provisioned").Parse(defaultProvisionedTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse internal provisioned resources template: %w", err)
 	}
 	return &YAMLArchitectureIO{
-		template:       tmpl,
-		inputFilePath:  inputFilePath,
-		outputFilePath: outputFilePath,
+		template:          tmpl,
+		hubFilePath:       hubFilePath,
+		dataflowFilePaths: dataflowFilePaths,
+		outputFilePath:    outputFilePath,
 	}, nil
 }
 
 // LoadArchitecture reads the full architecture from a local file path.
 func (y *YAMLArchitectureIO) LoadArchitecture(ctx context.Context) (*MicroserviceArchitecture, error) {
-	data, err := os.ReadFile(y.inputFilePath)
+	// Step 1: Read the main "hub" file for top-level environment info.
+	hubData, err := os.ReadFile(y.hubFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read architecture file '%s': %w", y.inputFilePath, err)
+		return nil, fmt.Errorf("failed to read hub architecture file '%s': %w", y.hubFilePath, err)
 	}
 
 	var arch MicroserviceArchitecture
-	if err := yaml.Unmarshal(data, &arch); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal architecture YAML from '%s': %w", y.inputFilePath, err)
+	if err := yaml.Unmarshal(hubData, &arch); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal hub architecture YAML from '%s': %w", y.hubFilePath, err)
 	}
+
+	// Step 2: Initialize the Dataflows map.
+	arch.Dataflows = make(map[string]ResourceGroup)
+
+	// Step 3: Iterate through the configured dataflow file paths and load each one.
+	for _, dfPath := range y.dataflowFilePaths {
+		group, err := y.LoadResourceGroup(ctx, dfPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load group '%s': %w", dfPath, err)
+		}
+		arch.Dataflows[group.Name] = *group
+	}
+
 	return &arch, nil
 }
 
@@ -84,11 +100,11 @@ func (y *YAMLArchitectureIO) LoadResourceGroup(ctx context.Context, filePath str
 		return nil, fmt.Errorf("failed to read resource group file '%s': %w", filePath, err)
 	}
 
-	var group ResourceGroup
-	if err := yaml.Unmarshal(data, &group); err != nil {
+	group := &ResourceGroup{}
+	if err := yaml.Unmarshal(data, group); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal resource group YAML from '%s': %w", filePath, err)
 	}
-	return &group, nil
+	return group, nil
 }
 
 // WriteProvisionedResources writes the provisioned state to a local file path.

@@ -241,10 +241,14 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 					Field: tableCfg.TimePartitioningField,
 					Type:  bigquery.TimePartitioningType(tableCfg.TimePartitioningType),
 				},
-				Clustering: &bigquery.Clustering{
-					Fields: tableCfg.ClusteringFields,
-				},
 				Labels: tableCfg.Labels,
+			}
+
+			// ...and then conditionally adds clustering only if fields are specified.
+			if len(tableCfg.ClusteringFields) > 0 {
+				meta.Clustering = &bigquery.Clustering{
+					Fields: tableCfg.ClusteringFields,
+				}
 			}
 
 			m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Creating table...")

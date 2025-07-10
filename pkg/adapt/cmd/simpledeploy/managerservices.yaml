@@ -1,0 +1,12 @@
+# pkg/servicemanager/services.yaml
+name: "minimal-deployment-test"
+description: "A minimal services definition for orchestrator testing."
+default_project_id: your-gcp-project-id # IMPORTANT: Replace with your actual GCP Project ID
+default_location: eu-west1 # Default location for regional resources (e.g., BigQuery, GCS)
+default_region: eu-west1 # Default region for regional resources (e.g., Pub/Sub, Cloud Run)
+
+# leave service_account empty and the service will automatically create appropriate ones
+# if service_account is filled in iam_access in resource should match directly
+services:
+  - name: servicedirector
+    #service_account: "analysis-sa@your-gcp-project.iam.gserviceaccount.com"
