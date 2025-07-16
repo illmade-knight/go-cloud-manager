@@ -8,4 +8,6 @@ type IAMClient interface {
 	EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error)
 	AddResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error
 	RemoveResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error
+
+	AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error
 }

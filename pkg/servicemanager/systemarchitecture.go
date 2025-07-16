@@ -61,6 +61,8 @@ type DeploymentSpec struct {
 	// Platform indicates the deployment target, e.g., "gcp-cloud-run".
 	Platform string `yaml:"platform"`
 
+	SourcePath string `yaml:"source_path"`
+
 	// Image is the full path to the Docker container image.
 	// e.g., "us-central1-docker.pkg.dev/my-project/services/my-service:latest"
 	Image string `yaml:"image"`
@@ -75,6 +77,11 @@ type DeploymentSpec struct {
 
 	// EnvironmentVars are key-value pairs injected into the container as environment variables.
 	EnvironmentVars map[string]string `yaml:"environment_vars,omitempty"`
+
+	// e.g GOOGLE_BUILDABLE : "./cmd/servicedirector"
+	BuildEnvironmentVars map[string]string `yaml:"build_environment_vars,omitempty"`
+
+	BuildableModulePath string `yaml:"buildable_module_path,omitempty"` // <-- Add this field
 }
 
 // HealthCheckSpec defines the health check configuration for a service.

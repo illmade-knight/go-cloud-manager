@@ -27,7 +27,7 @@ func checkGCPAuth(t *testing.T) string {
 	if projectID == "" {
 		t.Skip("Skipping real integration test: GCP_PROJECT_ID environment variable is not set")
 	}
-	// A simple client creation is enough to check basic auth config
+	// A simple adminClient creation is enough to check basic auth config
 	// without performing a full API call like listing resources.
 	_, err := pubsub.NewClient(context.Background(), projectID)
 	if err != nil {
@@ -35,7 +35,7 @@ func checkGCPAuth(t *testing.T) string {
 		---------------------------------------------------------------------
 		GCP AUTHENTICATION FAILED!
 		---------------------------------------------------------------------
-		Could not create a Google Cloud client. This is likely due to
+		Could not create a Google Cloud adminClient. This is likely due to
 		expired or missing Application Default Credentials (ADC).
 
 		To fix this, please run 'gcloud auth application-default login'.
@@ -103,7 +103,7 @@ func TestGoogleIAMClient_RealIntegration_FullLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("Successfully created topic: %s", topicName)
 
-	// 3. Use our client to add the IAM binding. This is the main action we are testing.
+	// 3. Use our adminClient to add the IAM binding. This is the main action we are testing.
 	member := "serviceAccount:" + saEmail
 	role := "roles/pubsub.publisher"
 	err = iamClient.AddResourceIAMBinding(ctx, "pubsub_topic", topicName, role, member)

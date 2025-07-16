@@ -31,6 +31,11 @@ func (m *MockIAMClient) RemoveResourceIAMBinding(ctx context.Context, resourceTy
 	return args.Error(0)
 }
 
+func (m *MockIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
+	args := m.Called(ctx, location, repositoryID, role, member)
+	return args.Error(0)
+}
+
 func TestIAMManager_ApplyIAMForService(t *testing.T) {
 	// --- Arrange ---
 	mockClient := new(MockIAMClient)
