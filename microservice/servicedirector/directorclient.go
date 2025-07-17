@@ -36,6 +36,11 @@ func NewClient(baseURL string, logger zerolog.Logger) (*Client, error) {
 	}, nil
 }
 
+type VerifyDataflowRequest struct {
+	DataflowName string `json:"dataflow_name"`
+	ServiceName  string `json:"service_name"` // Included for logging/auditing
+}
+
 // VerifyDataflow contacts the Director to ensure all resources for a given
 // dataflow are created and available.
 func (c *Client) VerifyDataflow(ctx context.Context, dataflowName, serviceName string) error {

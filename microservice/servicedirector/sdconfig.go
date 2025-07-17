@@ -2,24 +2,28 @@ package servicedirector
 
 import (
 	"flag"
-	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"os"
 	"strings"
 
+	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"github.com/rs/zerolog/log"
 )
 
 // Config holds all configuration for the Director itself.
 type Config struct {
-	microservice.BaseConfig // Embed BaseConfig for common fields
+	microservice.BaseConfig
 
-	ServicesDefSourceType string `mapstructure:"services_def_source_type"`
-	ServicesDefPath       string `mapstructure:"services_def_path"`
-	Environment           string `mapstructure:"environment"`
+	ServicesDefSourceType string
+	ServicesDefPath       string
+	Environment           string
+
+	// New fields for the command infrastructure
+	CommandTopic        string
+	CommandSubscription string
 
 	Firestore struct {
-		CollectionPath string `mapstructure:"collection_path"`
-	} `mapstructure:"firestore"`
+		CollectionPath string
+	}
 }
 
 // NewConfig creates a new Config instance, loading values from defaults,
@@ -28,27 +32,28 @@ func NewConfig() (*Config, error) {
 	// 1. Start with a struct containing all default values.
 	cfg := &Config{
 		BaseConfig: microservice.BaseConfig{
-			LogLevel:        "info",
-			HTTPPort:        ":8080",
-			ProjectID:       "default-gcp-project",
-			CredentialsFile: "",
+			LogLevel:  "info",
+			HTTPPort:  ":8080",
+			ProjectID: "default-gcp-project",
 		},
 		ServicesDefSourceType: "yaml",
 		ServicesDefPath:       "services.yaml",
 		Environment:           "dev",
+		CommandTopic:          "director-commands",
+		CommandSubscription:   "director-command-sub",
 	}
 	cfg.Firestore.CollectionPath = "service-definitions"
 
 	// 2. Define flags to override defaults.
-	// We use the default values from the struct to populate the flag help text.
 	flag.StringVar(&cfg.Environment, "environment", cfg.Environment, "Operational environment (e.g., dev, prod)")
-	flag.StringVar(&cfg.ProjectID, "project-id", cfg.ProjectID, "GCP Project ID for Director's own operations")
+	flag.StringVar(&cfg.ProjectID, "project-id", cfg.ProjectID, "GCP Project ID")
 	flag.StringVar(&cfg.ServicesDefPath, "services-def-path", cfg.ServicesDefPath, "Path to services definition YAML file")
 	flag.StringVar(&cfg.HTTPPort, "http-port", cfg.HTTPPort, "HTTP health check port for Director")
+	flag.StringVar(&cfg.CommandTopic, "command-topic", cfg.CommandTopic, "Pub/Sub topic for director commands")
+	flag.StringVar(&cfg.CommandSubscription, "command-sub", cfg.CommandSubscription, "Pub/Sub subscription for director commands")
 	flag.Parse()
 
 	// 3. Override with environment variables if they are set.
-	// This creates a clear hierarchy: ENV > flag > default.
 	if envVal := os.Getenv("SD_ENVIRONMENT"); envVal != "" {
 		cfg.Environment = envVal
 	}
@@ -59,11 +64,16 @@ func NewConfig() (*Config, error) {
 		cfg.ServicesDefPath = envVal
 	}
 	if envVal := os.Getenv("SD_HTTP_PORT"); envVal != "" {
-		// Ensure the port starts with a colon if it doesn't already.
 		if !strings.HasPrefix(envVal, ":") {
 			envVal = ":" + envVal
 		}
 		cfg.HTTPPort = envVal
+	}
+	if envVal := os.Getenv("SD_COMMAND_TOPIC"); envVal != "" {
+		cfg.CommandTopic = envVal
+	}
+	if envVal := os.Getenv("SD_COMMAND_SUB"); envVal != "" {
+		cfg.CommandSubscription = envVal
 	}
 
 	// 4. Finally, Cloud Run's special 'PORT' variable takes highest precedence.
