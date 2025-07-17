@@ -157,14 +157,24 @@ func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID strin
 }
 
 // DeployServiceDirector handles the special bootstrap deployment of the ServiceDirector.
-func (o *Orchestrator) DeployServiceDirector(ctx context.Context, modulePath string) (string, error) {
-	o.logger.Info().Msg("Bootstrapping ServiceDirector deployment...")
+// It now accepts a suffix for the service name and returns the full name for teardown.
+func (o *Orchestrator) DeployServiceDirector(ctx context.Context, modulePath, nameSuffix string) (string, string, error) {
+	o.stateChan <- StateDeployingServiceDirector
+
 	serviceName := "service-director"
+	if nameSuffix != "" {
+		serviceName = fmt.Sprintf("%s-%s", serviceName, nameSuffix)
+	}
+	o.logger.Info().Str("service_name", serviceName).Msg("Bootstrapping ServiceDirector deployment...")
+
 	runtimeSA := "service-director-sa"
+	if nameSuffix != "" {
+		runtimeSA = fmt.Sprintf("%s-%s", runtimeSA, nameSuffix)
+	}
 
 	runtimeSAEmail, err := o.iam.EnsureServiceAccountExists(ctx, runtimeSA)
 	if err != nil {
-		return "", fmt.Errorf("failed to ensure servicedirector sa: %w", err)
+		return "", "", fmt.Errorf("failed to ensure servicedirector sa: %w", err)
 	}
 
 	imageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", o.cfg.Region, o.cfg.ProjectID, o.cfg.ImageRepo, serviceName, uuid.New().String()[:8])
@@ -174,9 +184,10 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, modulePath str
 		Image:      imageTag,
 		CPU:        "1",
 		Memory:     "512Mi",
-		BuildEnvironmentVars: map[string]string{
-			"GOOGLE_BUILDABLE": modulePath,
-		},
+		//BuildEnvironmentVars: map[string]string{
+		//	"GOOGLE_BUILDABLE": modulePath,
+		//},
+		BuildableModulePath: modulePath,
 		EnvironmentVars: map[string]string{
 			"PROJECT_ID":          o.cfg.ProjectID,
 			"SD_COMMAND_TOPIC":    o.cfg.CommandTopic,
@@ -186,14 +197,23 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, modulePath str
 
 	serviceURL, err := o.deployer.Deploy(ctx, serviceName, "", runtimeSAEmail, spec)
 	if err != nil {
-		return "", fmt.Errorf("servicedirector deployment failed: %w", err)
+		o.stateChan <- StateError
+		return "", "", fmt.Errorf("servicedirector deployment failed: %w", err)
 	}
 
 	if err := o.awaitRevisionReady(ctx, serviceName); err != nil {
-		return "", fmt.Errorf("servicedirector never became healthy: %w", err)
+		o.stateChan <- StateError
+		return "", "", fmt.Errorf("servicedirector never became healthy: %w", err)
 	}
+
 	o.stateChan <- StateServiceDirectorReady
-	return serviceURL, nil
+	return serviceName, serviceURL, nil
+}
+
+// TeardownServiceDirector handles the deletion of a deployed ServiceDirector.
+func (o *Orchestrator) TeardownServiceDirector(ctx context.Context, serviceName string) error {
+	o.logger.Info().Str("service_name", serviceName).Msg("Tearing down ServiceDirector...")
+	return o.deployer.Teardown(ctx, serviceName)
 }
 
 // TriggerDataflowSetup publishes a command to the ServiceDirector to begin setting up resources.

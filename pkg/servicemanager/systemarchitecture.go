@@ -79,9 +79,10 @@ type DeploymentSpec struct {
 	EnvironmentVars map[string]string `yaml:"environment_vars,omitempty"`
 
 	// e.g GOOGLE_BUILDABLE : "./cmd/servicedirector"
-	BuildEnvironmentVars map[string]string `yaml:"build_environment_vars,omitempty"`
+	// we're not using this so remove it for now to avoid complications
+	//BuildEnvironmentVars map[string]string `yaml:"build_environment_vars,omitempty"`
 
-	BuildableModulePath string `yaml:"buildable_module_path,omitempty"` // <-- Add this field
+	BuildableModulePath string `yaml:"buildable_module_path,omitempty"`
 }
 
 // HealthCheckSpec defines the health check configuration for a service.

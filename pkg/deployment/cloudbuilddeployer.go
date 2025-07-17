@@ -254,55 +254,68 @@ func (d *CloudBuildDeployer) uploadSourceToGCS(ctx context.Context, sourceDir, b
 	}
 	return w.Close()
 }
-
 func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObject, serviceAccount string, spec servicemanager.DeploymentSpec) error {
 	d.logger.Info().Str("service account", serviceAccount).Msg("Triggering Cloud Build")
 
-	// This path must not be empty. It tells the build where the application lives.
-	if spec.BuildableModulePath == "" {
-		return errors.New("BuildableModulePath cannot be empty in DeploymentSpec")
-	}
+	var buildSteps []*cloudbuildpb.BuildStep
 
-	// This is the command for the final build step.
-	mainBuildCommand := fmt.Sprintf(
-		"pack build %s --path %s",
-		spec.Image,
-		spec.BuildableModulePath,
-	)
-
-	// Start with the standard two-step build process.
-	buildSteps := []*cloudbuildpb.BuildStep{
-		{
-			Name:       "gcr.io/k8s-skaffold/pack",
-			Id:         "pre-buildpack",
-			Entrypoint: "sh",
-			Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
-		},
-		{
-			Name:       "gcr.io/k8s-skaffold/pack",
-			Id:         "build",
-			Entrypoint: "sh",
-			Args:       []string{"-c", mainBuildCommand},
-		},
-	}
-
-	// If we are building a module in a subdirectory, prepend the copy step.
+	// This logic decides which build strategy to use based on the spec.
 	if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
-		d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Prepending 'copy-module-files' step for monorepo build")
-		copyStep := &cloudbuildpb.BuildStep{
-			Name:       "gcr.io/cloud-builders/gcloud",
-			Id:         "copy-module-files",
-			Entrypoint: "bash",
-			Args: []string{
-				"-c",
-				// This robust command copies go.sum only if it exists.
-				fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
+		// --- STRATEGY FOR MONOREPO SUBDIRECTORY ---
+		d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Using 3-step monorepo build strategy")
+
+		mainBuildCommand := fmt.Sprintf("pack build %s --path %s", spec.Image, spec.BuildableModulePath)
+
+		buildSteps = []*cloudbuildpb.BuildStep{
+			// Step 1: Copy the Go module files into the application directory.
+			{
+				Name:       "gcr.io/cloud-builders/gcloud",
+				Id:         "copy-module-files",
+				Entrypoint: "bash",
+				Args: []string{
+					"-c",
+					// This robust command copies go.sum only if it exists.
+					fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
+				},
+			},
+			// Step 2: Prepare the pack builder.
+			{
+				Name:       "gcr.io/k8s-skaffold/pack",
+				Id:         "pre-buildpack",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
+			},
+			// Step 3: Run the build, focused on the prepared application directory.
+			{
+				Name:       "gcr.io/k8s-skaffold/pack",
+				Id:         "build",
+				Entrypoint: "sh",
+				Args:       []string{"-c", mainBuildCommand},
 			},
 		}
-		// Prepend the copy step to the beginning of the slice.
-		buildSteps = append([]*cloudbuildpb.BuildStep{copyStep}, buildSteps...)
+	} else {
+		// --- STRATEGY FOR SIMPLE/ROOT APPLICATION ---
+		d.logger.Info().Msg("Using simple 2-step build strategy for root application")
+
+		mainBuildCommand := fmt.Sprintf("pack build %s", spec.Image)
+
+		buildSteps = []*cloudbuildpb.BuildStep{
+			{
+				Name:       "gcr.io/k8s-skaffold/pack",
+				Id:         "pre-buildpack",
+				Entrypoint: "sh",
+				Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
+			},
+			{
+				Name:       "gcr.io/k8s-skaffold/pack",
+				Id:         "build",
+				Entrypoint: "sh",
+				Args:       []string{"-c", mainBuildCommand},
+			},
+		}
 	}
 
+	// Now, construct the final build request with the correct steps.
 	req := &cloudbuildpb.CreateBuildRequest{
 		ProjectId: d.projectID,
 		Build: &cloudbuildpb.Build{
