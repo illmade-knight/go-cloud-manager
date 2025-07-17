@@ -3,8 +3,6 @@
 package servicemanager_test
 
 import (
-	"cloud.google.com/go/bigquery"
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
 	"github.com/google/uuid"
@@ -74,16 +72,18 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 	gcsConfig := emulators.GetDefaultGCSConfig(projectID, "")
 	gcsConnection := emulators.SetupGCSEmulator(t, ctx, gcsConfig)
 	// This line is now corrected to include the necessary gcsConfig argument.
-	gcsClient := emulators.GetStorageClient(t, ctx, gcsConfig, gcsConnection.ClientOptions)
+	//gcsClient := emulators.GetStorageClient(t, ctx, gcsConfig, gcsConnection.ClientOptions)
+	gcsClient, err := servicemanager.CreateGoogleGCSClient(ctx, gcsConnection.ClientOptions...)
+	require.NoError(t, err)
 	defer gcsClient.Close()
 
 	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
-	psClient, err := pubsub.NewClient(ctx, projectID, psConnection.ClientOptions...)
+	psClient, err := servicemanager.CreateGoogleMessagingClient(ctx, projectID, psConnection.ClientOptions...)
 	require.NoError(t, err)
 	defer psClient.Close()
 
 	bqConnection := emulators.SetupBigQueryEmulator(t, ctx, emulators.GetDefaultBigQueryConfig(projectID, nil, nil))
-	bqClient, err := bigquery.NewClient(ctx, projectID, bqConnection.ClientOptions...)
+	bqClient, err := servicemanager.CreateGoogleBigQueryClient(ctx, projectID, bqConnection.ClientOptions...)
 	require.NoError(t, err)
 	defer bqClient.Close()
 
@@ -92,7 +92,9 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 	schemaRegistry := map[string]interface{}{"TestSchema": types.GardenMonitorReadings{}}
 
 	// Use the production constructor, which creates all sub-managers internally.
-	sm, err := servicemanager.NewServiceManager(ctx, arch.Environment, schemaRegistry, nil, logger)
+
+	// CORRECTED: Use the constructor designed for testing with pre-configured clients.
+	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, arch.Environment, schemaRegistry, nil, logger)
 	require.NoError(t, err)
 
 	// --- 4. CREATE all resources for the entire architecture ---
@@ -108,7 +110,7 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 
 	// --- 5. VERIFY that all resources from both dataflows now exist ---
 	t.Log("--- Verifying resource existence in emulators ---")
-	// Dataflow 1 resources
+	// Dataflow 1 resource
 	_, err = gcsClient.Bucket(df1Bucket).Attrs(ctx)
 	assert.NoError(t, err, "Ephemeral GCS bucket should exist after setup")
 	topicExists, err := psClient.Topic(df1Topic).Exists(ctx)

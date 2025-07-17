@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/illmade-knight/go-cloud-manager/microservice"
+	"github.com/rs/zerolog/log"
 	"net/http"
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 )
@@ -18,6 +19,13 @@ import (
 type Command struct {
 	Name         string `json:"command"` // e.g., "setup", "teardown"
 	DataflowName string `json:"dataflow_name"`
+}
+
+// CompletionEvent is the message published by the Director after a task is done.
+type CompletionEvent struct {
+	Status       string `json:"status"` // "success" or "failure"
+	DataflowName string `json:"dataflow_name"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // Director implements the builder.Service interface for our main application.
@@ -30,8 +38,9 @@ type Director struct {
 	pubsubClient   *pubsub.Client
 }
 
-// NewServiceDirector creates and initializes a new Director instance.
-func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, schemaRegistry map[string]interface{}, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
+// NewServiceDirector creates and initializes a new Director instance. It's now the single
+// entry point for creating the director, ensuring its command subscription always exists.
+func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
 
 	arch, err := loader.LoadArchitecture(ctx)
@@ -40,9 +49,10 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	}
 	logger.Info().Str("projectID", arch.ProjectID).Msg("loaded project architecture")
 
-	sm, err := servicemanager.NewServiceManager(ctx, arch.Environment, schemaRegistry, nil, directorLogger)
+	// Ensure the subscription for listening to commands exists.
+	err = ensureCommandSubscriptionExists(ctx, psClient, cfg.CommandTopic, cfg.CommandSubscription)
 	if err != nil {
-		return nil, fmt.Errorf("director: failed to create ServiceManager: %w", err)
+		return nil, fmt.Errorf("director failed to ensure its own command subscription: %w", err)
 	}
 
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
@@ -72,12 +82,41 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	return d, nil
 }
 
+// ensureCommandSubscriptionExists creates the subscription that the ServiceDirector needs to function.
+func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string) error {
+	topic := psClient.Topic(topicID)
+	exists, err := topic.Exists(ctx)
+	if err != nil {
+		return fmt.Errorf("could not check for command topic %s: %w", topicID, err)
+	}
+	if !exists {
+		return fmt.Errorf("command topic %s does not exist; it must be created by the orchestrator", topicID)
+	}
+
+	sub := psClient.Subscription(subID)
+	exists, err = sub.Exists(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check for subscription %s: %w", subID, err)
+	}
+	if !exists {
+		log.Info().Str("subscription", subID).Msg("Command subscription not found, creating it now.")
+		_, err = psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
+			Topic:       topic,
+			AckDeadline: 20 * time.Second,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create command subscription %s: %w", subID, err)
+		}
+	}
+	return nil
+}
+
 func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
 	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' command...")
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	if dataflowName == "all" {
+	if dataflowName == "all" || dataflowName == "" {
 		_, err := d.serviceManager.SetupAll(ctx, d.architecture)
 		return err
 	}
@@ -90,7 +129,7 @@ func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName strin
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	if dataflowName == "all" {
+	if dataflowName == "all" || dataflowName == "" {
 		return d.serviceManager.TeardownAll(ctx, d.architecture)
 	}
 	return d.serviceManager.TeardownDataflow(ctx, d.architecture, dataflowName)
@@ -112,13 +151,13 @@ func (d *Director) listenForCommands(ctx context.Context) {
 
 		switch cmd.Name {
 		case "setup":
-			if err := d.handleSetupCommand(ctx, cmd.DataflowName); err != nil {
-				d.logger.Error().Err(err).Str("dataflow", cmd.DataflowName).Msg("Setup command failed")
-			}
+			err := d.handleSetupCommand(ctx, cmd.DataflowName)
+			d.publishCompletionEvent(ctx, cmd.DataflowName, err)
+
 		case "teardown":
-			if err := d.handleTeardownCommand(ctx, cmd.DataflowName); err != nil {
-				d.logger.Error().Err(err).Str("dataflow", cmd.DataflowName).Msg("Teardown command failed")
-			}
+			err := d.handleTeardownCommand(ctx, cmd.DataflowName)
+			d.publishCompletionEvent(ctx, cmd.DataflowName, err)
+
 		default:
 			d.logger.Warn().Str("command", cmd.Name).Msg("Received unknown command")
 		}
@@ -129,6 +168,35 @@ func (d *Director) listenForCommands(ctx context.Context) {
 	} else {
 		d.logger.Info().Msg("Command listener shut down gracefully.")
 	}
+}
+
+func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error) {
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Publishing completion event...")
+	topic := d.pubsubClient.Topic(d.config.CompletionTopic)
+	defer topic.Stop()
+
+	event := CompletionEvent{
+		DataflowName: dataflowName,
+		Status:       "success",
+	}
+	if commandErr != nil {
+		event.Status = "failure"
+		event.ErrorMessage = commandErr.Error()
+	}
+
+	eventData, marshErr := json.Marshal(event)
+	if marshErr != nil {
+		d.logger.Error().Err(marshErr).Msg("Failed to marshal completion event")
+		return
+	}
+
+	result := topic.Publish(ctx, &pubsub.Message{Data: eventData})
+	msgID, getErr := result.Get(ctx)
+	if getErr != nil {
+		d.logger.Error().Err(getErr).Msg("Failed to publish completion event")
+		return
+	}
+	d.logger.Info().Str("message_id", msgID).Str("status", event.Status).Msg("Completion event published.")
 }
 
 // Shutdown now also closes the Pub/Sub client.
@@ -165,6 +233,7 @@ func (d *Director) teardownHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("All ephemeral dataflows teardown successfully triggered."))
 }
 
+// verifyHandler handles requests from microservices to verify their dataflow resources.
 func (d *Director) verifyHandler(w http.ResponseWriter, r *http.Request) {
 	var req VerifyDataflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

@@ -2,10 +2,10 @@ package servicedirector
 
 import (
 	"flag"
+	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"os"
 	"strings"
 
-	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"github.com/rs/zerolog/log"
 )
 
@@ -17,9 +17,10 @@ type Config struct {
 	ServicesDefPath       string
 	Environment           string
 
-	// New fields for the command infrastructure
 	CommandTopic        string
 	CommandSubscription string
+	// Add this field for the completion event topic
+	CompletionTopic string
 
 	Firestore struct {
 		CollectionPath string
@@ -41,6 +42,7 @@ func NewConfig() (*Config, error) {
 		Environment:           "dev",
 		CommandTopic:          "director-commands",
 		CommandSubscription:   "director-command-sub",
+		CompletionTopic:       "director-events", // Default name for the completion topic
 	}
 	cfg.Firestore.CollectionPath = "service-definitions"
 
@@ -51,6 +53,7 @@ func NewConfig() (*Config, error) {
 	flag.StringVar(&cfg.HTTPPort, "http-port", cfg.HTTPPort, "HTTP health check port for Director")
 	flag.StringVar(&cfg.CommandTopic, "command-topic", cfg.CommandTopic, "Pub/Sub topic for director commands")
 	flag.StringVar(&cfg.CommandSubscription, "command-sub", cfg.CommandSubscription, "Pub/Sub subscription for director commands")
+	flag.StringVar(&cfg.CompletionTopic, "completion-topic", cfg.CompletionTopic, "Pub/Sub topic for director completion events") // New flag
 	flag.Parse()
 
 	// 3. Override with environment variables if they are set.
@@ -74,6 +77,9 @@ func NewConfig() (*Config, error) {
 	}
 	if envVal := os.Getenv("SD_COMMAND_SUB"); envVal != "" {
 		cfg.CommandSubscription = envVal
+	}
+	if envVal := os.Getenv("SD_COMPLETION_TOPIC"); envVal != "" {
+		cfg.CompletionTopic = envVal
 	}
 
 	// 4. Finally, Cloud Run's special 'PORT' variable takes highest precedence.

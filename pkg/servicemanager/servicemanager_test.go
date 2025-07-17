@@ -38,7 +38,7 @@ func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *Moc
 		},
 	}
 
-	manager, err := servicemanager.NewServiceManagerFromManagers(mockMsg, mockStore, mockBq, zerolog.Nop())
+	manager, err := servicemanager.NewServiceManagerFromManagers(mockMsg, mockStore, mockBq, nil, zerolog.Nop())
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
