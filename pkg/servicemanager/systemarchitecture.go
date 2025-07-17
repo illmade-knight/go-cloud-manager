@@ -30,7 +30,7 @@ type ResourceGroup struct {
 
 // MicroserviceArchitecture is the root of the configuration structure.
 type MicroserviceArchitecture struct {
-	Environment
+	Environment            `yaml:",inline"`
 	Dataflows              map[string]ResourceGroup `yaml:"dataflows"`
 	DeploymentEnvironments map[string]Environment   `yaml:"deployment_environments"`
 }
@@ -130,13 +130,13 @@ type CloudResource struct {
 
 // TopicConfig defines the configuration for a Pub/Sub topic.
 type TopicConfig struct {
-	CloudResource
+	CloudResource   `yaml:",inline"`
 	ProducerService string `yaml:"producer_service,omitempty"`
 }
 
 // SubscriptionConfig defines the configuration for a Pub/Sub subscription.
 type SubscriptionConfig struct {
-	CloudResource
+	CloudResource      `yaml:",inline"`
 	Topic              string           `yaml:"topic"`
 	AckDeadlineSeconds int              `yaml:"ack_deadline_seconds,omitempty"`
 	MessageRetention   Duration         `yaml:"message_retention_duration,omitempty"`
@@ -152,13 +152,13 @@ type RetryPolicySpec struct {
 
 // BigQueryDataset defines the configuration for a BigQuery dataset.
 type BigQueryDataset struct {
-	CloudResource
-	Location string `yaml:"location,omitempty"`
+	CloudResource `yaml:",inline"`
+	Location      string `yaml:"location,omitempty"`
 }
 
 // BigQueryTable defines the configuration for a BigQuery table.
 type BigQueryTable struct {
-	CloudResource
+	CloudResource          `yaml:",inline"`
 	Dataset                string   `yaml:"dataset"`
 	SchemaSourceType       string   `yaml:"schema_source_type"`
 	SchemaSourceIdentifier string   `yaml:"schema_source_identifier"`
@@ -170,7 +170,7 @@ type BigQueryTable struct {
 
 // GCSBucket defines the configuration for a GCS bucket.
 type GCSBucket struct {
-	CloudResource
+	CloudResource     `yaml:",inline"`
 	Location          string `yaml:"location,omitempty"`
 	StorageClass      string `yaml:"storage_class,omitempty"`
 	VersioningEnabled bool   `yaml:"versioning_enabled,omitempty"`
@@ -178,19 +178,19 @@ type GCSBucket struct {
 
 // LifecycleAction represents an action in a lifecycle rule.
 type LifecycleAction struct {
-	Type string // e.g., "Delete"
+	Type string `yaml:"type"` // e.g., "Delete"
 }
 
 // LifecycleCondition represents the conditions for a lifecycle rule.
 type LifecycleCondition struct {
-	AgeInDays int
+	AgeInDays int `yaml:"age_in_days,omitempty"`
 	// Other common conditions can be added here (e.g., CreatedBefore, Liveness).
 }
 
 // LifecycleRule combines an action and a condition.
 type LifecycleRule struct {
-	Action    LifecycleAction
-	Condition LifecycleCondition
+	Action    LifecycleAction    `yaml:"action"`
+	Condition LifecycleCondition `yaml:"condition"`
 }
 
 // Duration is a custom type that wraps time.Duration to implement yaml.Unmarshaler.

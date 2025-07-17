@@ -14,18 +14,19 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/rs/zerolog"
+
 	"cloud.google.com/go/cloudbuild/apiv1/v2"
 	"cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	"cloud.google.com/go/longrunning/autogen"
 	"cloud.google.com/go/storage"
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/rs/zerolog"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	longrunningpb "google.golang.org/genproto/googleapis/longrunning"
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 )
 
 // CloudBuildDeployer implements the ContainerDeployer interface using Google Cloud services.
@@ -269,6 +270,39 @@ func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObj
 		spec.BuildableModulePath,
 	)
 
+	// Start with the standard two-step build process.
+	buildSteps := []*cloudbuildpb.BuildStep{
+		{
+			Name:       "gcr.io/k8s-skaffold/pack",
+			Id:         "pre-buildpack",
+			Entrypoint: "sh",
+			Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
+		},
+		{
+			Name:       "gcr.io/k8s-skaffold/pack",
+			Id:         "build",
+			Entrypoint: "sh",
+			Args:       []string{"-c", mainBuildCommand},
+		},
+	}
+
+	// If we are building a module in a subdirectory, prepend the copy step.
+	if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
+		d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Prepending 'copy-module-files' step for monorepo build")
+		copyStep := &cloudbuildpb.BuildStep{
+			Name:       "gcr.io/cloud-builders/gcloud",
+			Id:         "copy-module-files",
+			Entrypoint: "bash",
+			Args: []string{
+				"-c",
+				// This robust command copies go.sum only if it exists.
+				fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
+			},
+		}
+		// Prepend the copy step to the beginning of the slice.
+		buildSteps = append([]*cloudbuildpb.BuildStep{copyStep}, buildSteps...)
+	}
+
 	req := &cloudbuildpb.CreateBuildRequest{
 		ProjectId: d.projectID,
 		Build: &cloudbuildpb.Build{
@@ -281,33 +315,7 @@ func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObj
 					},
 				},
 			},
-			// This three-step process is the final, correct recipe for a Go monorepo.
-			Steps: []*cloudbuildpb.BuildStep{
-				// Step 1: Copy the Go module files into the application directory.
-				{
-					Name:       "gcr.io/cloud-builders/gcloud",
-					Id:         "copy-module-files",
-					Entrypoint: "bash",
-					Args: []string{
-						"-c",
-						fmt.Sprintf("cp go.mod go.sum %s/", spec.BuildableModulePath),
-					},
-				},
-				// Step 2: Prepare the pack builder.
-				{
-					Name:       "gcr.io/k8s-skaffold/pack",
-					Id:         "pre-buildpack",
-					Entrypoint: "sh",
-					Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
-				},
-				// Step 3: Run the build, focused on the prepared application directory.
-				{
-					Name:       "gcr.io/k8s-skaffold/pack",
-					Id:         "build",
-					Entrypoint: "sh",
-					Args:       []string{"-c", mainBuildCommand},
-				},
-			},
+			Steps:  buildSteps,
 			Images: []string{spec.Image},
 			Options: &cloudbuildpb.BuildOptions{
 				Logging: cloudbuildpb.BuildOptions_CLOUD_LOGGING_ONLY,

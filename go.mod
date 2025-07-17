@@ -16,8 +16,7 @@ require (
 	github.com/illmade-knight/go-iot v0.0.18
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
-	google.golang.org/api v0.241.0
-	google.golang.org/genproto v0.0.0-20250505200425-f936aa4a68b2
+	google.golang.org/api v0.242.0
 	google.golang.org/grpc v1.74.0
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
@@ -114,6 +113,7 @@ require (
 	golang.org/x/time v0.12.0 // indirect
 	golang.org/x/tools v0.33.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
+	google.golang.org/genproto v0.0.0-20250505200425-f936aa4a68b2 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250603155806-513f23925822 // indirect
 )

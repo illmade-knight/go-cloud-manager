@@ -30,8 +30,11 @@ import (
 )
 
 // --- Test-Local Helper Code ---
-
-var sourcePathFlag = flag.String("source-path", "", "Optional. Path to a local source directory to build and deploy.")
+var (
+	sourcePathFlag = flag.String("source-path", "", "Optional. Path to a local source directory to build and deploy.")
+	regionFlag     = flag.String("region", "us-central1", "The GCP region for the deployment.")
+	imageRepoFlag  = flag.String("image-repo", "test-images", "The Artifact Registry repository name.")
+)
 
 var helloWorldSource = map[string]string{
 	"go.mod": `
@@ -120,11 +123,15 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	// --- Arrange ---
 	runID := uuid.New().String()[:8]
 	serviceName := fmt.Sprintf("it-cb-deployer-svc-%s", runID)
-	region := "us-central1"
+
+	// Use the values from the flags.
+	region := *regionFlag
+	imageRepoName := *imageRepoFlag
+
 	sourceBucketName := fmt.Sprintf("%s_cloudbuild", projectID)
-	imageRepoName := "test-images"
 	imageName := serviceName
 	imageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:latest", region, projectID, imageRepoName, imageName)
+
 	sourceObject := fmt.Sprintf("source/%s-%d.tar.gz", serviceName, time.Now().UnixNano())
 
 	createdCloudBuildPermissions, err := deployment.DiagnoseAndFixCloudBuildPermissions(ctx, projectID, logger)
@@ -134,8 +141,6 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 
 	resourceManager, err := deployment.NewResourceManager()
 	require.NoError(t, err)
-
-	//project, err := resourceManager.GetProject(ctx, projectID)
 
 	projectNumber, err := resourceManager.GetProjectNumber(ctx, projectID)
 	require.NoError(t, err)
@@ -199,27 +204,47 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	saEmail := setupTestRunnerSA(t, ctx, projectID)
 
 	spec := servicemanager.DeploymentSpec{
-		SourcePath: sourcePath,
-		Image:      imageTag,
-		CPU:        "1",
-		Memory:     "512Mi",
+		SourcePath:          sourcePath,
+		Image:               imageTag,
+		CPU:                 "1",
+		Memory:              "512Mi",
+		BuildableModulePath: ".",
 	}
 
 	// Setup full cleanup for all created resources
 	t.Cleanup(func() {
+		// Use a new background context for cleanup to ensure it runs even if the test context timed out.
 		cleanupCtx := context.Background()
 		t.Logf("--- Starting Full Cleanup for %s ---", serviceName)
+
+		// Teardown the Cloud Run service first.
 		assert.NoError(t, deployer.Teardown(cleanupCtx, serviceName), "Teardown of Cloud Run service should not fail")
 
+		// Create a NEW client specifically for the cleanup task.
+		arClientForCleanup, err := artifactregistry.NewClient(cleanupCtx)
+		if err != nil {
+			t.Errorf("Failed to create Artifact Registry client for cleanup: %v", err)
+			return // Cannot proceed if client creation fails
+		}
+		defer arClientForCleanup.Close()
+
 		imagePackageName := fmt.Sprintf("projects/%s/locations/%s/repositories/%s/packages/%s", projectID, region, imageRepoName, imageName)
-		op, err := arClient.DeletePackage(cleanupCtx, &artifactregistrypb.DeletePackageRequest{Name: imagePackageName})
+		op, err := arClientForCleanup.DeletePackage(cleanupCtx, &artifactregistrypb.DeletePackageRequest{Name: imagePackageName})
 		if err == nil {
 			op.Wait(cleanupCtx)
 		} else if status.Code(err) != codes.NotFound {
 			t.Errorf("Failed to trigger Artifact Registry package deletion: %v", err)
 		}
 
-		err = gcsClient.Bucket(sourceBucketName).Object(sourceObject).Delete(cleanupCtx)
+		// Also create a new client for GCS cleanup
+		gcsClientForCleanup, err := storage.NewClient(cleanupCtx)
+		if err != nil {
+			t.Errorf("Failed to create GCS client for cleanup: %v", err)
+			return
+		}
+		defer gcsClientForCleanup.Close()
+
+		err = gcsClientForCleanup.Bucket(sourceBucketName).Object(sourceObject).Delete(cleanupCtx)
 		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			t.Errorf("Failed to delete GCS source object: %v", err)
 		}
