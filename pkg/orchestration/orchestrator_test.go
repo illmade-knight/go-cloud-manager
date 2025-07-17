@@ -98,7 +98,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Use the single, correct constructor for the director.
-	director, err := servicedirector.NewServiceDirector(ctx, directorCfg, loader, sm, psClient, logger)
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, loader, sm, psClient, logger)
 	require.NoError(t, err)
 	require.NoError(t, director.Start())
 	t.Cleanup(director.Shutdown)

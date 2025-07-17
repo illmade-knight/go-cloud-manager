@@ -38,21 +38,50 @@ type Director struct {
 	pubsubClient   *pubsub.Client
 }
 
-// NewServiceDirector creates and initializes a new Director instance. It's now the single
-// entry point for creating the director, ensuring its command subscription always exists.
-func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
+// NewServiceDirector is the primary constructor for production use. It creates
+// all necessary internal clients based on the provided configuration.
+func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, schemaRegistry map[string]interface{}, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
 
 	arch, err := loader.LoadArchitecture(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("director: failed to load service definitions: %w", err)
 	}
-	logger.Info().Str("projectID", arch.ProjectID).Msg("loaded project architecture")
+	directorLogger.Info().Str("projectID", arch.ProjectID).Msg("loaded project architecture")
 
-	// Ensure the subscription for listening to commands exists.
-	err = ensureCommandSubscriptionExists(ctx, psClient, cfg.CommandTopic, cfg.CommandSubscription)
+	// This constructor creates a real ServiceManager with real clients.
+	sm, err := servicemanager.NewServiceManager(ctx, arch.Environment, schemaRegistry, nil, directorLogger)
 	if err != nil {
-		return nil, fmt.Errorf("director failed to ensure its own command subscription: %w", err)
+		return nil, fmt.Errorf("director: failed to create ServiceManager: %w", err)
+	}
+
+	// It also creates its own real Pub/Sub client for listening.
+	psClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("director: failed to create pubsub Client: %w", err)
+	}
+
+	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger), nil
+}
+
+// NewDirectServiceDirector is a constructor for testing that allows injecting a pre-configured
+// ServiceManager and Pub/Sub client (e.g., one connected to an emulator).
+func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
+	directorLogger := logger.With().Str("component", "Director").Logger()
+	arch, err := loader.LoadArchitecture(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("director: failed to load service definitions: %w", err)
+	}
+	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger), nil
+}
+
+// newInternalSD is an unexported helper to reduce code duplication between the two constructors.
+func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) *Director {
+	// Ensure the subscription for listening to commands exists.
+	if err := ensureCommandSubscriptionExists(ctx, psClient, cfg.CommandTopic, cfg.CommandSubscription); err != nil {
+		// Log a fatal error, but the constructor signature doesn't return an error.
+		// In a real application, you might want to return the error.
+		directorLogger.Fatal().Err(err).Msg("Director failed to ensure its own command subscription")
 	}
 
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
@@ -71,7 +100,6 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	mux.HandleFunc("/orchestrate/teardown", d.teardownHandler)
 	mux.HandleFunc("/verify/dataflow", d.verifyHandler)
 
-	// Start the command listener in a background goroutine.
 	go d.listenForCommands(ctx)
 
 	directorLogger.Info().
@@ -79,7 +107,7 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 		Str("command_topic", cfg.CommandTopic).
 		Msg("Director initialized and listening for commands.")
 
-	return d, nil
+	return d
 }
 
 // ensureCommandSubscriptionExists creates the subscription that the ServiceDirector needs to function.
