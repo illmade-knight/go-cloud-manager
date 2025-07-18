@@ -147,8 +147,8 @@ func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
 		if tableCfg.Name == "" || tableCfg.Dataset == "" {
 			allErrors = append(allErrors, fmt.Errorf("table '%s' has an empty name or dataset", tableCfg.Name))
 		}
-		if _, ok := m.schemaRegistry[tableCfg.SchemaSourceIdentifier]; !ok {
-			allErrors = append(allErrors, fmt.Errorf("schema '%s' for table '%s' not found in registry", tableCfg.SchemaSourceIdentifier, tableCfg.Name))
+		if _, ok := m.schemaRegistry[tableCfg.SchemaImportPath]; !ok {
+			allErrors = append(allErrors, fmt.Errorf("schema '%s' for table '%s' not found in registry", tableCfg.SchemaImportPath, tableCfg.Name))
 		}
 	}
 
@@ -228,10 +228,10 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				errChan <- fmt.Errorf("failed to check existence of table '%s' in dataset '%s': %w", tableCfg.Name, tableCfg.Dataset, err)
 				return
 			}
-			schema, _ := m.schemaRegistry[tableCfg.SchemaSourceIdentifier]
+			schema, _ := m.schemaRegistry[tableCfg.SchemaImportPath]
 			bqSchema, err := bigquery.InferSchema(schema)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to infer BigQuery schema for '%s': %w", tableCfg.SchemaSourceIdentifier, err)
+				errChan <- fmt.Errorf("failed to infer BigQuery schema for '%s': %w", tableCfg.SchemaImportPath, err)
 				return
 			}
 

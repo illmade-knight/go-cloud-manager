@@ -57,9 +57,9 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 					BigQueryDatasets: []servicemanager.BigQueryDataset{{CloudResource: servicemanager.CloudResource{Name: df2Dataset}}},
 					BigQueryTables: []servicemanager.BigQueryTable{
 						{
-							CloudResource:          servicemanager.CloudResource{Name: df2Table},
-							Dataset:                df2Dataset,
-							SchemaSourceIdentifier: "TestSchema",
+							CloudResource:    servicemanager.CloudResource{Name: df2Table},
+							Dataset:          df2Dataset,
+							SchemaImportPath: "TestSchema",
 						},
 					},
 				},

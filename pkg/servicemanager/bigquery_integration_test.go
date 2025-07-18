@@ -32,9 +32,9 @@ func TestBigQueryManager_Integration(t *testing.T) {
 		},
 		BigQueryTables: []servicemanager.BigQueryTable{
 			{
-				CloudResource:          servicemanager.CloudResource{Name: tableName},
-				Dataset:                datasetName,
-				SchemaSourceIdentifier: "TestSchema",
+				CloudResource:    servicemanager.CloudResource{Name: tableName},
+				Dataset:          datasetName,
+				SchemaImportPath: "TestSchema",
 			},
 		},
 	}

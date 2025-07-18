@@ -114,14 +114,14 @@ func getTestBigQueryResources() servicemanager.CloudResourcesSpec {
 		},
 		BigQueryTables: []servicemanager.BigQueryTable{
 			{
-				CloudResource:          servicemanager.CloudResource{Name: "test_table_1"},
-				Dataset:                "test_dataset_1",
-				SchemaSourceIdentifier: "testSchemaV1",
+				CloudResource:    servicemanager.CloudResource{Name: "test_table_1"},
+				Dataset:          "test_dataset_1",
+				SchemaImportPath: "testSchemaV1",
 			},
 			{
-				CloudResource:          servicemanager.CloudResource{Name: "test_table_2"},
-				Dataset:                "test_dataset_2",
-				SchemaSourceIdentifier: "testSchemaV1",
+				CloudResource:    servicemanager.CloudResource{Name: "test_table_2"},
+				Dataset:          "test_dataset_2",
+				SchemaImportPath: "testSchemaV1",
 			},
 		},
 	}
@@ -153,9 +153,9 @@ func TestBigQueryManager_Validate(t *testing.T) {
 	t.Run("Invalid Table Schema", func(t *testing.T) {
 		resources := getTestBigQueryResources()
 		resources.BigQueryTables = append(resources.BigQueryTables, servicemanager.BigQueryTable{
-			CloudResource:          servicemanager.CloudResource{Name: "bad_table"},
-			Dataset:                "test_dataset_1",
-			SchemaSourceIdentifier: "nonExistentSchema",
+			CloudResource:    servicemanager.CloudResource{Name: "bad_table"},
+			Dataset:          "test_dataset_1",
+			SchemaImportPath: "nonExistentSchema",
 		})
 		err := manager.Validate(resources)
 		assert.Error(t, err)

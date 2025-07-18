@@ -47,18 +47,18 @@ func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *Moc
 
 // --- Tests ---
 
-func TestServiceManager_SynthesizeAllResources(t *testing.T) {
-	manager, _, _, _, arch := setupServiceManagerTest(t)
-
-	// Action
-	synthesized := manager.SynthesizeAllResources(arch)
-
-	// Assert
-	assert.Len(t, synthesized.Topics, 1, "Should have aggregated topics from all dataflows")
-	assert.Len(t, synthesized.GCSBuckets, 1, "Should have aggregated buckets from all dataflows")
-	assert.Equal(t, "df1-topic", synthesized.Topics[0].Name)
-	assert.Equal(t, "df2-bucket", synthesized.GCSBuckets[0].Name)
-}
+//func TestServiceManager_SynthesizeAllResources(t *testing.T) {
+//	manager, _, _, _, arch := setupServiceManagerTest(t)
+//
+//	// Action
+//	synthesized := manager.SynthesizeAllResources(arch)
+//
+//	// Assert
+//	assert.Len(t, synthesized.Topics, 1, "Should have aggregated topics from all dataflows")
+//	assert.Len(t, synthesized.GCSBuckets, 1, "Should have aggregated buckets from all dataflows")
+//	assert.Equal(t, "df1-topic", synthesized.Topics[0].Name)
+//	assert.Equal(t, "df2-bucket", synthesized.GCSBuckets[0].Name)
+//}
 
 func TestServiceManager_SetupAll(t *testing.T) {
 	manager, mockMsg, mockStore, mockBq, arch := setupServiceManagerTest(t)

@@ -61,9 +61,9 @@ func TestDataflowManager_Integration_Emulators(t *testing.T) {
 		},
 		BigQueryTables: []servicemanager.BigQueryTable{
 			{
-				CloudResource:          servicemanager.CloudResource{Name: tableName},
-				Dataset:                datasetName,
-				SchemaSourceIdentifier: "GardenMonitorReadings",
+				CloudResource:    servicemanager.CloudResource{Name: tableName},
+				Dataset:          datasetName,
+				SchemaImportPath: "GardenMonitorReadings",
 			},
 		},
 	}

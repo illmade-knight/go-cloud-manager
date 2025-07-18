@@ -2,23 +2,25 @@ package servicemanager
 
 import "context"
 
-// IBigQueryManager defines the interface for a BigQueryManager.
-type IBigQueryManager interface {
-	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error)
+type IManager interface {
 	Teardown(ctx context.Context, resources CloudResourcesSpec) error
 	Verify(ctx context.Context, resources CloudResourcesSpec) error
+}
+
+// IBigQueryManager defines the interface for a BigQueryManager.
+type IBigQueryManager interface {
+	IManager
+	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error)
 }
 
 // IMessagingManager defines the interface for a MessagingManager.
 type IMessagingManager interface {
+	IManager
 	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedTopic, []ProvisionedSubscription, error)
-	Teardown(ctx context.Context, resources CloudResourcesSpec) error
-	Verify(ctx context.Context, resources CloudResourcesSpec) error
 }
 
 // IStorageManager defines the interface for a StorageManager.
 type IStorageManager interface {
+	IManager
 	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedGCSBucket, error)
-	Teardown(ctx context.Context, resources CloudResourcesSpec) error
-	Verify(ctx context.Context, resources CloudResourcesSpec) error
 }

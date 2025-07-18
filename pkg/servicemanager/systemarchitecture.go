@@ -160,15 +160,27 @@ type BigQueryDataset struct {
 
 // BigQueryTable defines the configuration for a BigQuery table.
 type BigQueryTable struct {
-	CloudResource          `yaml:",inline"`
-	Dataset                string   `yaml:"dataset"`
-	SchemaSourceType       string   `yaml:"schema_source_type"`
-	SchemaSourceIdentifier string   `yaml:"schema_source_identifier"`
-	TimePartitioningField  string   `yaml:"time_partitioning_field,omitempty"`
-	TimePartitioningType   string   `yaml:"time_partitioning_type,omitempty"`
-	ClusteringFields       []string `yaml:"clustering_fields,omitempty"`
-	Expiration             Duration `yaml:"expiration,omitempty"`
+	CloudResource         `yaml:",inline"`
+	Dataset               string   `yaml:"dataset"`
+	SchemaType            string   `yaml:"schema_type"`
+	SchemaImportPath      string   `yaml:"schema_import_path"`
+	TimePartitioningField string   `yaml:"time_partitioning_field,omitempty"`
+	TimePartitioningType  string   `yaml:"time_partitioning_type,omitempty"`
+	ClusteringFields      []string `yaml:"clustering_fields,omitempty"`
+	Expiration            Duration `yaml:"expiration,omitempty"`
 }
+
+//// BigQueryTable defines the configuration for a BigQuery table.
+//type BigQueryTable struct {
+//	CloudResource         `yaml:",inline"`
+//	Dataset               string   `yaml:"dataset"`
+//	SchemaType            string   `yaml:"schema_type"`         // Formerly SchemaGoType
+//	SchemaImportPath      string   `yaml:"schema_import_path"`  // Formerly SchemaGoPackage
+//	TimePartitioningField string   `yaml:"time_partitioning_field,omitempty"`
+//	TimePartitioningType  string   `yaml:"time_partitioning_type,omitempty"`
+//	ClusteringFields      []string `yaml:"clustering_fields,omitempty"`
+//	Expiration            Duration `yaml:"expiration,omitempty"`
+//}
 
 // GCSBucket defines the configuration for a GCS bucket.
 type GCSBucket struct {

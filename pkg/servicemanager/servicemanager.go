@@ -9,88 +9,143 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ResourceType defines a type-safe key for the managers map.
+type ResourceType string
+
+const (
+	MessagingResourceType ResourceType = "messaging"
+	StorageResourceType   ResourceType = "storage"
+	BigQueryResourceType  ResourceType = "bigquery"
+)
+
 // ServiceManager coordinates all resource-specific operations by delegating to specialized managers.
+// It now holds a map of managers, making it dynamic.
 type ServiceManager struct {
-	messagingManager IMessagingManager
-	storageManager   IStorageManager
-	bigqueryManager  IBigQueryManager
-	logger           zerolog.Logger
-	writer           ProvisionedResourceWriter
+	managers map[ResourceType]IManager
+	logger   zerolog.Logger
+	writer   ProvisionedResourceWriter
 }
 
-// NewServiceManager creates a new central manager, initializing all required clients for a production environment.
-// we should probably move schemaRegistry and environment into a single Config that we can refactor later as we
-// add new clients and abilities
-func NewServiceManager(ctx context.Context, environment Environment, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
-	msgClient, err := CreateGoogleMessagingClient(ctx, environment.ProjectID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Messaging client: %w", err)
-	}
-	gcsClient, err := CreateGoogleGCSClient(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCS client: %w", err)
-	}
-	var bqClient BQClient
-	if schemaRegistry != nil {
-		bqClient, err = CreateGoogleBigQueryClient(ctx, environment.ProjectID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
-		}
-	}
-
-	return NewServiceManagerFromClients(msgClient, gcsClient, bqClient, environment, schemaRegistry, writer, logger)
-}
-
-// NewServiceManagerFromClients creates a new central manager from pre-existing clients, perfect for testing.
-func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, environment Environment, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+// NewServiceManager creates a new central manager, inspecting the architecture to determine
+// which sub-managers are needed.
+func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	sm := &ServiceManager{
-		logger: logger.With().Str("component", "ServiceManager").Logger(),
-		writer: writer,
+		logger:   logger.With().Str("component", "ServiceManager").Logger(),
+		writer:   writer,
+		managers: make(map[ResourceType]IManager),
 	}
 
-	if mc != nil {
-		messagingManager, err := NewMessagingManager(mc, logger, environment)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Messaging manager: %w", err)
+	// Scan the architecture to see which resource types are needed.
+	needsMessaging := false
+	needsStorage := false
+	needsBigQuery := false
+	for _, df := range arch.Dataflows {
+		if len(df.Resources.Topics) > 0 || len(df.Resources.Subscriptions) > 0 {
+			needsMessaging = true
 		}
-		sm.messagingManager = messagingManager
+		if len(df.Resources.GCSBuckets) > 0 {
+			needsStorage = true
+		}
+		if len(df.Resources.BigQueryDatasets) > 0 || len(df.Resources.BigQueryTables) > 0 {
+			needsBigQuery = true
+		}
 	}
 
-	if sc != nil {
-		storageManager, err := NewStorageManager(sc, logger, environment)
+	// Conditionally create clients and managers.
+	if needsMessaging {
+		sm.logger.Info().Msg("Messaging resources found in architecture, initializing MessagingManager.")
+		msgClient, err := CreateGoogleMessagingClient(ctx, arch.ProjectID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create Storage manager: %w", err)
+			return nil, err
 		}
-		sm.storageManager = storageManager
+		sm.managers[MessagingResourceType], err = NewMessagingManager(msgClient, logger, arch.Environment)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	if bc != nil && schemaRegistry != nil {
-		bigqueryManager, err := NewBigQueryManager(bc, logger, schemaRegistry, environment)
+	if needsStorage {
+		sm.logger.Info().Msg("Storage resources found in architecture, initializing StorageManager.")
+		gcsClient, err := CreateGoogleGCSClient(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create BigQuery manager: %w", err)
+			return nil, err
 		}
-		sm.bigqueryManager = bigqueryManager
+		sm.managers[StorageResourceType], err = NewStorageManager(gcsClient, logger, arch.Environment)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if needsBigQuery {
+		sm.logger.Info().Msg("BigQuery resources found in architecture, initializing BigQueryManager.")
+		bqClient, err := CreateGoogleBigQueryClient(ctx, arch.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bqClient, logger, schemaRegistry, arch.Environment)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return sm, nil
 }
 
-func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
-	smr := &ServiceManager{
-		logger:           logger.With().Str("component", "ServiceManager").Logger(),
-		writer:           writer,
-		storageManager:   sm,
-		messagingManager: mm,
-		bigqueryManager:  bqm,
+// NewServiceManagerFromClients remains for testing purposes.
+func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, environment Environment, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+	sm := &ServiceManager{
+		logger:   logger.With().Str("component", "ServiceManager").Logger(),
+		writer:   writer,
+		managers: make(map[ResourceType]IManager),
 	}
 
-	return smr, nil
+	var err error
+	if mc != nil {
+		sm.managers[MessagingResourceType], err = NewMessagingManager(mc, logger, environment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Messaging manager from client: %w", err)
+		}
+	}
+	if sc != nil {
+		sm.managers[StorageResourceType], err = NewStorageManager(sc, logger, environment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Storage manager from client: %w", err)
+		}
+	}
+	if bc != nil {
+		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bc, logger, schemaRegistry, environment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create BigQuery manager from client: %w", err)
+		}
+	}
+
+	return sm, nil
 }
 
-// SetupDataflow creates resources for a *specific* dataflow with improved safety checks.
+// NewServiceManagerFromManagers remains for testing purposes.
+
+// NewServiceManagerFromManagers remains for testing purposes.
+func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+	svcMgr := &ServiceManager{
+		logger:   logger.With().Str("component", "ServiceManager").Logger(),
+		writer:   writer,
+		managers: make(map[ResourceType]IManager),
+	}
+	if mm != nil {
+		svcMgr.managers[MessagingResourceType] = mm
+	}
+	if sm != nil {
+		svcMgr.managers[StorageResourceType] = sm
+	}
+	if bqm != nil {
+		svcMgr.managers[BigQueryResourceType] = bqm
+	}
+	return svcMgr, nil
+}
+
+// SetupDataflow now looks up managers from the map and runs resource creation concurrently.
 func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) (*ProvisionedResources, error) {
 	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting setup for specific dataflow")
-
 	targetDataflow, ok := arch.Dataflows[dataflowName]
 	if !ok {
 		return nil, fmt.Errorf("dataflow spec '%s' not found in architecture", dataflowName)
@@ -98,80 +153,54 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	errChan := make(chan error, 3)
+	errChan := make(chan error, len(sm.managers))
 	provisioned := &ProvisionedResources{}
 
-	// Define operations for each resource type.
-	operations := []struct {
-		managerName  string
-		manager      interface{}
-		hasResources bool
-		run          func()
-	}{
-		{
-			managerName:  "Messaging",
-			manager:      sm.messagingManager,
-			hasResources: len(targetDataflow.Resources.Topics) > 0 || len(targetDataflow.Resources.Subscriptions) > 0,
-			run: func() {
-				defer wg.Done()
-				provTopics, provSubs, err := sm.messagingManager.CreateResources(ctx, targetDataflow.Resources)
-				if err != nil {
-					errChan <- err
-					return
-				}
-				mu.Lock()
-				provisioned.Topics = provTopics
-				provisioned.Subscriptions = provSubs
-				mu.Unlock()
-			},
-		},
-		{
-			managerName:  "Storage",
-			manager:      sm.storageManager,
-			hasResources: len(targetDataflow.Resources.GCSBuckets) > 0,
-			run: func() {
-				defer wg.Done()
-				provBuckets, err := sm.storageManager.CreateResources(ctx, targetDataflow.Resources)
-				if err != nil {
-					errChan <- err
-					return
-				}
-				mu.Lock()
-				provisioned.GCSBuckets = provBuckets
-				mu.Unlock()
-			},
-		},
-		{
-			managerName:  "BigQuery",
-			manager:      sm.bigqueryManager,
-			hasResources: len(targetDataflow.Resources.BigQueryDatasets) > 0 || len(targetDataflow.Resources.BigQueryTables) > 0,
-			run: func() {
-				defer wg.Done()
-				provTables, provDatasets, err := sm.bigqueryManager.CreateResources(ctx, targetDataflow.Resources)
-				if err != nil {
-					errChan <- err
-					return
-				}
-				mu.Lock()
-				provisioned.BigQueryTables = provTables
-				provisioned.BigQueryDatasets = provDatasets
-				mu.Unlock()
-			},
-		},
+	if mgr, ok := sm.managers[MessagingResourceType]; ok {
+		wg.Add(1)
+		go func(messagingManager IMessagingManager) {
+			defer wg.Done()
+			provTopics, provSubs, err := messagingManager.CreateResources(ctx, targetDataflow.Resources)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			mu.Lock()
+			provisioned.Topics = provTopics
+			provisioned.Subscriptions = provSubs
+			mu.Unlock()
+		}(mgr.(IMessagingManager))
 	}
 
-	// Loop through operations, add to WaitGroup, and run if the manager exists.
-	for _, op := range operations {
+	if mgr, ok := sm.managers[StorageResourceType]; ok {
 		wg.Add(1)
-		if op.manager != nil {
-			go op.run()
-		} else {
-			// If the manager is nil but resources were requested, log a warning.
-			if op.hasResources {
-				sm.logger.Warn().Str("dataflow", dataflowName).Msgf("Warning: Dataflow requests %s resources but the %s manager is not configured.", op.managerName, op.managerName)
+		go func(storageManager IStorageManager) {
+			defer wg.Done()
+			provBuckets, err := storageManager.CreateResources(ctx, targetDataflow.Resources)
+			if err != nil {
+				errChan <- err
+				return
 			}
-			wg.Done() // Decrement counter immediately if manager is nil.
-		}
+			mu.Lock()
+			provisioned.GCSBuckets = provBuckets
+			mu.Unlock()
+		}(mgr.(IStorageManager))
+	}
+
+	if mgr, ok := sm.managers[BigQueryResourceType]; ok {
+		wg.Add(1)
+		go func(bigqueryManager IBigQueryManager) {
+			defer wg.Done()
+			provTables, provDatasets, err := bigqueryManager.CreateResources(ctx, targetDataflow.Resources)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			mu.Lock()
+			provisioned.BigQueryTables = provTables
+			provisioned.BigQueryDatasets = provDatasets
+			mu.Unlock()
+		}(mgr.(IBigQueryManager))
 	}
 
 	wg.Wait()
@@ -181,62 +210,67 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 	for err := range errChan {
 		allErrors = append(allErrors, err)
 	}
-
 	return provisioned, errors.Join(allErrors...)
 }
 
-// TeardownDataflow tears down resources for a *specific* dataflow, now more robustly.
+// TeardownDataflow is now much cleaner, with no type assertions needed.
 func (sm *ServiceManager) TeardownDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error {
 	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting teardown for specific dataflow")
-
 	targetDataflow, ok := arch.Dataflows[dataflowName]
 	if !ok {
 		return fmt.Errorf("dataflow spec '%s' not found in architecture", dataflowName)
 	}
-
 	if targetDataflow.Lifecycle == nil || targetDataflow.Lifecycle.Strategy != LifecycleStrategyEphemeral {
 		sm.logger.Warn().Str("dataflow", dataflowName).Msg("Teardown skipped: Dataflow not marked with 'ephemeral' lifecycle.")
 		return nil
 	}
 
 	var allErrors []error
-	if sm.bigqueryManager != nil {
-		if err := sm.bigqueryManager.Teardown(ctx, targetDataflow.Resources); err != nil {
+	for _, manager := range sm.managers {
+		if err := manager.Teardown(ctx, targetDataflow.Resources); err != nil {
 			allErrors = append(allErrors, err)
 		}
 	}
-	if sm.storageManager != nil {
-		if err := sm.storageManager.Teardown(ctx, targetDataflow.Resources); err != nil {
-			allErrors = append(allErrors, err)
-		}
-	}
-	if sm.messagingManager != nil {
-		if err := sm.messagingManager.Teardown(ctx, targetDataflow.Resources); err != nil {
-			allErrors = append(allErrors, err)
-		}
-	}
-
 	return errors.Join(allErrors...)
 }
 
-// --- Passthrough and Helper Methods ---
+// VerifyDataflow is also cleaner, with no type assertions needed.
+func (sm *ServiceManager) VerifyDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error {
+	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting verification for specific dataflow")
+	targetDataflow, ok := arch.Dataflows[dataflowName]
+	if !ok {
+		return fmt.Errorf("dataflow spec '%s' not found in architecture", dataflowName)
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(sm.managers))
+
+	for _, manager := range sm.managers {
+		wg.Add(1)
+		go func(mgr IManager) {
+			defer wg.Done()
+			errChan <- mgr.Verify(ctx, targetDataflow.Resources)
+		}(manager)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	var allErrors []error
+	for err := range errChan {
+		if err != nil {
+			allErrors = append(allErrors, err)
+		}
+	}
+	return errors.Join(allErrors...)
+}
 
 // GetMessagingManager provides access to the messaging sub-manager.
 func (sm *ServiceManager) GetMessagingManager() IMessagingManager {
-	return sm.messagingManager
-}
-
-// SynthesizeAllResources creates a master view of all cloud resources required by all dataflows.
-func (sm *ServiceManager) SynthesizeAllResources(arch *MicroserviceArchitecture) CloudResourcesSpec {
-	allResources := CloudResourcesSpec{}
-	for _, dataflow := range arch.Dataflows {
-		allResources.Topics = append(allResources.Topics, dataflow.Resources.Topics...)
-		allResources.Subscriptions = append(allResources.Subscriptions, dataflow.Resources.Subscriptions...)
-		allResources.GCSBuckets = append(allResources.GCSBuckets, dataflow.Resources.GCSBuckets...)
-		allResources.BigQueryDatasets = append(allResources.BigQueryDatasets, dataflow.Resources.BigQueryDatasets...)
-		allResources.BigQueryTables = append(allResources.BigQueryTables, dataflow.Resources.BigQueryTables...)
+	if mgr, ok := sm.managers[MessagingResourceType]; ok {
+		return mgr.(IMessagingManager)
 	}
-	return allResources
+	return nil
 }
 
 // SetupAll runs the setup process for all dataflows concurrently.
@@ -300,49 +334,4 @@ func (sm *ServiceManager) TeardownAll(ctx context.Context, arch *MicroserviceArc
 
 	sm.logger.Info().Msg("Full environment teardown completed.")
 	return nil
-}
-
-// VerifyDataflow checks if all resources for a specific dataflow exist.
-func (sm *ServiceManager) VerifyDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error {
-	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting verification for specific dataflow")
-
-	targetDataflow, ok := arch.Dataflows[dataflowName]
-	if !ok {
-		return fmt.Errorf("dataflow spec '%s' not found in architecture", dataflowName)
-	}
-
-	var wg sync.WaitGroup
-	errChan := make(chan error, 3)
-	wg.Add(3)
-
-	go func() {
-		defer wg.Done()
-		if sm.messagingManager != nil {
-			errChan <- sm.messagingManager.Verify(ctx, targetDataflow.Resources)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if sm.storageManager != nil {
-			errChan <- sm.storageManager.Verify(ctx, targetDataflow.Resources)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if sm.bigqueryManager != nil {
-			errChan <- sm.bigqueryManager.Verify(ctx, targetDataflow.Resources)
-		}
-	}()
-
-	wg.Wait()
-	close(errChan)
-
-	var allErrors []error
-	for err := range errChan {
-		if err != nil {
-			allErrors = append(allErrors, err)
-		}
-	}
-
-	return errors.Join(allErrors...)
 }
