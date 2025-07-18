@@ -3,6 +3,7 @@ package deployment
 import (
 	"context"
 	"fmt"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 )
@@ -14,12 +15,12 @@ type IDeploymentManager interface {
 }
 
 type DeploymentManager struct {
-	iamManager IAMManager
+	iamManager iam.IAMManager
 	// We may add other managers here later, like a ContainerManager
 	logger zerolog.Logger
 }
 
-func NewDeploymentManager(iamManager IAMManager, logger zerolog.Logger) *DeploymentManager {
+func NewDeploymentManager(iamManager iam.IAMManager, logger zerolog.Logger) *DeploymentManager {
 	return &DeploymentManager{
 		iamManager: iamManager,
 		logger:     logger.With().Str("component", "DeploymentManager").Logger(),

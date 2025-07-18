@@ -1,11 +1,11 @@
 //go:build cloud_integration
 
-package deployment_test
+package iam_test
 
 import (
 	"context"
 	"fmt"
-	"os"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"testing"
 	"time"
 
@@ -13,48 +13,20 @@ import (
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
-	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// checkGCPAuth is a helper that fails fast if the test is not configured to run.
-func checkGCPAuth(t *testing.T) string {
-	t.Helper()
-	projectID := os.Getenv("GCP_PROJECT_ID")
-	if projectID == "" {
-		t.Skip("Skipping real integration test: GCP_PROJECT_ID environment variable is not set")
-	}
-	// A simple adminClient creation is enough to check basic auth config
-	// without performing a full API call like listing resources.
-	_, err := pubsub.NewClient(context.Background(), projectID)
-	if err != nil {
-		t.Fatalf(`
-		---------------------------------------------------------------------
-		GCP AUTHENTICATION FAILED!
-		---------------------------------------------------------------------
-		Could not create a Google Cloud adminClient. This is likely due to
-		expired or missing Application Default Credentials (ADC).
-
-		To fix this, please run 'gcloud auth application-default login'.
-
-		Original Error: %v
-		---------------------------------------------------------------------
-		`, err)
-	}
-	return projectID
-}
-
 func TestGoogleIAMClient_RealIntegration_FullLifecycle(t *testing.T) {
-	projectID := checkGCPAuth(t)
+	projectID := iam.CheckGCPAuth(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// --- ARRANGE ---
 	// 1. Create the real GoogleIAMClient instance we are testing.
-	iamClient, err := deployment.NewGoogleIAMClient(ctx, projectID)
+	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
 	require.NoError(t, err)
 
 	// 2. Create other necessary real clients for resource creation and cleanup.

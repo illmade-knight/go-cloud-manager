@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
 	"sync"
@@ -48,7 +48,7 @@ type Orchestrator struct {
 	cfg              Config
 	logger           zerolog.Logger
 	deployer         *deployment.CloudBuildDeployer
-	iam              deployment.IAMClient
+	iam              iam.IAMClient
 	psClient         *pubsub.Client
 	dataflowDeployer *DataflowDeployer // <-- Add the new deployer
 
@@ -81,14 +81,13 @@ func NewOrchestrator(ctx context.Context, cfg Config, logger zerolog.Logger) (*O
 }
 
 // NewOrchestratorFromClients creates a new Orchestrator with pre-configured clients.
-// NewOrchestratorFromClients creates a new Orchestrator with pre-configured clients.
 func NewOrchestratorFromClients(ctx context.Context, cfg Config, logger zerolog.Logger, psClient *pubsub.Client) (*Orchestrator, error) {
 	deployer, err := deployment.NewCloudBuildDeployer(ctx, cfg.ProjectID, cfg.Region, cfg.SourceBucket, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create deployer: %w", err)
 	}
 
-	iamClient, err := deployment.NewGoogleIAMClient(ctx, cfg.ProjectID)
+	iamClient, err := iam.NewGoogleIAMClient(ctx, cfg.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iam client: %w", err)
 	}
@@ -112,48 +111,17 @@ func NewOrchestratorFromClients(ctx context.Context, cfg Config, logger zerolog.
 }
 
 // initialize handles the setup of command infrastructure and broadcasts state changes.
-func (o *Orchestrator) initialize(ctx context.Context) error {
+func (o *Orchestrator) initialize(ctx context.Context) {
 	o.logger.Info().Msg("Orchestrator initializing command infrastructure...")
 	o.stateChan <- StateInitializing
 
 	if err := ensureCommandInfra(ctx, o.psClient, o.cfg.CommandTopic, o.cfg.CompletionTopic); err != nil {
 		o.logger.Error().Err(err).Msg("Failed to set up command infrastructure")
 		o.stateChan <- StateError
-		return err
 	}
 
 	o.logger.Info().Msg("Command infrastructure is ready.")
 	o.stateChan <- StateCommandInfraReady
-	return nil
-}
-
-// ... (other functions would be updated similarly to broadcast their state) ...
-// ensureCommandInfra creates the topics the orchestrator needs to function.
-func ensureCommandInfra(ctx context.Context, psClient *pubsub.Client, commandTopic, completionTopic string) error {
-	if err := ensureTopicExists(ctx, psClient, commandTopic); err != nil {
-		return err
-	}
-	if err := ensureTopicExists(ctx, psClient, completionTopic); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ensureTopicExists is a private helper to create a Pub/Sub topic if it doesn't already exist.
-func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID string) error {
-	topic := client.Topic(topicID)
-	exists, err := topic.Exists(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to check for topic %s: %w", topicID, err)
-	}
-	if !exists {
-		log.Info().Str("topic", topicID).Msg("Topic not found, creating it now.")
-		_, err = client.CreateTopic(ctx, topicID)
-		if err != nil {
-			return fmt.Errorf("failed to create topic %s: %w", topicID, err)
-		}
-	}
-	return nil
 }
 
 // DeployServiceDirector handles the special bootstrap deployment of the ServiceDirector.

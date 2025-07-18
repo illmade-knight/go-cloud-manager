@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
@@ -70,7 +71,7 @@ func setupTestRunnerSA(t *testing.T, ctx context.Context, projectID string) stri
 	}
 
 	t.Log("GCP_TEST_RUNNER_SA not set. Creating temporary service account for this test run.")
-	iamClient, err := deployment.NewGoogleIAMClient(ctx, projectID)
+	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
 	require.NoError(t, err)
 
 	runID := uuid.New().String()[:8]
@@ -114,7 +115,7 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	if !flag.Parsed() {
 		flag.Parse()
 	}
-	projectID := checkGCPAuth(t)
+	projectID := iam.CheckGCPAuth(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -145,10 +146,10 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	projectNumber, err := resourceManager.GetProjectNumber(ctx, projectID)
 	require.NoError(t, err)
 
-	iamClient, err := deployment.NewGoogleIAMClient(ctx, projectID)
+	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
 	require.NoError(t, err)
 
-	agentPermissionCreated, err := deployment.GrantCloudRunAgentPermissions(ctx, deployment.RepoConfig{
+	agentPermissionCreated, err := iam.GrantCloudRunAgentPermissions(ctx, iam.RepoConfig{
 		ProjectID:     projectID,
 		ProjectNumber: projectNumber,
 		Name:          imageRepoName,

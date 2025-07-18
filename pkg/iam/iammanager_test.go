@@ -1,10 +1,10 @@
-package deployment_test
+package iam_test
 
 import (
 	"context"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"testing"
 
-	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/mock"
@@ -40,7 +40,7 @@ func TestIAMManager_ApplyIAMForService(t *testing.T) {
 	// --- Arrange ---
 	mockClient := new(MockIAMClient)
 	logger := zerolog.Nop()
-	iamManager := deployment.NewIAMManager(mockClient, logger)
+	iamManager := iam.NewIAMManager(mockClient, logger)
 
 	testServiceAccount := "test-sa-for-iam"
 	testServiceAccountEmail := "test-sa-for-iam@my-project.iam.gserviceaccount.com"

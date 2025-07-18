@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ import (
 //     fundamental networking or policy issue blocking access to gcr.io.
 func TestStandardBuilderPull(t *testing.T) {
 	// --- Setup ---
-	projectID := checkGCPAuth(t)
+	projectID := iam.CheckGCPAuth(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -80,7 +81,7 @@ func TestStandardBuilderPull(t *testing.T) {
 // known-good, two-step build configuration discovered from 'gcloud run deploy'.
 func TestFullBuildCycleWithCorrectSteps(t *testing.T) {
 	// --- Setup ---
-	projectID := checkGCPAuth(t)
+	projectID := iam.CheckGCPAuth(t)
 	region := "us-central1"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -171,7 +172,7 @@ func TestFullBuildCycleWithCorrectSteps(t *testing.T) {
 
 func TestFinalBuildRecipe(t *testing.T) {
 	// --- Setup ---
-	projectID := checkGCPAuth(t)
+	projectID := iam.CheckGCPAuth(t)
 	region := "us-central1"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

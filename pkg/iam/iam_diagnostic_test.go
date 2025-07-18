@@ -1,6 +1,6 @@
 //go:build cloud_integration
 
-package deployment_test
+package iam_test
 
 import (
 	"context"

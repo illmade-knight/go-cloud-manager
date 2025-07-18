@@ -19,6 +19,8 @@ type ServiceManager struct {
 }
 
 // NewServiceManager creates a new central manager, initializing all required clients for a production environment.
+// we should probably move schemaRegistry and environment into a single Config that we can refactor later as we
+// add new clients and abilities
 func NewServiceManager(ctx context.Context, environment Environment, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	msgClient, err := CreateGoogleMessagingClient(ctx, environment.ProjectID)
 	if err != nil {
@@ -28,10 +30,14 @@ func NewServiceManager(ctx context.Context, environment Environment, schemaRegis
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	bqClient, err := CreateGoogleBigQueryClient(ctx, environment.ProjectID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
+	var bqClient BQClient
+	if schemaRegistry != nil {
+		bqClient, err = CreateGoogleBigQueryClient(ctx, environment.ProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
+		}
 	}
+
 	return NewServiceManagerFromClients(msgClient, gcsClient, bqClient, environment, schemaRegistry, writer, logger)
 }
 
@@ -58,7 +64,7 @@ func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQCli
 		sm.storageManager = storageManager
 	}
 
-	if bc != nil {
+	if bc != nil && schemaRegistry != nil {
 		bigqueryManager, err := NewBigQueryManager(bc, logger, schemaRegistry, environment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BigQuery manager: %w", err)

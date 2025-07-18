@@ -49,19 +49,18 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	}
 	directorLogger.Info().Str("projectID", arch.ProjectID).Msg("loaded project architecture")
 
-	// This constructor creates a real ServiceManager with real clients.
 	sm, err := servicemanager.NewServiceManager(ctx, arch.Environment, schemaRegistry, nil, directorLogger)
 	if err != nil {
 		return nil, fmt.Errorf("director: failed to create ServiceManager: %w", err)
 	}
 
-	// It also creates its own real Pub/Sub client for listening.
+	// It also creates its own Pub/Sub client this is needed for the creating the command subscription and listening on it
 	psClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("director: failed to create pubsub Client: %w", err)
 	}
 
-	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger), nil
+	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
 }
 
 // NewDirectServiceDirector is a constructor for testing that allows injecting a pre-configured
@@ -72,16 +71,15 @@ func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicema
 	if err != nil {
 		return nil, fmt.Errorf("director: failed to load service definitions: %w", err)
 	}
-	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger), nil
+	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
 }
 
 // newInternalSD is an unexported helper to reduce code duplication between the two constructors.
-func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) *Director {
+func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) (*Director, error) {
 	// Ensure the subscription for listening to commands exists.
-	if err := ensureCommandSubscriptionExists(ctx, psClient, cfg.CommandTopic, cfg.CommandSubscription); err != nil {
-		// Log a fatal error, but the constructor signature doesn't return an error.
-		// In a real application, you might want to return the error.
-		directorLogger.Fatal().Err(err).Msg("Director failed to ensure its own command subscription")
+	err := ensureCommandSubscriptionExists(ctx, psClient, cfg.CommandTopic, cfg.CommandSubscription)
+	if err != nil {
+		return nil, err
 	}
 
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
@@ -107,7 +105,7 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 		Str("command_topic", cfg.CommandTopic).
 		Msg("Director initialized and listening for commands.")
 
-	return d
+	return d, nil
 }
 
 // ensureCommandSubscriptionExists creates the subscription that the ServiceDirector needs to function.
@@ -115,10 +113,10 @@ func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Clien
 	topic := psClient.Topic(topicID)
 	exists, err := topic.Exists(ctx)
 	if err != nil {
-		return fmt.Errorf("could not check for command topic %s: %w", topicID, err)
+		return fmt.Errorf("could not check for command topic '%s': %w", topicID, err)
 	}
 	if !exists {
-		return fmt.Errorf("command topic %s does not exist; it must be created by the orchestrator", topicID)
+		return fmt.Errorf("command topic '%s' does not exist; it must be created by the orchestrator", topicID)
 	}
 
 	sub := psClient.Subscription(subID)

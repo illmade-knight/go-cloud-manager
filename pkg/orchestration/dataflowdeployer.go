@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"fmt"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
@@ -15,11 +16,11 @@ type DataflowDeployer struct {
 	cfg      Config // Uses the same config as the orchestrator
 	logger   zerolog.Logger
 	deployer *deployment.CloudBuildDeployer
-	iam      deployment.IAMClient
+	iam      iam.IAMClient
 }
 
 // NewDataflowDeployer creates a new deployer for dataflow services.
-func NewDataflowDeployer(cfg Config, logger zerolog.Logger, deployer *deployment.CloudBuildDeployer, iam deployment.IAMClient) *DataflowDeployer {
+func NewDataflowDeployer(cfg Config, logger zerolog.Logger, deployer *deployment.CloudBuildDeployer, iam iam.IAMClient) *DataflowDeployer {
 	return &DataflowDeployer{
 		cfg:      cfg,
 		logger:   logger.With().Str("component", "DataflowDeployer").Logger(),

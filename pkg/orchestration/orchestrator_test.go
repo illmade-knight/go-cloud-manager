@@ -67,7 +67,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	t.Cleanup(orch.Close)
 
 	t.Log("Waiting for orchestrator to create command topics...")
-	require.NoError(t, waitForState(ctx, orch, orchestration.StateCommandInfraReady), "Orchestrator failed to initialize command infrastructure")
+	require.NoError(t, orchestration.WaitForState(ctx, orch, orchestration.StateCommandInfraReady), "Orchestrator failed to initialize command infrastructure")
 	t.Log("Orchestrator is ready.")
 
 	// --- 3. Run ServiceDirector In-Memory ---
@@ -118,27 +118,4 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	require.True(t, exists, "The ServiceDirector should have created the dataflow topic in the emulator")
 
 	t.Log("✅ Resource creation verified. Test successful.")
-}
-
-// waitForState is a test helper to listen on the state channel for a target state.
-func waitForState(ctx context.Context, orch *orchestration.Orchestrator, targetState orchestration.OrchestratorState) error {
-	for {
-		select {
-		case state, ok := <-orch.StateChan():
-			if !ok {
-				return fmt.Errorf("orchestrator state channel closed prematurely")
-			}
-			log.Info().Str("state", string(state)).Msg("Orchestrator state changed")
-			if state == targetState {
-				return nil // Success!
-			}
-			if state == orchestration.StateError {
-				return fmt.Errorf("orchestrator entered an error state")
-			}
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(30 * time.Second):
-			return fmt.Errorf("timed out waiting for orchestrator state: %s", targetState)
-		}
-	}
 }

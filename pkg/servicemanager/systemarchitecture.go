@@ -31,6 +31,7 @@ type ResourceGroup struct {
 // MicroserviceArchitecture is the root of the configuration structure.
 type MicroserviceArchitecture struct {
 	Environment            `yaml:",inline"`
+	ServiceManagerSpec     ServiceSpec              `yaml:"service_manager_spec"`
 	Dataflows              map[string]ResourceGroup `yaml:"dataflows"`
 	DeploymentEnvironments map[string]Environment   `yaml:"deployment_environments"`
 }

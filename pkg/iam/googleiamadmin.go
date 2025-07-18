@@ -1,4 +1,4 @@
-package deployment
+package iam
 
 import (
 	"cloud.google.com/go/iam"
