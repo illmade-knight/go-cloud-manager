@@ -26,7 +26,7 @@ type BQDataset interface {
 	Metadata(ctx context.Context) (*bigquery.DatasetMetadata, error)
 	Create(ctx context.Context, meta *bigquery.DatasetMetadata) error
 	Update(ctx context.Context, metaToUpdate bigquery.DatasetMetadataToUpdate, etag string) (*bigquery.DatasetMetadata, error)
-	Delete(ctx context.Context) error // This function is used in Teardown
+	Delete(ctx context.Context) error
 	Table(tableID string) BQTable
 	DeleteWithContents(ctx context.Context) error
 }
@@ -110,30 +110,27 @@ func isNotFound(err error) bool {
 
 // BigQueryManager handles the creation and deletion of BigQuery datasets and tables.
 type BigQueryManager struct {
-	client         BQClient
-	logger         zerolog.Logger
-	schemaRegistry map[string]interface{}
-	environment    Environment
+	client      BQClient
+	logger      zerolog.Logger
+	environment Environment
 }
 
 // NewBigQueryManager creates a new BigQueryManager.
-func NewBigQueryManager(client BQClient, logger zerolog.Logger, schemaRegistry map[string]interface{}, environment Environment) (*BigQueryManager, error) {
+// It no longer requires the schemaRegistry at construction time.
+func NewBigQueryManager(client BQClient, logger zerolog.Logger, environment Environment) (*BigQueryManager, error) {
 	if client == nil {
 		return nil, errors.New("BigQuery client (BQClient interface) cannot be nil")
 	}
-	if schemaRegistry == nil {
-		return nil, errors.New("schema registry cannot be nil")
-	}
 	return &BigQueryManager{
-		client:         client,
-		logger:         logger.With().Str("subcomponent", "BigQueryManager").Logger(),
-		schemaRegistry: schemaRegistry,
-		environment:    environment,
+		client:      client,
+		logger:      logger.With().Str("subcomponent", "BigQueryManager").Logger(),
+		environment: environment,
 	}, nil
 }
 
 // Validate performs pre-flight checks on the resource configuration.
-func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
+// It now takes the schemaRegistry as an argument.
+func (m *BigQueryManager) Validate(resources CloudResourcesSpec, schemaRegistry map[string]interface{}) error {
 	m.logger.Info().Msg("Validating BigQuery resource configuration...")
 	var allErrors []error
 
@@ -147,8 +144,8 @@ func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
 		if tableCfg.Name == "" || tableCfg.Dataset == "" {
 			allErrors = append(allErrors, fmt.Errorf("table '%s' has an empty name or dataset", tableCfg.Name))
 		}
-		if _, ok := m.schemaRegistry[tableCfg.SchemaImportPath]; !ok {
-			allErrors = append(allErrors, fmt.Errorf("schema '%s' for table '%s' not found in registry", tableCfg.SchemaImportPath, tableCfg.Name))
+		if _, ok := schemaRegistry[tableCfg.SchemaType]; !ok {
+			allErrors = append(allErrors, fmt.Errorf("schema type '%s' for table '%s' not found in registry", tableCfg.SchemaType, tableCfg.Name))
 		}
 	}
 
@@ -161,9 +158,10 @@ func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
 }
 
 // CreateResources creates all configured BigQuery datasets and tables concurrently.
-func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error) {
+// It now receives the schemaRegistry at runtime.
+func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudResourcesSpec, schemaRegistry map[string]interface{}) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error) {
 	m.logger.Info().Msg("Starting BigQuery setup...")
-	if err := m.Validate(resources); err != nil {
+	if err := m.Validate(resources, schemaRegistry); err != nil {
 		return nil, nil, fmt.Errorf("BigQuery configuration validation failed: %w", err)
 	}
 
@@ -228,10 +226,11 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				errChan <- fmt.Errorf("failed to check existence of table '%s' in dataset '%s': %w", tableCfg.Name, tableCfg.Dataset, err)
 				return
 			}
-			schema, _ := m.schemaRegistry[tableCfg.SchemaImportPath]
+			// Use the schemaRegistry passed in at runtime.
+			schema, _ := schemaRegistry[tableCfg.SchemaType]
 			bqSchema, err := bigquery.InferSchema(schema)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to infer BigQuery schema for '%s': %w", tableCfg.SchemaImportPath, err)
+				errChan <- fmt.Errorf("failed to infer BigQuery schema for '%s': %w", tableCfg.SchemaType, err)
 				return
 			}
 
@@ -243,8 +242,6 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				},
 				Labels: tableCfg.Labels,
 			}
-
-			// ...and then conditionally adds clustering only if fields are specified.
 			if len(tableCfg.ClusteringFields) > 0 {
 				meta.Clustering = &bigquery.Clustering{
 					Fields: tableCfg.ClusteringFields,

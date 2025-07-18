@@ -93,12 +93,9 @@ type TestSchema struct {
 func setupBigQueryManagerTest(t *testing.T) (*servicemanager.BigQueryManager, *MockBQClient) {
 	mockClient := new(MockBQClient)
 	logger := zerolog.Nop()
-	schemaRegistry := map[string]interface{}{
-		"testSchemaV1": TestSchema{},
-	}
 	environment := servicemanager.Environment{Name: "test"}
 
-	manager, err := servicemanager.NewBigQueryManager(mockClient, logger, schemaRegistry, environment)
+	manager, err := servicemanager.NewBigQueryManager(mockClient, logger, environment)
 	assert.NoError(t, err)
 	assert.NotNil(t, manager)
 
@@ -135,7 +132,7 @@ func TestNewBigQueryManager(t *testing.T) {
 	})
 
 	t.Run("Nil Client", func(t *testing.T) {
-		_, err := servicemanager.NewBigQueryManager(nil, zerolog.Nop(), map[string]interface{}{}, servicemanager.Environment{})
+		_, err := servicemanager.NewBigQueryManager(nil, zerolog.Nop(), servicemanager.Environment{})
 		assert.Error(t, err)
 		assert.Equal(t, "BigQuery client (BQClient interface) cannot be nil", err.Error())
 	})
@@ -144,9 +141,13 @@ func TestNewBigQueryManager(t *testing.T) {
 func TestBigQueryManager_Validate(t *testing.T) {
 	manager, _ := setupBigQueryManagerTest(t)
 
+	schemaRegistry := map[string]interface{}{
+		"testSchemaV1": TestSchema{},
+	}
+
 	t.Run("Success", func(t *testing.T) {
 		resources := getTestBigQueryResources()
-		err := manager.Validate(resources)
+		err := manager.Validate(resources, schemaRegistry)
 		assert.NoError(t, err)
 	})
 
@@ -157,7 +158,7 @@ func TestBigQueryManager_Validate(t *testing.T) {
 			Dataset:          "test_dataset_1",
 			SchemaImportPath: "nonExistentSchema",
 		})
-		err := manager.Validate(resources)
+		err := manager.Validate(resources, schemaRegistry)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "schema 'nonExistentSchema' for table 'bad_table' not found in registry")
 	})
@@ -187,7 +188,10 @@ func TestBigQueryManager_CreateResources(t *testing.T) {
 		mockTbl2.On("Metadata", ctx).Return(nil, notFoundErr).Once()
 		mockTbl2.On("Create", ctx, mock.AnythingOfType("*bigquery.TableMetadata")).Return(nil).Once()
 
-		_, _, err := manager.CreateResources(ctx, resources)
+		schemaRegistry := map[string]interface{}{
+			"testSchemaV1": TestSchema{},
+		}
+		_, _, err := manager.CreateResources(ctx, resources, schemaRegistry)
 
 		assert.NoError(t, err)
 		mockClient.AssertExpectations(t)
@@ -214,7 +218,10 @@ func TestBigQueryManager_CreateResources(t *testing.T) {
 		mockTbl2.On("Metadata", ctx).Return(nil, notFoundErr).Once()
 		mockTbl2.On("Create", ctx, mock.Anything).Return(creationErr).Once() // Fails
 
-		_, _, err := manager.CreateResources(ctx, resources)
+		schemaRegistry := map[string]interface{}{
+			"testSchemaV1": TestSchema{},
+		}
+		_, _, err := manager.CreateResources(ctx, resources, schemaRegistry)
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to create table 'test_table_2' in dataset 'test_dataset_2'")

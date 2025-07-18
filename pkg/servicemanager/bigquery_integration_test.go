@@ -55,14 +55,14 @@ func TestBigQueryManager_Integration(t *testing.T) {
 	bqAdapter, err := servicemanager.CreateGoogleBigQueryClient(ctx, projectID, bqConnection.ClientOptions...)
 	require.NoError(t, err)
 
-	manager, err := servicemanager.NewBigQueryManager(bqAdapter, logger, schemaRegistry, environment)
+	manager, err := servicemanager.NewBigQueryManager(bqAdapter, logger, environment)
 	require.NoError(t, err)
 
 	// =========================================================================
 	// --- Phase 1: CREATE Resources ---
 	// =========================================================================
 	t.Log("--- Starting CreateResources ---")
-	provTables, provDatasets, err := manager.CreateResources(ctx, resources)
+	provTables, provDatasets, err := manager.CreateResources(ctx, resources, schemaRegistry)
 	require.NoError(t, err)
 	assert.Len(t, provDatasets, 1, "Should provision one dataset")
 	assert.Len(t, provTables, 1, "Should provision one table")

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-iot/pkg/types"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,10 +91,9 @@ func TestServiceManager_RealIntegration_FullLifecycle(t *testing.T) {
 
 	// --- 3. Create the ServiceManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	schemaRegistry := map[string]interface{}{"TestSchema": types.GardenMonitorReadings{}}
 
 	// Use the production constructor, which creates all sub-managers internally.
-	sm, err := servicemanager.NewServiceManager(ctx, arch.Environment, schemaRegistry, nil, logger)
+	sm, err := servicemanager.NewServiceManager(ctx, arch, nil, logger)
 	require.NoError(t, err)
 
 	// --- 4. CREATE all resources for the entire architecture ---

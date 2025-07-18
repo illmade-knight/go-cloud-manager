@@ -27,8 +27,8 @@ type ServiceManager struct {
 }
 
 // NewServiceManager creates a new central manager, inspecting the architecture to determine
-// which sub-managers are needed.
-func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+// which sub-managers are needed. It no longer requires a schemaRegistry.
+func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	sm := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
 		writer:   writer,
@@ -36,24 +36,11 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, sche
 	}
 
 	// Scan the architecture to see which resource types are needed.
-	needsMessaging := false
-	needsStorage := false
-	needsBigQuery := false
-	for _, df := range arch.Dataflows {
-		if len(df.Resources.Topics) > 0 || len(df.Resources.Subscriptions) > 0 {
-			needsMessaging = true
-		}
-		if len(df.Resources.GCSBuckets) > 0 {
-			needsStorage = true
-		}
-		if len(df.Resources.BigQueryDatasets) > 0 || len(df.Resources.BigQueryTables) > 0 {
-			needsBigQuery = true
-		}
-	}
+	needsMessaging, needsStorage, needsBigQuery := scanArchitectureForResources(arch)
 
 	// Conditionally create clients and managers.
 	if needsMessaging {
-		sm.logger.Info().Msg("Messaging resources found in architecture, initializing MessagingManager.")
+		sm.logger.Info().Msg("Messaging resources found, initializing MessagingManager.")
 		msgClient, err := CreateGoogleMessagingClient(ctx, arch.ProjectID)
 		if err != nil {
 			return nil, err
@@ -65,7 +52,7 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, sche
 	}
 
 	if needsStorage {
-		sm.logger.Info().Msg("Storage resources found in architecture, initializing StorageManager.")
+		sm.logger.Info().Msg("Storage resources found, initializing StorageManager.")
 		gcsClient, err := CreateGoogleGCSClient(ctx)
 		if err != nil {
 			return nil, err
@@ -77,12 +64,13 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, sche
 	}
 
 	if needsBigQuery {
-		sm.logger.Info().Msg("BigQuery resources found in architecture, initializing BigQueryManager.")
+		sm.logger.Info().Msg("BigQuery resources found, initializing BigQueryManager.")
 		bqClient, err := CreateGoogleBigQueryClient(ctx, arch.ProjectID)
 		if err != nil {
 			return nil, err
 		}
-		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bqClient, logger, schemaRegistry, arch.Environment)
+		// The BigQueryManager is now created without the schema registry.
+		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bqClient, logger, arch.Environment)
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +101,7 @@ func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQCli
 		}
 	}
 	if bc != nil {
-		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bc, logger, schemaRegistry, environment)
+		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bc, logger, environment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create BigQuery manager from client: %w", err)
 		}
@@ -121,8 +109,6 @@ func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQCli
 
 	return sm, nil
 }
-
-// NewServiceManagerFromManagers remains for testing purposes.
 
 // NewServiceManagerFromManagers remains for testing purposes.
 func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
@@ -143,7 +129,7 @@ func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm
 	return svcMgr, nil
 }
 
-// SetupDataflow now looks up managers from the map and runs resource creation concurrently.
+// SetupDataflow now dynamically builds the schema registry map before creating resources.
 func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) (*ProvisionedResources, error) {
 	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting setup for specific dataflow")
 	targetDataflow, ok := arch.Dataflows[dataflowName]
@@ -158,9 +144,9 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 
 	if mgr, ok := sm.managers[MessagingResourceType]; ok {
 		wg.Add(1)
-		go func(messagingManager IMessagingManager) {
+		go func() {
 			defer wg.Done()
-			provTopics, provSubs, err := messagingManager.CreateResources(ctx, targetDataflow.Resources)
+			provTopics, provSubs, err := mgr.(IMessagingManager).CreateResources(ctx, targetDataflow.Resources)
 			if err != nil {
 				errChan <- err
 				return
@@ -169,14 +155,14 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 			provisioned.Topics = provTopics
 			provisioned.Subscriptions = provSubs
 			mu.Unlock()
-		}(mgr.(IMessagingManager))
+		}()
 	}
 
 	if mgr, ok := sm.managers[StorageResourceType]; ok {
 		wg.Add(1)
-		go func(storageManager IStorageManager) {
+		go func() {
 			defer wg.Done()
-			provBuckets, err := storageManager.CreateResources(ctx, targetDataflow.Resources)
+			provBuckets, err := mgr.(IStorageManager).CreateResources(ctx, targetDataflow.Resources)
 			if err != nil {
 				errChan <- err
 				return
@@ -184,14 +170,21 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 			mu.Lock()
 			provisioned.GCSBuckets = provBuckets
 			mu.Unlock()
-		}(mgr.(IStorageManager))
+		}()
 	}
 
 	if mgr, ok := sm.managers[BigQueryResourceType]; ok {
 		wg.Add(1)
-		go func(bigqueryManager IBigQueryManager) {
+		go func() {
 			defer wg.Done()
-			provTables, provDatasets, err := bigqueryManager.CreateResources(ctx, targetDataflow.Resources)
+			// Dynamically build the schema registry map only for this operation.
+			schemaRegistry, err := buildSchemaRegistry(targetDataflow.Resources.BigQueryTables)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			provTables, provDatasets, err := mgr.(IBigQueryManager).CreateResources(ctx, targetDataflow.Resources, schemaRegistry)
 			if err != nil {
 				errChan <- err
 				return
@@ -200,7 +193,7 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 			provisioned.BigQueryTables = provTables
 			provisioned.BigQueryDatasets = provDatasets
 			mu.Unlock()
-		}(mgr.(IBigQueryManager))
+		}()
 	}
 
 	wg.Wait()
@@ -334,4 +327,43 @@ func (sm *ServiceManager) TeardownAll(ctx context.Context, arch *MicroserviceArc
 
 	sm.logger.Info().Msg("Full environment teardown completed.")
 	return nil
+}
+
+func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessaging bool, needsStorage bool, needsBigQuery bool) {
+	for _, df := range arch.Dataflows {
+		if len(df.Resources.Topics) > 0 || len(df.Resources.Subscriptions) > 0 {
+			needsMessaging = true
+		}
+		if len(df.Resources.GCSBuckets) > 0 {
+			needsStorage = true
+		}
+		if len(df.Resources.BigQueryDatasets) > 0 || len(df.Resources.BigQueryTables) > 0 {
+			needsBigQuery = true
+		}
+	}
+	return
+}
+
+func buildSchemaRegistry(tables []BigQueryTable) (map[string]interface{}, error) {
+	registry := make(map[string]interface{})
+	for _, table := range tables {
+		// This is a placeholder for a more complex reflection-based system
+		// that would dynamically load types from packages. For now, it serves
+		// to illustrate the pattern of building the map on-demand.
+		// In a real implementation, you would use `plugin` or another mechanism
+		// to look up `table.SchemaImportPath` and `table.SchemaType`.
+		if table.SchemaType != "" {
+			// For the purpose of this refactor, we'll assume a known type for now.
+			// This would be replaced with dynamic type loading.
+			var instance interface{}
+			switch table.SchemaType {
+			// case "EnrichedTestPayload":
+			// 	instance = &EnrichedTestPayload{}
+			default:
+				return nil, fmt.Errorf("unknown schema type '%s' for table '%s'", table.SchemaType, table.Name)
+			}
+			registry[table.SchemaType] = instance
+		}
+	}
+	return registry, nil
 }
