@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,52 +25,6 @@ var (
 	regionFlag    = flag.String("region", "us-central1", "The GCP region for the deployment.")
 	imageRepoFlag = flag.String("image-repo", "test-images", "The Artifact Registry repository name.")
 )
-
-// toyAppSource defines a simple, self-contained Go application for deployment testing.
-var toyAppSource = map[string]string{
-	"go.mod": `
-module toy-app-for-testing
-go 1.22
-`,
-	"main.go": `
-package main
-import (
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-)
-func main() {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "Toy App is Healthy!")
-	})
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	log.Printf("INFO: Toy App listening on port %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-`,
-}
-
-// createTestSourceDir is a helper to write the toy app source to a temporary directory.
-func createTestSourceDir(t *testing.T, files map[string]string) (string, func()) {
-	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "toy-source")
-	require.NoError(t, err)
-
-	for name, content := range files {
-		p := filepath.Join(tmpDir, name)
-		dir := filepath.Dir(p)
-		err = os.MkdirAll(dir, 0755)
-		require.NoError(t, err, "Failed to create source subdirectories")
-		err = os.WriteFile(p, []byte(content), 0644)
-		require.NoError(t, err, "Failed to write source file")
-	}
-
-	return tmpDir, func() { os.RemoveAll(tmpDir) }
-}
 
 // TestOrchestrator_RealCloud_FullLifecycle performs a full, real-world deployment
 // using the Orchestrator to set up IAM and deploy a simple, self-contained application.
@@ -92,14 +45,10 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 	defer cancel()
 
 	// --- 1. Arrange ---
-	sourcePath, cleanupSource := createTestSourceDir(t, toyAppSource)
+	sourcePath, cleanupSource := createTestSourceDir(t, serviceDirectorAppSource)
 	defer cleanupSource()
 
 	runID := uuid.New().String()[:8]
-	//serviceNameSuffix := fmt.Sprintf("it-%s", runID)
-	//serviceName := "service-director-" + serviceNameSuffix
-
-	//imageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:latest", *regionFlag, projectID, *imageRepoFlag, serviceName)
 
 	// Create the full architecture definition for the test.
 	arch := &servicemanager.MicroserviceArchitecture{
@@ -118,8 +67,9 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 				Memory:              "512Mi",
 				// Env vars for the deployed ServiceDirector
 				EnvironmentVars: map[string]string{
-					"SD_COMMAND_TOPIC":    fmt.Sprintf("director-commands-%s", runID),
-					"SD_COMPLETION_TOPIC": fmt.Sprintf("director-events-%s", runID),
+					"SD_COMMAND_TOPIC":        fmt.Sprintf("director-commands-%s", runID),
+					"SD_COMMAND_SUBSCRIPTION": fmt.Sprintf("director-commands-subscription-%s", runID),
+					"SD_COMPLETION_TOPIC":     fmt.Sprintf("director-events-%s", runID),
 				},
 			},
 		},
@@ -128,7 +78,6 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 
 	err := servicemanager.HydrateArchitecture(arch, *imageRepoFlag, runID)
 	require.NoError(t, err)
-	//require.Equal(t, arch.ServiceManagerSpec.Deployment.Image, imageTag)
 
 	// --- NEW IAM STEP ---
 	// The Cloud Build SA needs permission to "act as" the runtime SA.
@@ -162,10 +111,8 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 	saEmail, err := iamOrch.SetupServiceDirectorIAM(ctx)
 	require.NoError(t, err)
 
-	runtimeServiceAccount := fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, runtimeSaName)
-
 	// Step 3b: Deploy the "toy" service, using the unique suffix.
-	serviceURL, err := orch.DeployServiceDirector(ctx, runtimeServiceAccount, saEmail)
+	serviceURL, err := orch.DeployServiceDirector(ctx, saEmail)
 	require.NoError(t, err)
 	require.NotEmpty(t, serviceURL)
 

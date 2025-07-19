@@ -3,6 +3,7 @@
 package deployment_test
 
 import (
+	"cloud.google.com/go/pubsub"
 	"context"
 	"errors"
 	"flag"
@@ -63,6 +64,33 @@ func main() {
 `,
 }
 
+// CheckGCPAuth is a helper that fails fast if the test is not configured to run.
+func CheckGCPAuth(t *testing.T) string {
+	t.Helper()
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		t.Skip("Skipping real integration test: GCP_PROJECT_ID environment variable is not set")
+	}
+	// A simple adminClient creation is enough to check basic auth config
+	// without performing a full API call like listing resources.
+	_, err := pubsub.NewClient(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf(`
+		---------------------------------------------------------------------
+		GCP AUTHENTICATION FAILED!
+		---------------------------------------------------------------------
+		Could not create a Google Cloud adminClient. This is likely due to
+		expired or missing Application Default Credentials (ADC).
+
+		To fix this, please run 'gcloud auth application-default login'.
+
+		Original Error: %v
+		---------------------------------------------------------------------
+		`, err)
+	}
+	return projectID
+}
+
 func setupTestRunnerSA(t *testing.T, ctx context.Context, projectID string) string {
 	t.Helper()
 	if saEmail := os.Getenv("GCP_TEST_RUNNER_SA"); saEmail != "" {
@@ -115,7 +143,7 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	if !flag.Parsed() {
 		flag.Parse()
 	}
-	projectID := iam.CheckGCPAuth(t)
+	projectID := CheckGCPAuth(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -251,11 +279,9 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 		}
 	})
 
-	//cloudBuildSA := fmt.Sprintf("projects/%s/serviceAccounts/885150127230@cloudbuild.gserviceaccount.com", projectID)
-	cloudBuildSA := ""
 	// --- Act ---
 	logger.Info().Str("service", serviceName).Str("source", sourcePath).Msg("Deploying service...")
-	serviceURL, err := deployer.Deploy(ctx, serviceName, cloudBuildSA, saEmail, spec)
+	serviceURL, err := deployer.Deploy(ctx, serviceName, saEmail, spec)
 	require.NoError(t, err)
 	require.NotEmpty(t, serviceURL)
 	logger.Info().Str("url", serviceURL).Msg("Service deployed successfully.")

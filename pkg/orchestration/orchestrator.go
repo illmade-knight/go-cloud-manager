@@ -187,7 +187,7 @@ func (o *Orchestrator) ensureCommandInfra(ctx context.Context) error {
 }
 
 // DeployServiceDirector handles the bootstrap deployment of the ServiceDirector.
-func (o *Orchestrator) DeployServiceDirector(ctx context.Context, deploymentServiceAccount, saEmail string) (string, error) {
+func (o *Orchestrator) DeployServiceDirector(ctx context.Context, saEmail string) (string, error) {
 	o.stateChan <- StateDeployingServiceDirector
 	o.logger.Info().Msg("Starting ServiceDirector deployment...")
 
@@ -197,7 +197,7 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, deploymentServ
 	}
 	serviceName := o.arch.ServiceManagerSpec.Name
 
-	serviceURL, err := o.deployer.Deploy(ctx, serviceName, deploymentServiceAccount, saEmail, *deploymentSpec)
+	serviceURL, err := o.deployer.Deploy(ctx, serviceName, saEmail, *deploymentSpec)
 	if err != nil {
 		o.stateChan <- StateError
 		return "", fmt.Errorf("servicedirector deployment failed: %w", err)

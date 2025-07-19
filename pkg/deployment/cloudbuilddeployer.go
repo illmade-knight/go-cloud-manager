@@ -81,7 +81,7 @@ func NewCloudBuildDeployer(ctx context.Context, projectID, defaultRegion, source
 }
 
 // Deploy orchestrates the full upload, build, and deploy workflow. It returns the URL of the deployed service.
-func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, deploymentServiceAccount, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
+func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting native cloud build and deploy workflow...")
 
 	stupid := fmt.Sprintf("%+v", spec)
@@ -93,8 +93,9 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, deployment
 	}
 	d.logger.Info().Str("gcs_path", fmt.Sprintf("gs://%s/%s", d.sourceBucket, sourceObject)).Msg("Source code uploaded.")
 
-	imageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", spec.Region, d.projectID, spec.ImageRepo, serviceName, uuid.New().String()[:8])
-	spec.Image = imageTag
+	if spec.Image == "" {
+		spec.Image = fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", spec.Region, d.projectID, spec.ImageRepo, serviceName, uuid.New().String()[:8])
+	}
 
 	if err := d.triggerCloudBuild(ctx, sourceObject, serviceAccountEmail, spec); err != nil {
 		return "", fmt.Errorf("cloud Build failed for service '%s': %w", serviceName, err)
@@ -135,7 +136,7 @@ func (d *CloudBuildDeployer) Teardown(ctx context.Context, serviceName string) e
 func (d *CloudBuildDeployer) createOrUpdateCloudRunService(ctx context.Context, serviceName, saEmail string, spec servicemanager.DeploymentSpec) (*run.GoogleCloudRunV2Service, error) {
 	parent := fmt.Sprintf("projects/%s/locations/%s", d.projectID, d.defaultRegion)
 	fullServiceName := fmt.Sprintf("%s/services/%s", parent, serviceName)
-	desiredService := buildRunServiceConfig(saEmail, spec)
+	desiredService := buildRunServiceConfig(d.projectID, saEmail, spec)
 
 	existingSvc, err := d.runService.Projects.Locations.Services.Get(fullServiceName).Context(ctx).Do()
 	var op *run.GoogleLongrunningOperation
@@ -180,11 +181,12 @@ func (d *CloudBuildDeployer) pollRunOperation(ctx context.Context, opName string
 	}
 }
 
-func buildRunServiceConfig(saEmail string, spec servicemanager.DeploymentSpec) *run.GoogleCloudRunV2Service {
+func buildRunServiceConfig(projectID, saEmail string, spec servicemanager.DeploymentSpec) *run.GoogleCloudRunV2Service {
 	var envVars []*run.GoogleCloudRunV2EnvVar
 	for k, v := range spec.EnvironmentVars {
 		envVars = append(envVars, &run.GoogleCloudRunV2EnvVar{Name: k, Value: v})
 	}
+
 	return &run.GoogleCloudRunV2Service{
 		Template: &run.GoogleCloudRunV2RevisionTemplate{
 			ServiceAccount: saEmail,
@@ -264,54 +266,48 @@ func (d *CloudBuildDeployer) uploadSourceToGCS(ctx context.Context, sourceDir, b
 func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObject, serviceAccountEmail string, spec servicemanager.DeploymentSpec) error {
 	d.logger.Info().Str("service account", serviceAccountEmail).Msg("Triggering Cloud Build")
 
-	var buildSteps []*cloudbuildpb.BuildStep
+	mainBuildCommand := fmt.Sprintf("pack build %s --path %s", spec.Image, spec.BuildableModulePath)
 
-	// This logic decides which build strategy to use based on the spec.
-	if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
-		// --- STRATEGY FOR MONOREPO SUBDIRECTORY ---
-		d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Using 3-step monorepo build strategy")
-
-		mainBuildCommand := fmt.Sprintf("pack build %s --path %s", spec.Image, spec.BuildableModulePath)
-
-		// Start with the standard two-step build process.
-		buildSteps = []*cloudbuildpb.BuildStep{
-			{
-				Name:       "gcr.io/k8s-skaffold/pack",
-				Id:         "pre-buildpack",
-				Entrypoint: "sh",
-				Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
-			},
-			{
-				Name:       "gcr.io/k8s-skaffold/pack",
-				Id:         "build",
-				Entrypoint: "sh",
-				Args:       []string{"-c", mainBuildCommand},
-			},
-		}
-
-		// If we are building a module in a subdirectory, prepend the copy step.
-		if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
-			d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Prepending 'copy-module-files' step for monorepo build")
-			copyStep := &cloudbuildpb.BuildStep{
-				Name:       "gcr.io/cloud-builders/gcloud",
-				Id:         "copy-module-files",
-				Entrypoint: "bash",
-				Args: []string{
-					"-c",
-					// This robust command copies go.sum only if it exists.
-					fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
-				},
-			}
-			// Prepend the copy step to the beginning of the slice.
-			buildSteps = append([]*cloudbuildpb.BuildStep{copyStep}, buildSteps...)
-		}
+	var buildSteps = []*cloudbuildpb.BuildStep{
+		{
+			Name:       "gcr.io/k8s-skaffold/pack",
+			Id:         "pre-buildpack",
+			Entrypoint: "sh",
+			Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest"},
+		},
+		{
+			Name:       "gcr.io/k8s-skaffold/pack",
+			Id:         "build",
+			Entrypoint: "sh",
+			Args:       []string{"-c", mainBuildCommand},
+		},
 	}
+
+	// If we are building a module in a subdirectory, prepend the copy step.
+	if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
+		d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Prepending 'copy-module-files' step for monorepo build")
+		copyStep := &cloudbuildpb.BuildStep{
+			Name:       "gcr.io/cloud-builders/gcloud",
+			Id:         "copy-module-files",
+			Entrypoint: "bash",
+			Args: []string{
+				"-c",
+				// This robust command copies go.sum only if it exists.
+				fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
+			},
+		}
+		// Prepend the copy step to the beginning of the slice.
+		buildSteps = append([]*cloudbuildpb.BuildStep{copyStep}, buildSteps...)
+	}
+
+	//fullSaName := fmt.Sprintf("projects/%s/serviceAccounts/%s", d.projectID, serviceAccountEmail)
 
 	// Now, construct the final build request with the correct steps.
 	req := &cloudbuildpb.CreateBuildRequest{
 		ProjectId: d.projectID,
 		Build: &cloudbuildpb.Build{
-			ServiceAccount: serviceAccountEmail,
+			// It's easier if we never fill in ServiceAccount field, that way it chooses the right one for us
+			// ServiceAccount: the cloud build service account,
 			Source: &cloudbuildpb.Source{
 				Source: &cloudbuildpb.Source_StorageSource{
 					StorageSource: &cloudbuildpb.StorageSource{
@@ -327,9 +323,6 @@ func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObj
 			},
 		},
 	}
-
-	dbg := fmt.Sprintf("%+v", req)
-	fmt.Printf("%s", dbg)
 
 	op, err := d.cloudbuildClient.CreateBuild(ctx, req)
 	if err != nil {

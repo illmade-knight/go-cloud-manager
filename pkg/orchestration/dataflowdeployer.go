@@ -52,7 +52,7 @@ func (dd *DataflowDeployer) DeployServices(ctx context.Context, dataflowName, di
 	for serviceName, serviceSpec := range dataflow.Services {
 		dd.logger.Info().Str("service", serviceName).Msg("Starting deployment...")
 
-		runtimeSAEmail, err := dd.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
+		saEmail, err := dd.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
 		if err != nil {
 			return fmt.Errorf("failed to ensure service account for service '%s': %w", serviceName, err)
 		}
@@ -72,7 +72,7 @@ func (dd *DataflowDeployer) DeployServices(ctx context.Context, dataflowName, di
 		deploymentSpec.EnvironmentVars["SERVICE_DIRECTOR_URL"] = directorURL
 		deploymentSpec.EnvironmentVars["PROJECT_ID"] = dd.arch.ProjectID
 
-		_, err = dd.deployer.Deploy(ctx, serviceName, "", runtimeSAEmail, *deploymentSpec)
+		_, err = dd.deployer.Deploy(ctx, serviceName, saEmail, *deploymentSpec)
 		if err != nil {
 			return fmt.Errorf("failed to deploy service '%s': %w", serviceName, err)
 		}
