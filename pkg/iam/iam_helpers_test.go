@@ -1,4 +1,4 @@
-package iam
+package iam_test
 
 import (
 	"cloud.google.com/go/pubsub"

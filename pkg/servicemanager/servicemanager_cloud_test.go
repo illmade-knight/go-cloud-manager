@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-iot/pkg/types"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +18,10 @@ import (
 	"strings"
 	"testing"
 )
+
+func init() {
+	servicemanager.RegisterSchema("TestSchema", types.GardenMonitorReadings{})
+}
 
 // TestServiceManager_RealIntegration_FullLifecycle tests the top-level ServiceManager's ability
 // to set up and tear down an entire architecture against REAL Google Cloud services.
@@ -65,9 +70,9 @@ func TestServiceManager_RealIntegration_FullLifecycle(t *testing.T) {
 					BigQueryDatasets: []servicemanager.BigQueryDataset{{CloudResource: servicemanager.CloudResource{Name: df2Dataset}}},
 					BigQueryTables: []servicemanager.BigQueryTable{
 						{
-							CloudResource:    servicemanager.CloudResource{Name: df2Table},
-							Dataset:          df2Dataset,
-							SchemaImportPath: "TestSchema",
+							CloudResource: servicemanager.CloudResource{Name: df2Table},
+							Dataset:       df2Dataset,
+							SchemaType:    "TestSchema",
 						},
 					},
 				},

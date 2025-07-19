@@ -1,26 +1,25 @@
 package orchestration
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
+
+	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
-	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
-	"sync"
-	"time"
 )
 
 // OrchestratorState defines the possible states of the orchestrator.
 type OrchestratorState string
 
-// We can now define more granular states for each step.
 const (
 	StateInitializing             OrchestratorState = "INITIALIZING"
 	StateCommandInfraReady        OrchestratorState = "COMMAND_INFRA_READY"
@@ -32,25 +31,21 @@ const (
 	StateError                    OrchestratorState = "ERROR"
 )
 
-// Config holds the necessary configuration for the Orchestrator.
-type Config struct {
-	ProjectID       string
-	Region          string
-	SourcePath      string
-	SourceBucket    string
-	ImageRepo       string
+type CommandMessaging struct {
 	CommandTopic    string
 	CompletionTopic string
 }
 
 // Orchestrator manages the deployment and verification of entire dataflows.
 type Orchestrator struct {
-	cfg              Config
+	arch             *servicemanager.MicroserviceArchitecture
 	logger           zerolog.Logger
 	deployer         *deployment.CloudBuildDeployer
-	iam              iam.IAMClient
+	iamOrchestrator  *IAMOrchestrator // Now uses the dedicated IAM orchestrator
 	psClient         *pubsub.Client
-	dataflowDeployer *DataflowDeployer // <-- Add the new deployer
+	dataflowDeployer *DataflowDeployer
+
+	serviceDirectorCmd CommandMessaging
 
 	stateChan chan OrchestratorState
 	closeOnce sync.Once
@@ -71,37 +66,42 @@ func (o *Orchestrator) Close() {
 	})
 }
 
-// NewOrchestrator creates a new, fully initialized Orchestrator for production use.
-func NewOrchestrator(ctx context.Context, cfg Config, logger zerolog.Logger) (*Orchestrator, error) {
-	psClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
+// NewOrchestrator creates a new, fully initialized Orchestrator.
+func NewOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) (*Orchestrator, error) {
+	if arch.ProjectID == "" {
+		return nil, errors.New("ProjectID cannot be empty in the architecture definition")
+	}
+	projectID := arch.ProjectID
+	region := arch.Region
+	sourceBucket := fmt.Sprintf("%s_cloudbuild", projectID)
+
+	psClient, err := pubsub.NewClient(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pubsub client: %w", err)
 	}
-	return NewOrchestratorFromClients(ctx, cfg, logger, psClient)
-}
 
-// NewOrchestratorFromClients creates a new Orchestrator with pre-configured clients.
-func NewOrchestratorFromClients(ctx context.Context, cfg Config, logger zerolog.Logger, psClient *pubsub.Client) (*Orchestrator, error) {
-	deployer, err := deployment.NewCloudBuildDeployer(ctx, cfg.ProjectID, cfg.Region, cfg.SourceBucket, logger)
+	deployer, err := deployment.NewCloudBuildDeployer(ctx, projectID, region, sourceBucket, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create deployer: %w", err)
 	}
 
-	iamClient, err := iam.NewGoogleIAMClient(ctx, cfg.ProjectID)
+	iamOrchestrator, err := NewIAMOrchestrator(ctx, arch, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create iam client: %w", err)
+		return nil, fmt.Errorf("failed to create iamClient orchestrator: %w", err)
 	}
 
-	// Create the new DataflowDeployer instance.
-	dataflowDeployer := NewDataflowDeployer(cfg, logger, deployer, iamClient)
+	dataflowDeployer, err := NewDataflowDeployer(ctx, arch, logger, deployer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dataflow deployer: %w", err)
+	}
 
 	orch := &Orchestrator{
-		cfg:              cfg,
+		arch:             arch,
 		logger:           logger,
 		deployer:         deployer,
-		iam:              iamClient,
+		iamOrchestrator:  iamOrchestrator,
 		psClient:         psClient,
-		dataflowDeployer: dataflowDeployer, // <-- Store it
+		dataflowDeployer: dataflowDeployer,
 		stateChan:        make(chan OrchestratorState, 10),
 	}
 
@@ -110,72 +110,112 @@ func NewOrchestratorFromClients(ctx context.Context, cfg Config, logger zerolog.
 	return orch, nil
 }
 
-// initialize handles the setup of command infrastructure and broadcasts state changes.
-func (o *Orchestrator) initialize(ctx context.Context) {
-	o.logger.Info().Msg("Orchestrator initializing command infrastructure...")
-	o.stateChan <- StateInitializing
+func NewOrchestratorWithClients(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, psClient *pubsub.Client, logger zerolog.Logger) (*Orchestrator, error) {
+	if arch.ProjectID == "" {
+		return nil, errors.New("ProjectID cannot be empty in the architecture definition")
+	}
+	projectID := arch.ProjectID
+	region := arch.Region
+	sourceBucket := fmt.Sprintf("%s_cloudbuild", projectID)
 
-	if err := ensureCommandInfra(ctx, o.psClient, o.cfg.CommandTopic, o.cfg.CompletionTopic); err != nil {
-		o.logger.Error().Err(err).Msg("Failed to set up command infrastructure")
-		o.stateChan <- StateError
+	deployer, err := deployment.NewCloudBuildDeployer(ctx, projectID, region, sourceBucket, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create deployer: %w", err)
 	}
 
-	o.logger.Info().Msg("Command infrastructure is ready.")
+	iamOrchestrator, err := NewIAMOrchestrator(ctx, arch, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iamClient orchestrator: %w", err)
+	}
+
+	dataflowDeployer, err := NewDataflowDeployer(ctx, arch, logger, deployer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dataflow deployer: %w", err)
+	}
+
+	orch := &Orchestrator{
+		arch:             arch,
+		logger:           logger,
+		deployer:         deployer,
+		iamOrchestrator:  iamOrchestrator,
+		dataflowDeployer: dataflowDeployer,
+		psClient:         psClient,
+		stateChan:        make(chan OrchestratorState, 10),
+	}
+
+	go orch.initialize(ctx)
+
+	return orch, nil
+}
+
+func (o *Orchestrator) initialize(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			o.stateChan <- StateError
+			close(o.stateChan)
+		}
+	}()
+
+	o.stateChan <- StateInitializing
+
+	if err := o.ensureCommandInfra(ctx); err != nil {
+		o.logger.Error().Err(err).Msg("Failed to set up command infrastructure")
+		o.stateChan <- StateError
+		return
+	}
+
 	o.stateChan <- StateCommandInfraReady
 }
 
-// DeployServiceDirector handles the special bootstrap deployment of the ServiceDirector.
-// It now accepts a suffix for the service name and returns the full name for teardown.
-func (o *Orchestrator) DeployServiceDirector(ctx context.Context, modulePath, nameSuffix string) (string, string, error) {
+// ensureCommandInfra creates the topics the orchestrator needs to function.
+// we need to communicate with serviceManager once it deploys
+func (o *Orchestrator) ensureCommandInfra(ctx context.Context) error {
+
+	commandTopic := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
+	completionTopic := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
+
+	o.serviceDirectorCmd.CommandTopic = commandTopic
+	o.serviceDirectorCmd.CompletionTopic = completionTopic
+
+	if err := ensureTopicExists(ctx, o.psClient, commandTopic); err != nil {
+		return err
+	}
+	if err := ensureTopicExists(ctx, o.psClient, completionTopic); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeployServiceDirector handles the bootstrap deployment of the ServiceDirector.
+func (o *Orchestrator) DeployServiceDirector(ctx context.Context, deploymentServiceAccount, saEmail string) (string, error) {
 	o.stateChan <- StateDeployingServiceDirector
+	o.logger.Info().Msg("Starting ServiceDirector deployment...")
 
-	serviceName := "service-director"
-	if nameSuffix != "" {
-		serviceName = fmt.Sprintf("%s-%s", serviceName, nameSuffix)
+	deploymentSpec := o.arch.ServiceManagerSpec.Deployment
+	if deploymentSpec == nil {
+		return "", errors.New("ServiceManagerSpec.Deployment is not defined in the architecture")
 	}
-	o.logger.Info().Str("service_name", serviceName).Msg("Bootstrapping ServiceDirector deployment...")
+	serviceName := o.arch.ServiceManagerSpec.Name
 
-	runtimeSA := "service-director-sa"
-	if nameSuffix != "" {
-		runtimeSA = fmt.Sprintf("%s-%s", runtimeSA, nameSuffix)
-	}
-
-	runtimeSAEmail, err := o.iam.EnsureServiceAccountExists(ctx, runtimeSA)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to ensure servicedirector sa: %w", err)
-	}
-
-	imageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", o.cfg.Region, o.cfg.ProjectID, o.cfg.ImageRepo, serviceName, uuid.New().String()[:8])
-
-	spec := servicemanager.DeploymentSpec{
-		SourcePath: o.cfg.SourcePath,
-		Image:      imageTag,
-		CPU:        "1",
-		Memory:     "512Mi",
-		//BuildEnvironmentVars: map[string]string{
-		//	"GOOGLE_BUILDABLE": modulePath,
-		//},
-		BuildableModulePath: modulePath,
-		EnvironmentVars: map[string]string{
-			"PROJECT_ID":          o.cfg.ProjectID,
-			"SD_COMMAND_TOPIC":    o.cfg.CommandTopic,
-			"SD_COMPLETION_TOPIC": o.cfg.CompletionTopic,
-		},
-	}
-
-	serviceURL, err := o.deployer.Deploy(ctx, serviceName, "", runtimeSAEmail, spec)
+	serviceURL, err := o.deployer.Deploy(ctx, serviceName, deploymentServiceAccount, saEmail, *deploymentSpec)
 	if err != nil {
 		o.stateChan <- StateError
-		return "", "", fmt.Errorf("servicedirector deployment failed: %w", err)
+		return "", fmt.Errorf("servicedirector deployment failed: %w", err)
 	}
 
-	if err := o.awaitRevisionReady(ctx, serviceName); err != nil {
+	if err := o.awaitRevisionReady(ctx, o.arch.ServiceManagerSpec); err != nil {
 		o.stateChan <- StateError
-		return "", "", fmt.Errorf("servicedirector never became healthy: %w", err)
+		return "", fmt.Errorf("servicedirector never became healthy: %w", err)
 	}
 
 	o.stateChan <- StateServiceDirectorReady
-	return serviceName, serviceURL, nil
+	return serviceURL, nil
+}
+
+// DeployDataflowServices now delegates the work to the new DataflowDeployer.
+func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName, directorURL string) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Handing off to DataflowDeployer to deploy application services...")
+	return o.dataflowDeployer.DeployServices(ctx, dataflowName, directorURL)
 }
 
 // TeardownServiceDirector handles the deletion of a deployed ServiceDirector.
@@ -188,7 +228,7 @@ func (o *Orchestrator) TeardownServiceDirector(ctx context.Context, serviceName 
 func (o *Orchestrator) TriggerDataflowSetup(ctx context.Context, dataflowName string) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Publishing 'setup' command...")
 
-	topic := o.psClient.Topic(o.cfg.CommandTopic)
+	topic := o.psClient.Topic(o.serviceDirectorCmd.CommandTopic)
 	// Do not Stop() the client's topic, as the client is shared and long-lived.
 
 	cmdPayload := map[string]string{"command": "setup", "dataflow_name": dataflowName}
@@ -210,7 +250,7 @@ func (o *Orchestrator) AwaitDataflowReady(ctx context.Context, dataflowName stri
 
 	subID := fmt.Sprintf("orchestrator-waiter-%s", uuid.New().String()[:8])
 	sub, err := o.psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-		Topic:       o.psClient.Topic(o.cfg.CompletionTopic),
+		Topic:       o.psClient.Topic(o.serviceDirectorCmd.CompletionTopic),
 		AckDeadline: 10 * time.Second,
 	})
 	if err != nil {
@@ -241,23 +281,17 @@ func (o *Orchestrator) AwaitDataflowReady(ctx context.Context, dataflowName stri
 	return nil
 }
 
-// DeployDataflowServices now delegates the work to the new DataflowDeployer.
-func (o *Orchestrator) DeployDataflowServices(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, dataflowName, directorURL string) error {
-	o.logger.Info().Str("dataflow", dataflowName).Msg("Handing off to DataflowDeployer to deploy application services...")
-	return o.dataflowDeployer.DeployServices(ctx, arch, dataflowName, directorURL)
-}
-
 // awaitRevisionReady is a private helper to poll a Cloud Run service until it's healthy.
-func (o *Orchestrator) awaitRevisionReady(ctx context.Context, serviceName string) error {
-	o.logger.Info().Str("service", serviceName).Msg("Verifying service is ready by polling the latest revision...")
+func (o *Orchestrator) awaitRevisionReady(ctx context.Context, spec servicemanager.ServiceSpec) error {
+	o.logger.Info().Str("service", spec.Name).Msg("Verifying service is ready by polling the latest revision...")
 
-	regionalEndpoint := fmt.Sprintf("%s-run.googleapis.com:443", o.cfg.Region)
+	regionalEndpoint := fmt.Sprintf("%s-run.googleapis.com:443", spec.Deployment.Region)
 	runService, err := run.NewService(ctx, option.WithEndpoint(regionalEndpoint))
 	if err != nil {
 		return fmt.Errorf("failed to create regional Run client for health check: %w", err)
 	}
 
-	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", o.cfg.ProjectID, o.cfg.Region, serviceName)
+	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", o.arch.ProjectID, spec.Deployment.Region, spec.Name)
 
 	timeout := time.After(3 * time.Minute)
 	ticker := time.NewTicker(10 * time.Second)
@@ -268,7 +302,7 @@ func (o *Orchestrator) awaitRevisionReady(ctx context.Context, serviceName strin
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timeout:
-			return fmt.Errorf("timeout: service %s never became ready", serviceName)
+			return fmt.Errorf("timeout: service %s never became ready", spec.Name)
 		case <-ticker.C:
 			svc, err := runService.Projects.Locations.Services.Get(fullServiceName).Do()
 			if err != nil {
@@ -285,7 +319,7 @@ func (o *Orchestrator) awaitRevisionReady(ctx context.Context, serviceName strin
 
 			for _, cond := range rev.Conditions {
 				if cond.Type == "Ready" && cond.State == "CONDITION_SUCCEEDED" {
-					o.logger.Info().Str("service", serviceName).Msg("Service is ready.")
+					o.logger.Info().Str("service", spec.Name).Msg("Service is ready.")
 					return nil
 				}
 			}

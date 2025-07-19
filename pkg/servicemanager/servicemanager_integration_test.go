@@ -15,6 +15,10 @@ import (
 	"testing"
 )
 
+func init() {
+	servicemanager.RegisterSchema("TestSchema", types.GardenMonitorReadings{})
+}
+
 // TestServiceManager_Integration_FullLifecycle tests the top-level ServiceManager's ability
 // to set up and tear down an entire architecture with multiple dataflows against live emulators.
 func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
@@ -57,9 +61,9 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 					BigQueryDatasets: []servicemanager.BigQueryDataset{{CloudResource: servicemanager.CloudResource{Name: df2Dataset}}},
 					BigQueryTables: []servicemanager.BigQueryTable{
 						{
-							CloudResource:    servicemanager.CloudResource{Name: df2Table},
-							Dataset:          df2Dataset,
-							SchemaImportPath: "TestSchema",
+							CloudResource: servicemanager.CloudResource{Name: df2Table},
+							Dataset:       df2Dataset,
+							SchemaType:    "TestSchema",
 						},
 					},
 				},

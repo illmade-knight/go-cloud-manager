@@ -31,18 +31,6 @@ func WaitForState(ctx context.Context, orch *Orchestrator, targetState Orchestra
 	}
 }
 
-// ... (other functions would be updated similarly to broadcast their state) ...
-// ensureCommandInfra creates the topics the orchestrator needs to function.
-func ensureCommandInfra(ctx context.Context, psClient *pubsub.Client, commandTopic, completionTopic string) error {
-	if err := ensureTopicExists(ctx, psClient, commandTopic); err != nil {
-		return err
-	}
-	if err := ensureTopicExists(ctx, psClient, completionTopic); err != nil {
-		return err
-	}
-	return nil
-}
-
 // ensureTopicExists is a private helper to create a Pub/Sub topic if it doesn't already exist.
 func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID string) error {
 	topic := client.Topic(topicID)

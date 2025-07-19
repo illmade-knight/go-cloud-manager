@@ -10,4 +10,6 @@ type IAMClient interface {
 	RemoveResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error
 
 	AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error
+	DeleteServiceAccount(ctx context.Context, accountName string) error // New function to grant a specific role to any member on a service account.
+	AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error
 }

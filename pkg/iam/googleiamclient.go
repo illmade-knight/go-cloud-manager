@@ -96,6 +96,34 @@ func (c *GoogleIAMClient) EnsureServiceAccountExists(ctx context.Context, accoun
 	return sa.Email, nil
 }
 
+// AddMemberToServiceAccountRole grants a role to a member on a specific service account.
+// This is the correct pattern for granting permissions like 'actAs'.
+func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
+	resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", c.projectID, serviceAccountEmail)
+
+	// 1. Get the current policy for the service account.
+	policy, err := c.iamAdminClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
+	if err != nil {
+		return fmt.Errorf("failed to get IAM policy for SA %s: %w", serviceAccountEmail, err)
+	}
+
+	// 2. Add the new member to the specified role.
+	// This uses the same robust logic as your existing EnsureRolesOnServiceAccount.
+	policy.Add(member, iam.RoleName(role))
+
+	// 3. Set the updated policy back on the service account.
+	_, err = c.iamAdminClient.SetIamPolicy(ctx, &admin.SetIamPolicyRequest{
+		Resource: resourceName,
+		Policy:   policy,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to set IAM policy for SA %s: %w", serviceAccountEmail, err)
+	}
+
+	log.Info().Str("member", member).Str("role", role).Str("on_sa", serviceAccountEmail).Msg("Successfully added IAM binding to service account.")
+	return nil
+}
+
 func (c *GoogleIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
 	// This client is specific to Artifact Registry
 	arClient, err := artifactregistry.NewClient(ctx)
@@ -172,6 +200,22 @@ func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, resourceTyp
 	default:
 		return fmt.Errorf("unsupported resource type for IAM binding: %s", resourceType)
 	}
+}
+
+func (c *GoogleIAMClient) DeleteServiceAccount(ctx context.Context, accountName string) error {
+	accountID := strings.Split(accountName, "@")[0]
+	email := fmt.Sprintf("%s@%s.iam.gserviceaccount.com", accountID, c.projectID)
+	resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", c.projectID, email)
+
+	req := &adminpb.DeleteServiceAccountRequest{Name: resourceName}
+	err := c.iamAdminClient.DeleteServiceAccount(ctx, req)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("failed to delete service account %s: %w", email, err)
+	}
+	if err == nil {
+		log.Info().Str("email", email).Msg("Successfully deleted service account.")
+	}
+	return nil
 }
 
 // RemoveResourceIAMBinding uses the correct handle for the given resource type to remove an IAM binding.

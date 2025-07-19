@@ -3,37 +3,43 @@ package orchestration
 import (
 	"context"
 	"fmt"
-	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 )
 
 // DataflowDeployer is responsible for deploying all services within a specific dataflow.
 type DataflowDeployer struct {
-	cfg      Config // Uses the same config as the orchestrator
-	logger   zerolog.Logger
-	deployer *deployment.CloudBuildDeployer
-	iam      iam.IAMClient
+	arch      *servicemanager.MicroserviceArchitecture // Holds the entire plan
+	logger    zerolog.Logger
+	deployer  *deployment.CloudBuildDeployer
+	iamClient iam.IAMClient
 }
 
 // NewDataflowDeployer creates a new deployer for dataflow services.
-func NewDataflowDeployer(cfg Config, logger zerolog.Logger, deployer *deployment.CloudBuildDeployer, iam iam.IAMClient) *DataflowDeployer {
-	return &DataflowDeployer{
-		cfg:      cfg,
-		logger:   logger.With().Str("component", "DataflowDeployer").Logger(),
-		deployer: deployer,
-		iam:      iam,
+// It now creates its own IAM client.
+func NewDataflowDeployer(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, deployer *deployment.CloudBuildDeployer) (*DataflowDeployer, error) {
+	iamClient, err := iam.NewGoogleIAMClient(ctx, arch.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iamClient client for dataflow deployer: %w", err)
 	}
+
+	return &DataflowDeployer{
+		arch:      arch,
+		logger:    logger.With().Str("component", "DataflowDeployer").Logger(),
+		deployer:  deployer,
+		iamClient: iamClient,
+	}, nil
 }
 
 // DeployServices loops through the services defined in a dataflow and deploys them.
-func (dd *DataflowDeployer) DeployServices(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, dataflowName, directorURL string) error {
+func (dd *DataflowDeployer) DeployServices(ctx context.Context, dataflowName, directorURL string) error {
 	dd.logger.Info().Str("dataflow", dataflowName).Msg("Beginning deployment of all application services...")
 
-	dataflow, ok := arch.Dataflows[dataflowName]
+	dataflow, ok := dd.arch.Dataflows[dataflowName]
 	if !ok {
 		return fmt.Errorf("dataflow '%s' not found in architecture definition", dataflowName)
 	}
@@ -46,30 +52,26 @@ func (dd *DataflowDeployer) DeployServices(ctx context.Context, arch *serviceman
 	for serviceName, serviceSpec := range dataflow.Services {
 		dd.logger.Info().Str("service", serviceName).Msg("Starting deployment...")
 
-		// Ensure the runtime service account for this service exists.
-		runtimeSAEmail, err := dd.iam.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
+		runtimeSAEmail, err := dd.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
 		if err != nil {
 			return fmt.Errorf("failed to ensure service account for service '%s': %w", serviceName, err)
 		}
 
-		// Use the deployment spec from the YAML file.
 		deploymentSpec := serviceSpec.Deployment
 		if deploymentSpec == nil {
 			dd.logger.Warn().Str("service", serviceName).Msg("Service has no deployment spec, skipping.")
 			continue
 		}
 
-		// Dynamically generate the image tag.
-		deploymentSpec.Image = fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", dd.cfg.Region, dd.cfg.ProjectID, dd.cfg.ImageRepo, serviceName, uuid.New().String()[:8])
+		// Now, Region and ImageRepo come from the spec itself.
+		deploymentSpec.Image = fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", deploymentSpec.Region, dd.arch.ProjectID, deploymentSpec.ImageRepo, serviceName, uuid.New().String()[:8])
 
-		// Inject the Director's URL and the Project ID as environment variables.
 		if deploymentSpec.EnvironmentVars == nil {
 			deploymentSpec.EnvironmentVars = make(map[string]string)
 		}
 		deploymentSpec.EnvironmentVars["SERVICE_DIRECTOR_URL"] = directorURL
-		deploymentSpec.EnvironmentVars["PROJECT_ID"] = dd.cfg.ProjectID
+		deploymentSpec.EnvironmentVars["PROJECT_ID"] = dd.arch.ProjectID
 
-		// Use the deployer to perform the full build and deploy.
 		_, err = dd.deployer.Deploy(ctx, serviceName, "", runtimeSAEmail, *deploymentSpec)
 		if err != nil {
 			return fmt.Errorf("failed to deploy service '%s': %w", serviceName, err)

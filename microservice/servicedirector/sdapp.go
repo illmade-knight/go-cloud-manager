@@ -49,7 +49,7 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	}
 	directorLogger.Info().Str("projectID", arch.ProjectID).Msg("loaded project architecture")
 
-	sm, err := servicemanager.NewServiceManager(ctx, arch.Environment, schemaRegistry, nil, directorLogger)
+	sm, err := servicemanager.NewServiceManager(ctx, arch, nil, directorLogger)
 	if err != nil {
 		return nil, fmt.Errorf("director: failed to create ServiceManager: %w", err)
 	}

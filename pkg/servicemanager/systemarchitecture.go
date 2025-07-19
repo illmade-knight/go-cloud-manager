@@ -66,7 +66,9 @@ type DeploymentSpec struct {
 
 	// Image is the full path to the Docker container image.
 	// e.g., "us-central1-docker.pkg.dev/my-project/services/my-service:latest"
-	Image string `yaml:"image"`
+	Image     string `yaml:"image"`
+	Region    string `yaml:"region,omitempty"`
+	ImageRepo string `yaml:"image_repo,omitempty"`
 
 	// CPU and Memory resource allocations.
 	CPU    string `yaml:"cpu,omitempty"`
@@ -160,27 +162,17 @@ type BigQueryDataset struct {
 
 // BigQueryTable defines the configuration for a BigQuery table.
 type BigQueryTable struct {
-	CloudResource         `yaml:",inline"`
-	Dataset               string   `yaml:"dataset"`
-	SchemaType            string   `yaml:"schema_type"`
+	CloudResource `yaml:",inline"`
+	Dataset       string `yaml:"dataset"`
+	SchemaType    string `yaml:"schema_type"`
+	// future proofing - not what we usually do
+	// for future reflection based lookup e.g github.com/illmade-knight/go-iot/pkg/types etc
 	SchemaImportPath      string   `yaml:"schema_import_path"`
 	TimePartitioningField string   `yaml:"time_partitioning_field,omitempty"`
 	TimePartitioningType  string   `yaml:"time_partitioning_type,omitempty"`
 	ClusteringFields      []string `yaml:"clustering_fields,omitempty"`
 	Expiration            Duration `yaml:"expiration,omitempty"`
 }
-
-//// BigQueryTable defines the configuration for a BigQuery table.
-//type BigQueryTable struct {
-//	CloudResource         `yaml:",inline"`
-//	Dataset               string   `yaml:"dataset"`
-//	SchemaType            string   `yaml:"schema_type"`         // Formerly SchemaGoType
-//	SchemaImportPath      string   `yaml:"schema_import_path"`  // Formerly SchemaGoPackage
-//	TimePartitioningField string   `yaml:"time_partitioning_field,omitempty"`
-//	TimePartitioningType  string   `yaml:"time_partitioning_type,omitempty"`
-//	ClusteringFields      []string `yaml:"clustering_fields,omitempty"`
-//	Expiration            Duration `yaml:"expiration,omitempty"`
-//}
 
 // GCSBucket defines the configuration for a GCS bucket.
 type GCSBucket struct {

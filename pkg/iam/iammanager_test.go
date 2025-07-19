@@ -21,6 +21,11 @@ func (m *MockIAMClient) EnsureServiceAccountExists(ctx context.Context, accountN
 	return args.String(0), args.Error(1)
 }
 
+func (m *MockIAMClient) DeleteServiceAccount(ctx context.Context, accountName string) error {
+	args := m.Called(ctx, accountName)
+	return args.Error(0)
+}
+
 func (m *MockIAMClient) AddResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
 	args := m.Called(ctx, resourceType, resourceID, role, member)
 	return args.Error(0)

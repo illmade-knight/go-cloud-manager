@@ -9,6 +9,45 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// --- New Schema Registry System ---
+
+// registeredSchemas holds a global mapping from a schema type name to an instance of the Go struct.
+var registeredSchemas = make(map[string]interface{})
+var registryMu sync.RWMutex
+
+// RegisterSchema allows other packages to register their BigQuery schema structs.
+// This is typically called from an init() function in the package where the struct is defined.
+func RegisterSchema(name string, schemaStruct interface{}) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if _, exists := registeredSchemas[name]; exists {
+		// In a real application, you might panic here or log a fatal error,
+		// as this indicates a programming error (duplicate registration).
+		panic(fmt.Sprintf("schema with name '%s' is already registered", name))
+	}
+	registeredSchemas[name] = schemaStruct
+}
+
+// buildSchemaRegistry is now fully implemented. It looks up types from the central registry.
+func buildSchemaRegistry(tables []BigQueryTable) (map[string]interface{}, error) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	registry := make(map[string]interface{})
+	for _, table := range tables {
+		if table.SchemaType != "" {
+			schemaInstance, ok := registeredSchemas[table.SchemaType]
+			if !ok {
+				return nil, fmt.Errorf("unknown schema type '%s' for table '%s'. Is it registered?", table.SchemaType, table.Name)
+			}
+			registry[table.SchemaType] = schemaInstance
+		}
+	}
+	return registry, nil
+}
+
+// --- The Rest of the File (with updates) ---
+
 // ResourceType defines a type-safe key for the managers map.
 type ResourceType string
 
@@ -19,7 +58,6 @@ const (
 )
 
 // ServiceManager coordinates all resource-specific operations by delegating to specialized managers.
-// It now holds a map of managers, making it dynamic.
 type ServiceManager struct {
 	managers map[ResourceType]IManager
 	logger   zerolog.Logger
@@ -27,7 +65,7 @@ type ServiceManager struct {
 }
 
 // NewServiceManager creates a new central manager, inspecting the architecture to determine
-// which sub-managers are needed. It no longer requires a schemaRegistry.
+// which sub-managers are needed.
 func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	sm := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
@@ -35,10 +73,8 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 		managers: make(map[ResourceType]IManager),
 	}
 
-	// Scan the architecture to see which resource types are needed.
 	needsMessaging, needsStorage, needsBigQuery := scanArchitectureForResources(arch)
 
-	// Conditionally create clients and managers.
 	if needsMessaging {
 		sm.logger.Info().Msg("Messaging resources found, initializing MessagingManager.")
 		msgClient, err := CreateGoogleMessagingClient(ctx, arch.ProjectID)
@@ -69,7 +105,6 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 		if err != nil {
 			return nil, err
 		}
-		// The BigQueryManager is now created without the schema registry.
 		sm.managers[BigQueryResourceType], err = NewBigQueryManager(bqClient, logger, arch.Environment)
 		if err != nil {
 			return nil, err
@@ -177,7 +212,6 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Dynamically build the schema registry map only for this operation.
 			schemaRegistry, err := buildSchemaRegistry(targetDataflow.Resources.BigQueryTables)
 			if err != nil {
 				errChan <- err
@@ -329,6 +363,8 @@ func (sm *ServiceManager) TeardownAll(ctx context.Context, arch *MicroserviceArc
 	return nil
 }
 
+// --- Private Helper Functions ---
+
 func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessaging bool, needsStorage bool, needsBigQuery bool) {
 	for _, df := range arch.Dataflows {
 		if len(df.Resources.Topics) > 0 || len(df.Resources.Subscriptions) > 0 {
@@ -342,28 +378,4 @@ func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessagin
 		}
 	}
 	return
-}
-
-func buildSchemaRegistry(tables []BigQueryTable) (map[string]interface{}, error) {
-	registry := make(map[string]interface{})
-	for _, table := range tables {
-		// This is a placeholder for a more complex reflection-based system
-		// that would dynamically load types from packages. For now, it serves
-		// to illustrate the pattern of building the map on-demand.
-		// In a real implementation, you would use `plugin` or another mechanism
-		// to look up `table.SchemaImportPath` and `table.SchemaType`.
-		if table.SchemaType != "" {
-			// For the purpose of this refactor, we'll assume a known type for now.
-			// This would be replaced with dynamic type loading.
-			var instance interface{}
-			switch table.SchemaType {
-			// case "EnrichedTestPayload":
-			// 	instance = &EnrichedTestPayload{}
-			default:
-				return nil, fmt.Errorf("unknown schema type '%s' for table '%s'", table.SchemaType, table.Name)
-			}
-			registry[table.SchemaType] = instance
-		}
-	}
-	return registry, nil
 }

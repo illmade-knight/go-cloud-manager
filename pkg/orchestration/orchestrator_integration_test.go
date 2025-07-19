@@ -4,7 +4,6 @@ package orchestration_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -18,68 +17,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// EmbeddedArchitectureLoader is a mock loader for the test.
-type EmbeddedArchitectureLoader struct {
-	arch *servicemanager.MicroserviceArchitecture
-}
-
-func (l *EmbeddedArchitectureLoader) LoadArchitecture(ctx context.Context) (*servicemanager.MicroserviceArchitecture, error) {
-	return l.arch, nil
-}
-
-func (l *EmbeddedArchitectureLoader) LoadResourceGroup(ctx context.Context, groupName string) (*servicemanager.ResourceGroup, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (l *EmbeddedArchitectureLoader) WriteProvisionedResources(ctx context.Context, resources *servicemanager.ProvisionedResources) error {
-	return fmt.Errorf("not implemented")
-}
-
 // TestOrchestratorCommandFlow verifies the full async command-and-reply loop using emulators.
 func TestOrchestratorCommandFlow(t *testing.T) {
 	logger := log.With().Str("test", "TestOrchestratorCommandFlow").Logger()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// --- 1. Setup Emulated Pub/Sub ---
-	t.Log("Setting up Pub/Sub emulator...")
+	// --- 1. Setup ---
 	projectID := "test-harness-project"
 	commandTopicID := "director-commands-harness"
+	commandSubID := "director-command-sub-harness"
 	completionTopicID := "director-events-harness"
 	dataflowTopicToCreate := "e2e-dataflow-topic"
 
+	// Start the emulator and create a client for it.
 	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
-
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
 	defer psClient.Close()
 
 	// --- 2. Create the Orchestrator ---
-	t.Log("Creating orchestrator...")
-	orchCfg := orchestration.Config{
-		ProjectID:       projectID,
-		Region:          "us-central1",
-		CommandTopic:    commandTopicID,
-		CompletionTopic: completionTopicID,
-	}
-	orch, err := orchestration.NewOrchestratorFromClients(ctx, orchCfg, logger, psClient)
-	require.NoError(t, err)
-	t.Cleanup(orch.Close)
-
-	t.Log("Waiting for orchestrator to create command topics...")
-	require.NoError(t, orchestration.WaitForState(ctx, orch, orchestration.StateCommandInfraReady), "Orchestrator failed to initialize command infrastructure")
-	t.Log("Orchestrator is ready.")
-
-	// --- 3. Run ServiceDirector In-Memory ---
-	t.Log("Starting in-memory ServiceDirector...")
-	directorCfg := &servicedirector.Config{
-		BaseConfig:          microservice.BaseConfig{ProjectID: projectID},
-		CommandTopic:        commandTopicID,
-		CommandSubscription: "director-command-sub-harness",
-		CompletionTopic:     completionTopicID,
-	}
+	// The test now defines a MicroserviceArchitecture as the main configuration.
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{ProjectID: projectID},
+		Environment: servicemanager.Environment{
+			ProjectID: projectID,
+			Region:    "us-central1", // Required by the deployer
+		},
+		// Define the ServiceManagerSpec with the command topics needed by the orchestrator.
+		ServiceManagerSpec: servicemanager.ServiceSpec{
+			Deployment: &servicemanager.DeploymentSpec{
+				EnvironmentVars: map[string]string{
+					"SD_COMMAND_TOPIC":    commandTopicID,
+					"SD_COMPLETION_TOPIC": completionTopicID,
+				},
+			},
+		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-flow": {
 				Resources: servicemanager.CloudResourcesSpec{
@@ -90,14 +62,30 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 			},
 		},
 	}
-	loader := orchestration.NewEmbeddedArchitectureLoader(arch)
 
-	// Create the ServiceManager with the emulated client.
+	// Create the orchestrator using the new architecture-driven constructor.
+	// We pass 'nil' for the schema registry as it's not needed for this flow.
+	orch, err := orchestration.NewOrchestratorWithClients(ctx, arch, psClient, logger)
+	require.NoError(t, err)
+	t.Cleanup(orch.Close)
+
+	// Wait for the orchestrator to finish its initialization (creating topics).
+	t.Log("Waiting for orchestrator to become ready...")
+	require.NoError(t, orchestration.WaitForState(ctx, orch, orchestration.StateCommandInfraReady), "Orchestrator failed to initialize command infrastructure")
+	t.Log("Orchestrator is ready.")
+
+	// --- 3. Run ServiceDirector In-Memory ---
+	t.Log("Starting in-memory ServiceDirector...")
+	directorCfg := &servicedirector.Config{
+		BaseConfig:          microservice.BaseConfig{ProjectID: projectID},
+		CommandTopic:        commandTopicID,
+		CommandSubscription: commandSubID,
+		CompletionTopic:     completionTopicID,
+	}
+	loader := orchestration.NewEmbeddedArchitectureLoader(arch)
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, nil, logger)
 	require.NoError(t, err)
-
-	// Use the single, correct constructor for the director.
 	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, loader, sm, psClient, logger)
 	require.NoError(t, err)
 	require.NoError(t, director.Start())
