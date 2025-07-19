@@ -148,6 +148,70 @@ func NewOrchestratorWithClients(ctx context.Context, arch *servicemanager.Micros
 	return orch, nil
 }
 
+// AwaitServiceReady listens on the completion topic for a specific "service_ready"
+// event from a newly deployed service, confirming it's fully initialized.
+func (o *Orchestrator) AwaitServiceReady(ctx context.Context, serviceName string) error {
+	o.logger.Info().Str("service", serviceName).Msg("Waiting for 'service_ready' event...")
+
+	// Get the completion topic name from the architecture spec.
+	completionTopicID := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
+	if completionTopicID == "" {
+		return errors.New("completion topic is not defined in the ServiceManagerSpec deployment environment variables")
+	}
+
+	// Create a temporary, unique subscription to the completion topic to listen for the reply.
+	subID := fmt.Sprintf("orchestrator-waiter-%s", uuid.New().String()[:8])
+	sub, err := o.psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
+		Topic:       o.psClient.Topic(completionTopicID),
+		AckDeadline: 10 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create temporary subscription for ready event: %w", err)
+	}
+	// Ensure the temporary subscription is always deleted.
+	defer sub.Delete(context.Background())
+
+	// Use a new context with a deadline for the listener.
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+
+	// Use a channel to receive the result from the background listener.
+	eventReceived := make(chan bool, 1)
+
+	err = sub.Receive(cctx, func(ctx context.Context, msg *pubsub.Message) {
+		msg.Ack()
+		o.logger.Info().Str("message_id", msg.ID).Str("data", string(msg.Data)).Msg("Received event message")
+
+		// Unmarshal into a generic event to check the type.
+		var event struct {
+			EventType   string `json:"event_type"`
+			ServiceName string `json:"service_name"`
+		}
+		if err := json.Unmarshal(msg.Data, &event); err != nil {
+			o.logger.Warn().Err(err).Msg("Failed to unmarshal event message")
+			return // Ignore malformed messages.
+		}
+
+		// Check if this is the specific event we are waiting for.
+		if event.EventType == "service_ready" && event.ServiceName == serviceName {
+			eventReceived <- true
+			cancel() // Stop receiving messages.
+		}
+	})
+
+	// Check the final outcome.
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("error receiving ready event: %w", err)
+	}
+
+	if len(eventReceived) == 0 {
+		return fmt.Errorf("timeout waiting for 'service_ready' event from '%s'", serviceName)
+	}
+
+	o.logger.Info().Str("service", serviceName).Msg("Service readiness confirmed.")
+	return nil
+}
+
 func (o *Orchestrator) initialize(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -203,7 +267,7 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, saEmail string
 		return "", fmt.Errorf("servicedirector deployment failed: %w", err)
 	}
 
-	if err := o.awaitRevisionReady(ctx, o.arch.ServiceManagerSpec); err != nil {
+	if err := o.AwaitRevisionReady(ctx, o.arch.ServiceManagerSpec); err != nil {
 		o.stateChan <- StateError
 		return "", fmt.Errorf("servicedirector never became healthy: %w", err)
 	}
@@ -282,7 +346,7 @@ func (o *Orchestrator) AwaitDataflowReady(ctx context.Context, dataflowName stri
 }
 
 // awaitRevisionReady is a private helper to poll a Cloud Run service until it's healthy.
-func (o *Orchestrator) awaitRevisionReady(ctx context.Context, spec servicemanager.ServiceSpec) error {
+func (o *Orchestrator) AwaitRevisionReady(ctx context.Context, spec servicemanager.ServiceSpec) error {
 	o.logger.Info().Str("service", spec.Name).Msg("Verifying service is ready by polling the latest revision...")
 
 	regionalEndpoint := fmt.Sprintf("%s-run.googleapis.com:443", spec.Deployment.Region)

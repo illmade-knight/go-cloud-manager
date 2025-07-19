@@ -23,26 +23,22 @@ import (
 // TestOrchestrator_DataflowE2E performs a full, real-world deployment of a multi-service
 // dataflow, and verifies it by passing a tracer message through the live system.
 func TestOrchestrator_DataflowE2E(t *testing.T) {
+
 	projectID := os.Getenv("GCP_PROJECT_ID")
-
-	if projectID == "" {
-		t.Skip("Skipping cloud integration test: -project-id flag or GCP_PROJECT_ID env var must be set.")
-	}
-
 	region := "eu-central-1"
 	imageRepo := "test-images"
 
 	logger := log.With().Str("test", "TestOrchestrator_DataflowE2E").Logger()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	// --- 1. Arrange ---
 	runID := uuid.New().String()[:8]
 
 	// Get absolute paths to our testdata applications
-	sdSourcePath, _ := filepath.Abs("./testdata/toyservicedirector")
-	pubSourcePath, _ := filepath.Abs("./testdata/tracerpub")
-	subSourcePath, _ := filepath.Abs("./testdata/tracersub")
+	sdSourcePath, _ := filepath.Abs("./testdata/toy-servicedirector")
+	pubSourcePath, _ := filepath.Abs("./testdata/tracer-publisher")
+	subSourcePath, _ := filepath.Abs("./testdata/tracer-subscriber")
 
 	// Define names for all unique resources for this test run
 	sdName := fmt.Sprintf("sd-%s", runID)
@@ -51,8 +47,8 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	commandTopicID := fmt.Sprintf("director-commands-%s", runID)
 	commandSubID := fmt.Sprintf("director-command-sub-%s", runID)
 	completionTopicID := fmt.Sprintf("director-events-%s", runID)
-	tracerTopicID := fmt.Sprintf("tracer-topic-%s", runID)
-	tracerSubID := fmt.Sprintf("tracer-sub-%s", runID)
+	tracerTopicName := fmt.Sprintf("tracer-topic-%s", runID)
+	tracerSubName := fmt.Sprintf("tracer-sub-%s", runID)
 
 	// Define the full architecture for the test.
 	arch := &servicemanager.MicroserviceArchitecture{
@@ -63,14 +59,10 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 			Deployment: &servicemanager.DeploymentSpec{
 				SourcePath:          sdSourcePath,
 				BuildableModulePath: ".",
-				// THIS IS THE KEY FIX: Provide all environment variables the toy director needs.
 				EnvironmentVars: map[string]string{
-					"PROJECT_ID":              projectID,
 					"SD_COMMAND_TOPIC":        commandTopicID,
 					"SD_COMMAND_SUBSCRIPTION": commandSubID,
 					"SD_COMPLETION_TOPIC":     completionTopicID,
-					"TRACER_TOPIC_ID":         tracerTopicID,
-					"TRACER_SUB_ID":           tracerSubID,
 				},
 			},
 		},
@@ -82,9 +74,7 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 						Deployment: &servicemanager.DeploymentSpec{
 							SourcePath:          pubSourcePath,
 							BuildableModulePath: ".",
-							EnvironmentVars: map[string]string{
-								"TOPIC_ID": tracerTopicID,
-							},
+							EnvironmentVars:     map[string]string{"TOPIC_ID": tracerTopicName},
 						},
 					},
 					subName: {
@@ -92,15 +82,13 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 						Deployment: &servicemanager.DeploymentSpec{
 							SourcePath:          subSourcePath,
 							BuildableModulePath: ".",
-							EnvironmentVars: map[string]string{
-								"SUBSCRIPTION_ID": tracerSubID,
-							},
+							EnvironmentVars:     map[string]string{"SUBSCRIPTION_ID": tracerSubName},
 						},
 					},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
-					Topics:        []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: tracerTopicID}}},
-					Subscriptions: []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: tracerSubID}, Topic: tracerTopicID}},
+					Topics:        []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: tracerTopicName}}},
+					Subscriptions: []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: tracerSubName}, Topic: tracerTopicName}},
 				},
 			},
 		},
@@ -108,33 +96,53 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	require.NoError(t, servicemanager.HydrateArchitecture(arch, imageRepo, ""))
 
 	// --- 2. Create Orchestrator and Run Full Workflow ---
-	orch, _ := orchestration.NewOrchestrator(ctx, arch, logger)
+	orch, err := orchestration.NewOrchestrator(ctx, arch, logger)
+	require.NoError(t, err)
 	defer orch.Close()
-	iamOrch, _ := orchestration.NewIAMOrchestrator(ctx, arch, logger)
 
-	sdSaEmail, _ := iamOrch.SetupServiceDirectorIAM(ctx)
-	iamOrch.SetupDataflowIAM(ctx)
-	directorURL, _ := orch.DeployServiceDirector(ctx, sdSaEmail)
-	orch.TriggerDataflowSetup(ctx, "tracer-flow")
-	orch.AwaitDataflowReady(ctx, "tracer-flow")
-	orch.DeployDataflowServices(ctx, "tracer-flow", directorURL)
+	iamOrch, err := orchestration.NewIAMOrchestrator(ctx, arch, logger)
+	require.NoError(t, err)
+
+	// Step 2a: Setup IAM
+	sdSaEmail, err := iamOrch.SetupServiceDirectorIAM(ctx)
+	require.NoError(t, err)
+	err = iamOrch.SetupDataflowIAM(ctx)
+	require.NoError(t, err)
+
+	// Step 2b: Deploy Director and WAIT for it to be ready via Pub/Sub event
+	directorURL, err := orch.DeployServiceDirector(ctx, sdSaEmail)
+	require.NoError(t, err)
+	t.Logf("Waiting for 'service_ready' event from %s...", sdName)
+	err = orch.AwaitServiceReady(ctx, sdName)
+	require.NoError(t, err, "Did not receive 'service_ready' event in time")
+	t.Log("ServiceDirector is confirmed ready via Pub/Sub event.")
+
+	// Step 2c: Trigger and Await Dataflow Resource Creation
+	err = orch.TriggerDataflowSetup(ctx, "tracer-flow")
+	require.NoError(t, err)
+	err = orch.AwaitDataflowReady(ctx, "tracer-flow")
+	require.NoError(t, err)
+	t.Log("Dataflow resource setup complete.")
+
+	// Step 2d: Deploy the application services
+	err = orch.DeployDataflowServices(ctx, "tracer-flow", directorURL)
+	require.NoError(t, err)
+	t.Log("Application services deployed.")
 
 	// --- 3. Verify the Live Dataflow ---
 	t.Log("All services deployed. Performing live dataflow verification...")
 	traceID := uuid.New().String()
 
 	publisherSvcSpec := arch.Dataflows["tracer-flow"].Services[pubName]
-	publisherURL := publisherSvcSpec.Deployment.Image // Image field is replaced by service URL after deploy
-	require.NotEmpty(t, publisherURL, "Publisher URL should not be empty after deployment")
+	require.NoError(t, orch.AwaitRevisionReady(ctx, publisherSvcSpec), "Tracer Publisher never became ready")
+	publisherURL := publisherSvcSpec.Deployment.Image
 
-	// Send the tracer message via an HTTP request.
 	resp, err := http.Post(fmt.Sprintf("%s?trace_id=%s", publisherURL, traceID), "application/json", nil)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 	t.Logf("Successfully sent tracer message with ID: %s", traceID)
 
-	// Poll the logs of the subscriber service until the tracer message appears.
 	require.Eventually(t, func() bool {
 		found, err := checkCloudRunLogs(ctx, projectID, subName, traceID)
 		if err != nil {
