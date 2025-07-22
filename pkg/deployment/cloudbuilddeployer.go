@@ -132,24 +132,20 @@ func (d *CloudBuildDeployer) Teardown(ctx context.Context, serviceName string) e
 }
 
 // --- Private Helper Methods ---
-
 func (d *CloudBuildDeployer) createOrUpdateCloudRunService(ctx context.Context, serviceName, saEmail string, spec servicemanager.DeploymentSpec) (*run.GoogleCloudRunV2Service, error) {
 	parent := fmt.Sprintf("projects/%s/locations/%s", d.projectID, d.defaultRegion)
 	fullServiceName := fmt.Sprintf("%s/services/%s", parent, serviceName)
-	desiredService := buildRunServiceConfig(d.projectID, saEmail, spec)
+	desiredService := buildRunServiceConfig(saEmail, spec)
 
 	existingSvc, err := d.runService.Projects.Locations.Services.Get(fullServiceName).Context(ctx).Do()
 	var op *run.GoogleLongrunningOperation
 
 	if err != nil {
-		// CORRECTED: This now properly checks for the specific 404 error
-		// from the Google API client library.
-		var gerr *googleapi.Error
-		if errors.As(err, &gerr) && gerr.Code == http.StatusNotFound {
+		var gErr *googleapi.Error
+		if errors.As(err, &gErr) && gErr.Code == http.StatusNotFound {
 			d.logger.Info().Str("service", serviceName).Msg("Service does not exist, creating it now.")
 			op, err = d.runService.Projects.Locations.Services.Create(parent, desiredService).ServiceId(serviceName).Context(ctx).Do()
 		} else {
-			// A different, unexpected error occurred.
 			return nil, fmt.Errorf("failed to get status of existing Cloud Run service: %w", err)
 		}
 	} else {
@@ -181,7 +177,7 @@ func (d *CloudBuildDeployer) pollRunOperation(ctx context.Context, opName string
 	}
 }
 
-func buildRunServiceConfig(projectID, saEmail string, spec servicemanager.DeploymentSpec) *run.GoogleCloudRunV2Service {
+func buildRunServiceConfig(saEmail string, spec servicemanager.DeploymentSpec) *run.GoogleCloudRunV2Service {
 	var envVars []*run.GoogleCloudRunV2EnvVar
 	for k, v := range spec.EnvironmentVars {
 		envVars = append(envVars, &run.GoogleCloudRunV2EnvVar{Name: k, Value: v})

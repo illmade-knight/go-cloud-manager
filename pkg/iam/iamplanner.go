@@ -56,41 +56,52 @@ func (p *RolePlanner) PlanRolesForServiceDirector(ctx context.Context, arch *ser
 	return rolesSlice, nil
 }
 
-// PlanRolesForApplicationServices inspects the architecture and creates a detailed plan of which
-// roles each individual application service needs on each specific resource.
+// PlanRolesForApplicationServices now infers common roles from environment variables
+// for Pub/Sub, BigQuery, and GCS, in addition to reading explicit policies.
 func (p *RolePlanner) PlanRolesForApplicationServices(ctx context.Context, arch *servicemanager.MicroserviceArchitecture) (map[string][]IAMBinding, error) {
 	p.logger.Info().Str("architecture", arch.Name).Msg("Planning required IAM roles for all application services...")
 
-	// The final plan will be a map where the key is the service account name (e.g., "ingestion-sa")
-	// and the value is a list of all the permissions it needs.
 	finalPlan := make(map[string][]IAMBinding)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(arch.Dataflows))
 
-	// As you suggested, we can process each dataflow in parallel.
 	for _, dataflow := range arch.Dataflows {
-		wg.Add(1)
-		go func(df servicemanager.ResourceGroup) {
-			defer wg.Done()
-			// For each service in this dataflow...
-			for serviceName, serviceSpec := range df.Services {
-				// ...scan all resources in this dataflow to find policies for this service.
-				scanResourcesForService(serviceName, serviceSpec.ServiceAccount, df.Resources, finalPlan, &mu)
+		for serviceName, serviceSpec := range dataflow.Services {
+			// --- Role Inference Logic ---
+			if serviceSpec.Deployment != nil && serviceSpec.Deployment.EnvironmentVars != nil {
+				envVars := serviceSpec.Deployment.EnvironmentVars
+				// Infer Pub/Sub Publisher role
+				if topicID, ok := envVars["TOPIC_ID"]; ok {
+					p.logger.Info().Str("service", serviceName).Str("topic", topicID).Msg("Inferred publisher role")
+					addBindingToPlan(serviceSpec.ServiceAccount, "pubsub_topic", topicID, "roles/pubsub.publisher", finalPlan, &mu)
+				}
+				// Infer Pub/Sub Subscriber role
+				if subID, ok := envVars["SUBSCRIPTION_ID"]; ok {
+					p.logger.Info().Str("service", serviceName).Str("subscription", subID).Msg("Inferred subscriber role")
+					addBindingToPlan(serviceSpec.ServiceAccount, "pubsub_subscription", subID, "roles/pubsub.subscriber", finalPlan, &mu)
+				}
+				// Infer BigQuery Data Editor role
+				if datasetID, ok := envVars["BIGQUERY_DATASET_ID"]; ok {
+					p.logger.Info().Str("service", serviceName).Str("dataset", datasetID).Msg("Inferred bigquery data editor role")
+					addBindingToPlan(serviceSpec.ServiceAccount, "bigquery_dataset", datasetID, "roles/bigquery.dataEditor", finalPlan, &mu)
+				}
+				// Infer GCS Object Admin role
+				if bucketName, ok := envVars["GCS_BUCKET_NAME"]; ok {
+					p.logger.Info().Str("service", serviceName).Str("bucket", bucketName).Msg("Inferred storage object admin role")
+					addBindingToPlan(serviceSpec.ServiceAccount, "gcs_bucket", bucketName, "roles/storage.objectAdmin", finalPlan, &mu)
+				}
 			}
-		}(dataflow)
-	}
 
-	wg.Wait()
-	close(errChan)
-	// In a real implementation, you might want to handle errors from the goroutines.
+			// --- Scan for explicit policies ---
+			scanResourcesForExplicitPolicies(serviceName, serviceSpec.ServiceAccount, dataflow.Resources, finalPlan, &mu)
+		}
+	}
 
 	p.logger.Info().Int("services_planned", len(finalPlan)).Msg("Application service IAM role plan complete.")
 	return finalPlan, nil
 }
 
-// scanResourcesForService is a helper that checks all resource types for IAM policies matching a given service.
-func scanResourcesForService(serviceName, serviceAccount string, resources servicemanager.CloudResourcesSpec, plan map[string][]IAMBinding, mu *sync.Mutex) {
+// scanResourcesForExplicitPolicies is a helper that checks all resource types for explicit IAM policies.
+func scanResourcesForExplicitPolicies(serviceName, serviceAccount string, resources servicemanager.CloudResourcesSpec, plan map[string][]IAMBinding, mu *sync.Mutex) {
 	// Check Topics
 	for _, topic := range resources.Topics {
 		for _, policy := range topic.IAMPolicy {

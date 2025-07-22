@@ -64,6 +64,8 @@ type DeploymentSpec struct {
 
 	SourcePath string `yaml:"source_path"`
 
+	ServiceURL string `yaml:"service_url"`
+
 	// Image is the full path to the Docker container image.
 	// e.g., "us-central1-docker.pkg.dev/my-project/services/my-service:latest"
 	Image     string `yaml:"image"`

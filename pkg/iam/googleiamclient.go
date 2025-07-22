@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -42,7 +43,7 @@ type GoogleIAMClient struct {
 }
 
 // NewGoogleIAMClient creates a new, fully initialized adminClient for real Google Cloud IAM operations.
-func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.ClientOption) (IAMClient, error) {
+func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.ClientOption) (*GoogleIAMClient, error) {
 	adminClient, err := admin.NewIamClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create IAM admin adminClient: %w", err)
@@ -67,6 +68,27 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 		storageClient:  gcsClient,
 		bigqueryClient: bqClient,
 	}, nil
+}
+
+// ListServiceAccounts lists all service accounts in the project.
+func (c *GoogleIAMClient) ListServiceAccounts(ctx context.Context) ([]*adminpb.ServiceAccount, error) {
+	req := &adminpb.ListServiceAccountsRequest{
+		Name: fmt.Sprintf("projects/%s", c.projectID),
+	}
+	it := c.iamAdminClient.ListServiceAccounts(ctx, req)
+
+	var accounts []*adminpb.ServiceAccount
+	for {
+		acc, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to iterate service accounts: %w", err)
+		}
+		accounts = append(accounts, acc)
+	}
+	return accounts, nil
 }
 
 // EnsureServiceAccountExists creates a service account if it does not already exist.
@@ -307,6 +329,28 @@ func (c *GoogleIAMClient) setServiceAccountPolicyLowLevel(ctx context.Context, r
 	})
 	if err != nil {
 		return fmt.Errorf("failed to set low-level IAM policy for %s: %w", resourceName, err)
+	}
+	return nil
+}
+
+// Close gracefully terminates all underlying client connections.
+func (c *GoogleIAMClient) Close() error {
+	var errs []string
+	if err := c.iamAdminClient.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("iamAdminClient: %v", err))
+	}
+	if err := c.pubsubClient.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("pubsubClient: %v", err))
+	}
+	if err := c.storageClient.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("storageClient: %v", err))
+	}
+	if err := c.bigqueryClient.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("bigqueryClient: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors while closing clients: %s", strings.Join(errs, "; "))
 	}
 	return nil
 }

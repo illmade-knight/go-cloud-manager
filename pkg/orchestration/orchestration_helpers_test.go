@@ -104,7 +104,7 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create Pub/Sub client")
 	}
-	defer psClient.Close()
+	defer psClient.Teardown()
 
 	// 3. Ensure the command subscription exists.
 	commandTopic := psClient.Topic(commandTopicID)

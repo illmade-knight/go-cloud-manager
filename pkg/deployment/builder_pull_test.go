@@ -307,7 +307,7 @@ func uploadDirToGCS(ctx context.Context, client *storage.Client, sourceDir, buck
 
 	w := client.Bucket(bucket).Object(objectName).NewWriter(ctx)
 	if _, err = io.Copy(w, buf); err != nil {
-		w.Close() // Close writer on error
+		w.Close() // Teardown writer on error
 		return fmt.Errorf("failed to copy source to GCS: %w", err)
 	}
 	return w.Close()
