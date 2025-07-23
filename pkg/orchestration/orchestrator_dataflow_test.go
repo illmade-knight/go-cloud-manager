@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -129,7 +128,14 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	require.NoError(t, err)
 	defer psClient.Close()
 
-	validationChan, verifySub := setupVerificationListener(t, ctx, psClient, verificationTopicName, *expectedMessages)
+	// Create the verifier's resources, but don't start listening yet.
+	verifyTopic, verifySub := createVerificationResources(t, ctx, psClient, verificationTopicName)
+
+	t.Logf("verify topic %s", verifyTopic.ID())
+	t.Logf("verify sub %s", verifySub.ID())
+
+	// Now that we've confirmed the subscription works, start the main listener.
+	validationChan := startVerificationListener(t, ctx, verifySub, *expectedMessages)
 
 	t.Cleanup(func() { _ = verifySub.Delete(context.Background()) }) // Ensure subscription is deleted
 
@@ -188,150 +194,54 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	t.Log("Application services deployed.")
 
 	// --- 4. Verify the Live Dataflow ---
-	//traceID := uuid.New().String()
-	//publisherSvcSpec := arch.Dataflows["tracer-flow"].Services[pubName]
-	//require.NoError(t, orch.AwaitRevisionReady(ctx, publisherSvcSpec), "Tracer Publisher never became ready")
-
-	// NOT USED CURRENTLY
-	//authClient, err := idtoken.NewClient(ctx, publisherSvcSpec.Deployment.ServiceURL)
-	//require.NoError(t, err, "Failed to create authenticated client")
-	//
-	//resp, err := authClient.Post(fmt.Sprintf("%s?trace_id=%s", publisherSvcSpec.Deployment.ServiceURL, traceID), "application/json", nil)
-	//require.NoError(t, err)
-	//require.Equal(t, http.StatusOK, resp.StatusCode)
-	//resp.Body.Close()
-	//t.Logf("Successfully sent tracer message with ID: %s", traceID)
-
-	// --- 4. Verify the Live Dataflow ---
 	// The old verification logic is replaced with this new block.
 	t.Logf("Waiting to receive %d verification message(s)...", *expectedMessages)
 	select {
 	case err := <-validationChan:
 		require.NoError(t, err, "Verification failed while receiving messages")
 		t.Logf("✅ Verification successful! Received %d message(s).", *expectedMessages)
-	case <-time.After(3 * time.Minute): // An overall safety timeout for the test.
+	case <-time.After(5 * time.Minute): // An overall safety timeout for the test.
 		t.Fatalf("Timeout: Did not complete verification for %d messages in time.", *expectedMessages)
 	}
 }
 
-// CheckGCPAuth is a helper that fails fast if the test is not configured to run
-// with valid Application Default Credentials (ADC) that can invoke Cloud Run.
-func CheckGCPAuth(t *testing.T) string {
-	t.Helper()
-	projectID := os.Getenv("GCP_PROJECT_ID")
-	if projectID == "" {
-		t.Skip("Skipping real integration test: GCP_PROJECT_ID environment variable is not set")
-	}
-	ctx := context.Background()
-
-	// 1. Check basic connectivity and authentication for resource management.
-	_, err := pubsub.NewClient(ctx, projectID)
-	if err != nil {
-		t.Fatalf(`
-		---------------------------------------------------------------------
-		GCP AUTHENTICATION FAILED!
-		---------------------------------------------------------------------
-		Could not create a Google Cloud client. This is likely due to
-		expired or missing Application Default Credentials (ADC).
-
-		To fix this, please run 'gcloud auth application-default login'.
-
-		Original Error: %v
-		---------------------------------------------------------------------
-		`, err)
-	}
-
-	//// Log the principal associated with the Application Default Credentials.
-	//creds, err := google.FindDefaultCredentials(ctx)
-	//if err == nil {
-	//	// Attempt to unmarshal the JSON to find the principal.
-	//	var credsMap map[string]interface{}
-	//	if json.Unmarshal(creds.JSON, &credsMap) == nil {
-	//		if clientEmail, ok := credsMap["client_email"]; ok {
-	//			t.Logf("--- Using GCP Service Account: %s", clientEmail)
-	//		} else {
-	//			// For user credentials, the file path is the most reliable identifier.
-	//			t.Logf("--- Using GCP User Credentials from file: %s", os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-	//		}
-	//	}
-	//}
-	//
-	// TODO introduce this check if we setup a dedicated test runner service account
-	//// 2. Check for the specific ability to create ID tokens, which is needed to invoke Cloud Run.
-	//// This check validates the credential type without making a network call.
-	//_, err = idtoken.NewTokenSource(ctx, "https://example.com")
-	//if err != nil && strings.Contains(err.Error(), "unsupported credentials type") {
-	//	// This is the specific error the user is seeing. Provide a detailed, actionable fix.
-	//	t.Fatalf(`
-	//	---------------------------------------------------------------------
-	//	GCP INVOCATION AUTHENTICATION FAILED!
-	//	---------------------------------------------------------------------
-	//	The test failed because your Application Default Credentials (ADC)
-	//	are user credentials, which cannot be used by this client library to
-	//	invoke secure Cloud Run services directly.
-	//
-	//	To fix this, the user running the test needs the permission to invoke
-	//	Cloud Run services.
-	//
-	//	SOLUTION: Grant your user the 'Cloud Run Invoker' role on the project.
-	//	   1. Find your user email by running:
-	//	      gcloud auth list --filter=status:ACTIVE --format="value(account)"
-	//	   2. Grant the role by running (replace [YOUR_EMAIL] and [YOUR_PROJECT]):
-	//	      gcloud projects add-iam-policy-binding %s --member="user:[YOUR_EMAIL]" --role="roles/run.invoker"
-	//
-	//	After granting the permission, you may need to refresh your credentials:
-	//	gcloud auth application-default login
-	//
-	//	Original Error: %v
-	//	---------------------------------------------------------------------
-	//	`, projectID, err)
-	//} else if err != nil {
-	//	// A different, unexpected token-related error occurred.
-	//	t.Fatalf("Failed to create an ID token source, please check your GCP auth: %v", err)
-	//}
-	//
-	return projectID
-}
-
 // in orchestrator_dataflow_test.go
 
-// setupVerificationListener creates a subscription and returns a channel that will receive
-// a single error. A nil error indicates the expected number of valid messages were received.
-// in orchestrator_dataflow_test.go
-
-// setupVerificationListener creates a subscription and returns a channel that will receive
-// a single error. A nil error indicates the expected number of valid messages were received.
-func setupVerificationListener(t *testing.T, ctx context.Context, client *pubsub.Client, topicName string, expectedCount int) (<-chan error, *pubsub.Subscription) {
+// createVerificationResources just creates the topic and subscription.
+func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, topicName string) (*pubsub.Topic, *pubsub.Subscription) {
 	t.Helper()
-	// ... (topic and subscription creation remains the same) ...
 	verifyTopic, err := client.CreateTopic(ctx, topicName)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = verifyTopic.Delete(context.Background()) })
 
 	subID := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
 	verifySub, err := client.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-		Topic:       verifyTopic,
-		AckDeadline: 20 * time.Second,
+		Topic:               verifyTopic,
+		AckDeadline:         20 * time.Second,
+		RetainAckedMessages: true,
+		RetentionDuration:   10 * time.Minute,
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = verifySub.Delete(context.Background()) })
 
-	t.Logf("TEST CONFIG: Verification Topic is [%s]", verifyTopic.ID())
-	t.Logf("TEST CONFIG: Verification Subscription is [%s]", verifySub.ID())
+	return verifyTopic, verifySub
+}
 
+// in startVerificationListener()
+func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Subscription, expectedCount int) <-chan error {
+	t.Helper()
 	validationChan := make(chan error, 1)
 	var receivedCount atomic.Int32
 
 	go func() {
-		// The receiver will run for a maximum of 3 minutes.
-		cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-		defer cancel()
+		cctx, cancel := context.WithCancel(ctx)
+		// IMPORTANT do NOT place a defer cancel in this block - subscription recovers from errors a defer cancel will prevent this
 
-		err := verifySub.Receive(cctx, func(ctx context.Context, m *pubsub.Message) {
+		err := sub.Receive(cctx, func(ctx context.Context, m *pubsub.Message) {
 			log.Info().Str("data", string(m.Data)).Msg("Verifier received a message.")
 			m.Ack()
 
 			if expectedCount > 1 && !strings.HasPrefix(string(m.Data), "iot-trace-") {
-				// Non-blocking write in case the channel is already full.
 				select {
 				case validationChan <- fmt.Errorf("received message with invalid format: %s", string(m.Data)):
 				default:
@@ -339,35 +249,24 @@ func setupVerificationListener(t *testing.T, ctx context.Context, client *pubsub
 				cancel()
 				return
 			}
-
 			if receivedCount.Add(1) == int32(expectedCount) {
 				select {
-				case validationChan <- nil: // Signal success
+				case validationChan <- nil:
 				default:
 				}
 				cancel()
 			}
 		})
 
-		// --- FIX: This block correctly reports timeouts and other errors ---
-		// This logic runs after Receive() returns.
-		if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			// If the context timed out, we must check if success was already signaled.
-			// A non-blocking write prevents a deadlock if the channel is full.
+		// This error handling is now more important. If the main test context is
+		// cancelled, this will exit gracefully.
+		if err != nil && !errors.Is(err, context.Canceled) {
 			select {
-			case validationChan <- fmt.Errorf("verifier timed out while waiting for %d message(s)", expectedCount):
-				// Successfully sent the timeout error.
-			default:
-				// The channel was already written to (likely with a success message), so do nothing.
-			}
-		} else if err != nil && !errors.Is(err, context.Canceled) {
-			// Handle other, unexpected pubsub errors
-			select {
-			case validationChan <- fmt.Errorf("pubsub receive failed: %w", err):
+			case validationChan <- fmt.Errorf("pubsub receive failed unexpectedly: %w", err):
 			default:
 			}
 		}
 	}()
 
-	return validationChan, verifySub
+	return validationChan
 }

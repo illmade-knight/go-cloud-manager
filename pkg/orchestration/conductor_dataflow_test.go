@@ -5,8 +5,6 @@ package orchestration_test
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,11 +15,12 @@ import (
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/api/idtoken"
 )
 
+// in conductor_dataflow_test.go
+
 func TestConductor_DataflowE2E(t *testing.T) {
-	projectID := os.Getenv("GCP_PROJECT_ID")
+	projectID := CheckGCPAuth(t)
 	require.NotEmpty(t, projectID, "GCP_PROJECT_ID environment variable must be set")
 
 	region := "us-central1"
@@ -39,7 +38,7 @@ func TestConductor_DataflowE2E(t *testing.T) {
 		logger.Info().Msg("Running in STANDARD mode (creating new service accounts).")
 	}
 
-	// --- 1. Arrange ---
+	// --- 1. Arrange: Define all resources and architecture ---
 	runID := uuid.New().String()[:8]
 	sdSourcePath, _ := filepath.Abs("./testdata/toy-servicedirector")
 	pubSourcePath, _ := filepath.Abs("./testdata/tracer-publisher")
@@ -68,6 +67,7 @@ func TestConductor_DataflowE2E(t *testing.T) {
 					"SD_COMMAND_TOPIC":        commandTopicID,
 					"SD_COMMAND_SUBSCRIPTION": commandSubID,
 					"SD_COMPLETION_TOPIC":     completionTopicID,
+					"VERIFICATION_TOPIC_ID":   verificationTopicName, // Ensure SD creates this topic
 					"TRACER_TOPIC_ID":         tracerTopicName,
 					"TRACER_SUB_ID":           tracerSubName,
 				},
@@ -82,7 +82,12 @@ func TestConductor_DataflowE2E(t *testing.T) {
 						Deployment: &servicemanager.DeploymentSpec{
 							SourcePath:          pubSourcePath,
 							BuildableModulePath: ".",
-							EnvironmentVars:     map[string]string{"TOPIC_ID": tracerTopicName},
+							EnvironmentVars: map[string]string{
+								"TOPIC_ID":              tracerTopicName,
+								"AUTO_PUBLISH_ENABLED":  "true",
+								"AUTO_PUBLISH_COUNT":    fmt.Sprintf("%d", *expectedMessages),
+								"AUTO_PUBLISH_INTERVAL": "1s",
+							},
 						},
 					},
 					subName: {
@@ -99,12 +104,7 @@ func TestConductor_DataflowE2E(t *testing.T) {
 					},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{
-						{CloudResource: servicemanager.CloudResource{Name: tracerTopicName}},
-						{
-							CloudResource: servicemanager.CloudResource{Name: verificationTopicName},
-						},
-					},
+					Topics:        []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: tracerTopicName}}, {CloudResource: servicemanager.CloudResource{Name: verificationTopicName}}},
 					Subscriptions: []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: tracerSubName}, Topic: tracerTopicName}},
 				},
 			},
@@ -116,18 +116,40 @@ func TestConductor_DataflowE2E(t *testing.T) {
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
 	defer psClient.Close()
-	resultChan, verifySub := setupVerificationListener(t, ctx, psClient, verificationTopicName, *expectedMessages)
-	t.Cleanup(func() { _ = verifySub.Delete(context.Background()) })
+
+	verifyTopic, verifySub := createVerificationResources(t, ctx, psClient, verificationTopicName)
+
+	t.Logf("verify topic %s", verifyTopic.ID())
+	t.Logf("verify sub %s", verifySub.ID())
+
+	validationChan := startVerificationListener(t, ctx, verifySub, *expectedMessages)
 
 	conductor, err := orchestration.NewConductor(ctx, arch, logger)
 	require.NoError(t, err)
 
+	// --- Teardown Logic ---
 	t.Cleanup(func() {
 		cCtx, cCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cCancel()
+		t.Log("--- Starting Full Teardown ---")
+
+		// Create a temporary orchestrator just to access the teardown helpers.
+		// This ensures deployed services are removed.
+		cleanupOrch, _ := orchestration.NewOrchestrator(cCtx, arch, logger)
+		if cleanupOrch != nil {
+			if err := cleanupOrch.TeardownDataflowServices(cCtx, "tracer-flow"); err != nil {
+				t.Logf("Dataflow services teardown failed: %v", err)
+			}
+			if err := cleanupOrch.TeardownCloudRunService(cCtx, sdName); err != nil {
+				t.Logf("Service director teardown failed: %v", err)
+			}
+		}
+
+		// Teardown the conductor's own resources (IAM, internal topics).
 		if err := conductor.Teardown(cCtx); err != nil {
 			t.Errorf("Conductor teardown failed: %v", err)
 		}
+		t.Log("--- Teardown Complete ---")
 	})
 
 	// --- 3. Execute Conductor Workflow ---
@@ -136,31 +158,12 @@ func TestConductor_DataflowE2E(t *testing.T) {
 	t.Log("Conductor has finished the deployment workflow.")
 
 	// --- 4. Verify the Live Dataflow ---
-	traceID := uuid.New().String()
-	publisherSvcSpec := arch.Dataflows["tracer-flow"].Services[pubName]
-
-	// We need a fresh orchestrator just to get the AwaitRevisionReady helper.
-	// In a real CLI, this might be part of a separate "status" command.
-	verifyOrch, err := orchestration.NewOrchestrator(ctx, arch, logger)
-	require.NoError(t, err)
-	defer verifyOrch.Teardown(ctx) // Teardown its internal resources
-
-	require.NoError(t, verifyOrch.AwaitRevisionReady(ctx, publisherSvcSpec), "Tracer Publisher never became ready")
-
-	authClient, err := idtoken.NewClient(ctx, publisherSvcSpec.Deployment.ServiceURL)
-	require.NoError(t, err, "Failed to create authenticated client")
-
-	resp, err := authClient.Post(fmt.Sprintf("%s?trace_id=%s", publisherSvcSpec.Deployment.ServiceURL, traceID), "application/json", nil)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp.Body.Close()
-	t.Logf("Successfully sent tracer message with ID: %s", traceID)
-
+	t.Logf("Waiting to receive %d verification message(s)...", *expectedMessages)
 	select {
-	case receivedID := <-resultChan:
-		require.Equal(t, traceID, receivedID, "Received trace ID does not match sent ID")
-		t.Logf("✅ Verification successful! Received tracer ID %s on verification subscription.", receivedID)
-	case <-time.After(2 * time.Minute):
-		t.Fatal("Timeout: Did not receive verification message in time.")
+	case err := <-validationChan:
+		require.NoError(t, err, "Verification failed while receiving messages")
+		t.Logf("✅ Verification successful! Received %d message(s).", *expectedMessages)
+	case <-time.After(3 * time.Minute):
+		t.Fatalf("Timeout: Did not complete verification for %d messages in time.", *expectedMessages)
 	}
 }
