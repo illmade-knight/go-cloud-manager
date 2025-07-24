@@ -9,6 +9,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const (
+	verifyPath   = "/dataflow/verify"
+	setupPath    = "/dataflow/setup"
+	teardownPath = "/orchestrate/teardown"
+)
+
 // Config now only holds configuration that is NOT defined in the architecture spec.
 // This is primarily for runtime operational concerns of the service container itself.
 type Config struct {

@@ -113,9 +113,9 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 	}
 
 	mux := baseServer.Mux()
-	mux.HandleFunc("/dataflow/verify", d.verifyDataflowHandler)
-	mux.HandleFunc("/dataflow/setup", d.setupDataflowHandler)
-	mux.HandleFunc("/orchestrate/teardown", d.teardownHandler)
+	mux.HandleFunc(verifyPath, d.verifyDataflowHandler)
+	mux.HandleFunc(setupPath, d.setupDataflowHandler)
+	mux.HandleFunc(teardownPath, d.teardownHandler)
 
 	if d.commands != nil {
 		d.listenForCommands(ctx)
