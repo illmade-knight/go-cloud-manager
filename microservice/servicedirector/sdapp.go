@@ -27,6 +27,12 @@ func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicema
 	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
 }
 
+type pubsubCommands struct {
+	client              *pubsub.Client
+	commandSubscription *pubsub.Subscription
+	completionTopic     *pubsub.Topic
+}
+
 // Director implements the builder.Service interface for our main application.
 type Director struct {
 	*microservice.BaseServer
@@ -34,7 +40,7 @@ type Director struct {
 	architecture   *servicemanager.MicroserviceArchitecture
 	config         *Config // This is now the smaller Config struct
 	logger         zerolog.Logger
-	pubsubClient   *pubsub.Client
+	commands       *pubsubCommands // we don't require pubsub commands
 }
 
 // NewServiceDirector is the primary constructor for production use. It creates
@@ -66,13 +72,9 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) (*Director, error) {
 	// Get topic and subscription names directly from the architecture spec
 	spec := arch.ServiceManagerSpec
-	commandTopic := spec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
-	commandSub := spec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
 
-	// Ensure the subscription for listening to commands exists.
-	err := ensureCommandSubscriptionExists(ctx, psClient, commandTopic, commandSub)
-	if err != nil {
-		return nil, err
+	if spec.Deployment == nil {
+		return nil, fmt.Errorf("director: ServiceManagerSpec.Deployment is not defined in the architecture; cannot determine command topics")
 	}
 
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
@@ -83,7 +85,27 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 		architecture:   arch,
 		config:         cfg,
 		logger:         directorLogger,
-		pubsubClient:   psClient,
+	}
+
+	if psClient != nil {
+		commandTopicID := spec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
+		commandSubID := spec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
+		completionTopicID := spec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
+
+		// Ensure the subscription for listening to commands exists.
+		sub, err := ensureCommandSubscriptionExists(ctx, psClient, commandTopicID, commandSubID)
+		if err != nil {
+			return nil, err
+		}
+		topic, err := ensureCompletionTopicExists(ctx, psClient, completionTopicID)
+		if err != nil {
+			return nil, err
+		}
+		d.commands = &pubsubCommands{
+			client:              psClient,
+			commandSubscription: sub,
+			completionTopic:     topic,
+		}
 	}
 
 	mux := baseServer.Mux()
@@ -99,7 +121,6 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 
 	directorLogger.Info().
 		Str("http_port", cfg.HTTPPort).
-		Str("command_topic", commandTopic). // Log the value from arch
 		Msg("Director initialized and listening for commands.")
 
 	return d, nil
@@ -107,11 +128,10 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 
 // publishReadyEvent is updated to get the topic name from the architecture.
 func (d *Director) publishReadyEvent(ctx context.Context) error {
+	if d.commands == nil {
+		return nil
+	}
 	d.logger.Info().Msg("Publishing 'service_ready' event...")
-	// Get the completion topic from the architecture spec
-	completionTopicName := d.architecture.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
-	topic := d.pubsubClient.Topic(completionTopicName)
-	defer topic.Stop()
 
 	event := orchestration.CompletionEvent{
 		Status: orchestration.ServiceDirectorReady,
@@ -123,7 +143,7 @@ func (d *Director) publishReadyEvent(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal ready event: %w", err)
 	}
 
-	result := topic.Publish(ctx, &pubsub.Message{Data: eventData})
+	result := d.commands.completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
 	_, err = result.Get(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to publish ready event: %w", err)
@@ -135,12 +155,7 @@ func (d *Director) publishReadyEvent(ctx context.Context) error {
 
 // listenForCommands is updated to get the subscription name from the architecture.
 func (d *Director) listenForCommands(ctx context.Context) {
-	// Get the command subscription from the architecture spec
-	commandSubName := d.architecture.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
-	sub := d.pubsubClient.Subscription(commandSubName)
-	d.logger.Info().Str("subscription", sub.String()).Msg("Director command listener started.")
-
-	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+	err := d.commands.commandSubscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 		msg.Ack()
 		d.logger.Info().Str("message_id", msg.ID).Msg("Received command message")
 
@@ -160,8 +175,11 @@ func (d *Director) listenForCommands(ctx context.Context) {
 			d.logger.Warn().Str("instruction", string(cmd.Instruction)).Str("value", cmd.Value).Msg("Received unknown command")
 		}
 
-		// Always publish a completion event after processing a command.
-		d.publishCompletionEvent(ctx, cmd.Value, cmdErr)
+		// publish a completion event after processing a command if we have pubsub setup
+		err := d.publishCompletionEvent(ctx, cmd.Value, cmdErr)
+		if err != nil {
+			d.logger.Error().Err(err).Msg("error publishing completion evernt")
+		}
 	})
 
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -172,12 +190,8 @@ func (d *Director) listenForCommands(ctx context.Context) {
 }
 
 // publishCompletionEvent is updated to get the topic name from the architecture.
-func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error) {
+func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error) error {
 	d.logger.Info().Str("dataflow", dataflowName).Msg("Publishing completion event...")
-	// Get the completion topic from the architecture spec
-	completionTopicName := d.architecture.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
-	topic := d.pubsubClient.Topic(completionTopicName)
-	defer topic.Stop()
 
 	event := orchestration.CompletionEvent{
 		Status: orchestration.DataflowComplete,
@@ -188,19 +202,18 @@ func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName stri
 		event.ErrorMessage = commandErr.Error()
 	}
 
-	eventData, marshErr := json.Marshal(event)
-	if marshErr != nil {
-		d.logger.Error().Err(marshErr).Msg("Failed to marshal completion event")
-		return
+	eventData, marshallErr := json.Marshal(event)
+	if marshallErr != nil {
+		return marshallErr
 	}
 
-	result := topic.Publish(ctx, &pubsub.Message{Data: eventData})
+	result := d.commands.completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
 	msgID, getErr := result.Get(ctx)
 	if getErr != nil {
-		d.logger.Error().Err(getErr).Msg("Failed to publish completion event")
-		return
+		return getErr
 	}
 	d.logger.Info().Str("message_id", msgID).Str("status", string(event.Status)).Msg("Completion event published.")
+	return nil
 }
 
 func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
@@ -227,9 +240,14 @@ func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName strin
 
 func (d *Director) Shutdown() {
 	d.BaseServer.Shutdown()
-	if d.pubsubClient != nil {
-		d.pubsubClient.Close()
+
+	if d.commands != nil {
+		d.commands.client.Close()
 	}
+}
+
+func (d *Director) GetServiceManager() *servicemanager.ServiceManager {
+	return d.serviceManager
 }
 
 func (d *Director) setupHandler(w http.ResponseWriter, r *http.Request) {
@@ -269,19 +287,19 @@ func (d *Director) verifyHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(fmt.Sprintf("Dataflow '%s' verified successfully.", req.DataflowName)))
 }
 
-func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string) error {
+func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string) (*pubsub.Subscription, error) {
 	topic := psClient.Topic(topicID)
 	exists, err := topic.Exists(ctx)
 	if err != nil {
-		return fmt.Errorf("could not check for command topic '%s': %w", topicID, err)
+		return nil, fmt.Errorf("could not check for command topic '%s': %w", topicID, err)
 	}
 	if !exists {
-		return fmt.Errorf("command topic '%s' does not exist; it must be created by the orchestrator", topicID)
+		return nil, fmt.Errorf("command topic '%s' does not exist; it must be created by the orchestrator", topicID)
 	}
 	sub := psClient.Subscription(subID)
 	exists, err = sub.Exists(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to check for subscription %s: %w", subID, err)
+		return nil, fmt.Errorf("failed to check for subscription %s: %w", subID, err)
 	}
 	if !exists {
 		log.Info().Str("subscription", subID).Msg("Command subscription not found, creating it now.")
@@ -290,8 +308,23 @@ func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Clien
 			AckDeadline: 20 * time.Second,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to create command subscription %s: %w", subID, err)
+			return nil, fmt.Errorf("failed to create command subscription %s: %w", subID, err)
 		}
 	}
-	return nil
+	return sub, nil
+}
+
+func ensureCompletionTopicExists(ctx context.Context, psClient *pubsub.Client, topicID string) (*pubsub.Topic, error) {
+	topic := psClient.Topic(topicID)
+	exists, err := topic.Exists(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not check for command topic '%s': %w", topicID, err)
+	}
+	if !exists {
+		topic, err = psClient.CreateTopic(ctx, topicID)
+		if err != nil {
+		}
+	}
+
+	return topic, nil
 }
