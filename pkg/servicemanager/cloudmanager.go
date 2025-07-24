@@ -10,7 +10,7 @@ type IManager interface {
 // IBigQueryManager defines the interface for a BigQueryManager.
 type IBigQueryManager interface {
 	IManager
-	CreateResources(ctx context.Context, resources CloudResourcesSpec, schemaRegistry map[string]interface{}) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error)
+	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error)
 }
 
 // IMessagingManager defines the interface for a MessagingManager.
