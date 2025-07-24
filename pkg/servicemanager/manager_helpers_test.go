@@ -36,7 +36,7 @@ func (m *MockStorageManager) Verify(ctx context.Context, resources servicemanage
 
 type MockBigQueryManager struct{ mock.Mock }
 
-func (m *MockBigQueryManager) CreateResources(ctx context.Context, resources servicemanager.CloudResourcesSpec, schemaRegistry map[string]interface{}) ([]servicemanager.ProvisionedBigQueryTable, []servicemanager.ProvisionedBigQueryDataset, error) {
+func (m *MockBigQueryManager) CreateResources(ctx context.Context, resources servicemanager.CloudResourcesSpec) ([]servicemanager.ProvisionedBigQueryTable, []servicemanager.ProvisionedBigQueryDataset, error) {
 	args := m.Called(ctx, resources)
 	return args.Get(0).([]servicemanager.ProvisionedBigQueryTable), args.Get(1).([]servicemanager.ProvisionedBigQueryDataset), args.Error(2)
 }

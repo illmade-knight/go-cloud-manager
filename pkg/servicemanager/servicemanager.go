@@ -28,22 +28,20 @@ func RegisterSchema(name string, schemaStruct interface{}) {
 	registeredSchemas[name] = schemaStruct
 }
 
-// buildSchemaRegistry is now fully implemented. It looks up types from the central registry.
-func buildSchemaRegistry(tables []BigQueryTable) (map[string]interface{}, error) {
+// verifySchemaRegistry is now fully implemented. It looks up types from the central registry.
+func verifySchemaRegistry(tables []BigQueryTable) error {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
-	registry := make(map[string]interface{})
 	for _, table := range tables {
 		if table.SchemaType != "" {
-			schemaInstance, ok := registeredSchemas[table.SchemaType]
+			_, ok := registeredSchemas[table.SchemaType]
 			if !ok {
-				return nil, fmt.Errorf("unknown schema type '%s' for table '%s'. Is it registered?", table.SchemaType, table.Name)
+				return fmt.Errorf("unknown schema type '%s' for table '%s'. Is it registered?", table.SchemaType, table.Name)
 			}
-			registry[table.SchemaType] = schemaInstance
 		}
 	}
-	return registry, nil
+	return nil
 }
 
 // --- The Rest of the File (with updates) ---
@@ -212,13 +210,13 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			schemaRegistry, err := buildSchemaRegistry(targetDataflow.Resources.BigQueryTables)
+			err := verifySchemaRegistry(targetDataflow.Resources.BigQueryTables)
 			if err != nil {
 				errChan <- err
 				return
 			}
 
-			provTables, provDatasets, err := mgr.(IBigQueryManager).CreateResources(ctx, targetDataflow.Resources, schemaRegistry)
+			provTables, provDatasets, err := mgr.(IBigQueryManager).CreateResources(ctx, targetDataflow.Resources)
 			if err != nil {
 				errChan <- err
 				return
