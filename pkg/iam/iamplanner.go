@@ -45,6 +45,13 @@ func (p *RolePlanner) PlanRolesForServiceDirector(ctx context.Context, arch *ser
 		if len(resources.BigQueryDatasets) > 0 || len(resources.BigQueryTables) > 0 {
 			requiredRoles["roles/bigquery.admin"] = struct{}{}
 		}
+		// Add check for secrets to give the Service Director permission to manage IAM on them.
+		for _, service := range dataflow.Services {
+			if service.Deployment != nil && len(service.Deployment.SecretEnvironmentVars) > 0 {
+				requiredRoles["roles/secretmanager.admin"] = struct{}{}
+				break // Only need to add the role once per dataflow
+			}
+		}
 	}
 
 	rolesSlice := make([]string, 0, len(requiredRoles))
@@ -88,6 +95,15 @@ func (p *RolePlanner) PlanRolesForApplicationServices(ctx context.Context, arch 
 				if bucketName, ok := envVars["GCS_BUCKET_NAME"]; ok {
 					p.logger.Info().Str("service", serviceName).Str("bucket", bucketName).Msg("Inferred storage object admin role")
 					addBindingToPlan(serviceSpec.ServiceAccount, "gcs_bucket", bucketName, "roles/storage.objectAdmin", finalPlan, &mu)
+				}
+				// --- NEW: Infer Secret Accessor role ---
+				// This block reads the new 'secret_environment_vars' section and adds the
+				// appropriate IAM binding to the plan.
+				if serviceSpec.Deployment.SecretEnvironmentVars != nil {
+					for _, secretVar := range serviceSpec.Deployment.SecretEnvironmentVars {
+						p.logger.Info().Str("service", serviceName).Str("secret", secretVar.ValueFrom).Msg("Inferred secret accessor role")
+						addBindingToPlan(serviceSpec.ServiceAccount, "secret", secretVar.ValueFrom, "roles/secretmanager.secretAccessor", finalPlan, &mu)
+					}
 				}
 			}
 

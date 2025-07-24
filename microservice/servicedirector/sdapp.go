@@ -18,7 +18,6 @@ import (
 
 // NewDirectServiceDirector is a constructor for testing that allows injecting a pre-configured
 // ServiceManager and Pub/Sub client (e.g., one connected to an emulator).
-// This function should be added back to your sdapp.go file.
 func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
 	arch, err := loader.LoadArchitecture(ctx)
@@ -28,14 +27,12 @@ func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicema
 	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
 }
 
-// (The rest of your sdapp.go file remains the same)
-
 // Director implements the builder.Service interface for our main application.
 type Director struct {
 	*microservice.BaseServer
 	serviceManager *servicemanager.ServiceManager
 	architecture   *servicemanager.MicroserviceArchitecture
-	config         *Config
+	config         *Config // This is now the smaller Config struct
 	logger         zerolog.Logger
 	pubsubClient   *pubsub.Client
 }
@@ -57,7 +54,7 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	}
 
 	// It also creates its own Pub/Sub client this is needed for the creating the command subscription and listening on it
-	psClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
+	psClient, err := pubsub.NewClient(ctx, arch.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("director: failed to create pubsub Client: %w", err)
 	}
@@ -65,10 +62,15 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
 }
 
-// newInternalSD is an unexported helper to reduce code duplication between the two constructors.
+// newInternalSD is an unexported helper updated to pull configuration from the 'arch' struct.
 func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) (*Director, error) {
+	// Get topic and subscription names directly from the architecture spec
+	spec := arch.ServiceManagerSpec
+	commandTopic := spec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
+	commandSub := spec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
+
 	// Ensure the subscription for listening to commands exists.
-	err := ensureCommandSubscriptionExists(ctx, psClient, cfg.CommandTopic, cfg.CommandSubscription)
+	err := ensureCommandSubscriptionExists(ctx, psClient, commandTopic, commandSub)
 	if err != nil {
 		return nil, err
 	}
@@ -97,21 +99,23 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 
 	directorLogger.Info().
 		Str("http_port", cfg.HTTPPort).
-		Str("command_topic", cfg.CommandTopic).
+		Str("command_topic", commandTopic). // Log the value from arch
 		Msg("Director initialized and listening for commands.")
 
 	return d, nil
 }
 
-// publishReadyEvent sends the initial signal that the service is alive and listening.
+// publishReadyEvent is updated to get the topic name from the architecture.
 func (d *Director) publishReadyEvent(ctx context.Context) error {
 	d.logger.Info().Msg("Publishing 'service_ready' event...")
-	topic := d.pubsubClient.Topic(d.config.CompletionTopic)
+	// Get the completion topic from the architecture spec
+	completionTopicName := d.architecture.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
+	topic := d.pubsubClient.Topic(completionTopicName)
 	defer topic.Stop()
 
 	event := orchestration.CompletionEvent{
-		Status: orchestration.ServiceDirectorReady, // Use the shared status constant
-		Value:  d.config.Environment,               // Send the environment name as the value
+		Status: orchestration.ServiceDirectorReady,
+		Value:  d.architecture.Environment.Name, // Use environment name from arch
 	}
 
 	eventData, err := json.Marshal(event)
@@ -129,10 +133,11 @@ func (d *Director) publishReadyEvent(ctx context.Context) error {
 	return nil
 }
 
-// (The rest of the file remains the same)
-
+// listenForCommands is updated to get the subscription name from the architecture.
 func (d *Director) listenForCommands(ctx context.Context) {
-	sub := d.pubsubClient.Subscription(d.config.CommandSubscription)
+	// Get the command subscription from the architecture spec
+	commandSubName := d.architecture.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
+	sub := d.pubsubClient.Subscription(commandSubName)
 	d.logger.Info().Str("subscription", sub.String()).Msg("Director command listener started.")
 
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -166,9 +171,12 @@ func (d *Director) listenForCommands(ctx context.Context) {
 	}
 }
 
+// publishCompletionEvent is updated to get the topic name from the architecture.
 func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error) {
 	d.logger.Info().Str("dataflow", dataflowName).Msg("Publishing completion event...")
-	topic := d.pubsubClient.Topic(d.config.CompletionTopic)
+	// Get the completion topic from the architecture spec
+	completionTopicName := d.architecture.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
+	topic := d.pubsubClient.Topic(completionTopicName)
 	defer topic.Stop()
 
 	event := orchestration.CompletionEvent{

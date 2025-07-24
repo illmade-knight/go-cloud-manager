@@ -56,6 +56,11 @@ type ServiceSpec struct {
 	HealthCheck    *HealthCheckSpec       `yaml:"health_check,omitempty"`
 }
 
+type SecretEnvVar struct {
+	Name      string `yaml:"name"`       // The environment variable name inside the container (e.g., "API_KEY").
+	ValueFrom string `yaml:"value_from"` // The platform-specific ID of the secret (e.g., "my-api-key-secret" in GCP).
+}
+
 // DeploymentSpec defines how a service container should be deployed.
 // This example is tailored for Google Cloud Run.
 type DeploymentSpec struct {
@@ -88,6 +93,8 @@ type DeploymentSpec struct {
 	//BuildEnvironmentVars map[string]string `yaml:"build_environment_vars,omitempty"`
 
 	BuildableModulePath string `yaml:"buildable_module_path,omitempty"`
+
+	SecretEnvironmentVars []SecretEnvVar `yaml:"secret_environment_vars,omitempty"`
 }
 
 // HealthCheckSpec defines the health check configuration for a service.
