@@ -59,10 +59,13 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 		return nil, fmt.Errorf("director: failed to create ServiceManager: %w", err)
 	}
 
-	// It also creates its own Pub/Sub client this is needed for the creating the command subscription and listening on it
-	psClient, err := pubsub.NewClient(ctx, arch.ProjectID)
-	if err != nil {
-		return nil, fmt.Errorf("director: failed to create pubsub Client: %w", err)
+	// It creates its own Pub/Sub client if needed for the creating the command subscription and listening on it
+	var psClient *pubsub.Client
+	if arch.ServiceManagerSpec.Deployment != nil {
+		psClient, err = pubsub.NewClient(ctx, arch.ProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("director: failed to create pubsub Client: %w", err)
+		}
 	}
 
 	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
@@ -72,10 +75,6 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) (*Director, error) {
 	// Get topic and subscription names directly from the architecture spec
 	spec := arch.ServiceManagerSpec
-
-	if spec.Deployment == nil {
-		return nil, fmt.Errorf("director: ServiceManagerSpec.Deployment is not defined in the architecture; cannot determine command topics")
-	}
 
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
 
@@ -87,7 +86,7 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 		logger:         directorLogger,
 	}
 
-	if psClient != nil {
+	if spec.Deployment != nil {
 		commandTopicID := spec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
 		commandSubID := spec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
 		completionTopicID := spec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
@@ -106,6 +105,7 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 			commandSubscription: sub,
 			completionTopic:     topic,
 		}
+
 	}
 
 	mux := baseServer.Mux()
