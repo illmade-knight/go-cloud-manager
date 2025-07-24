@@ -128,40 +128,10 @@ func NewBigQueryManager(client BQClient, logger zerolog.Logger, environment Envi
 	}, nil
 }
 
-// Validate performs pre-flight checks on the resource configuration.
-// It now takes the schemaRegistry as an argument.
-func (m *BigQueryManager) Validate(resources CloudResourcesSpec, schemaRegistry map[string]interface{}) error {
-	m.logger.Info().Msg("Validating BigQuery resource configuration...")
-	var allErrors []error
-
-	for _, dsCfg := range resources.BigQueryDatasets {
-		if dsCfg.Name == "" {
-			allErrors = append(allErrors, errors.New("dataset configuration found with an empty name"))
-		}
-	}
-
-	for _, tableCfg := range resources.BigQueryTables {
-		if tableCfg.Name == "" || tableCfg.Dataset == "" {
-			allErrors = append(allErrors, fmt.Errorf("table '%s' has an empty name or dataset", tableCfg.Name))
-		}
-		if _, ok := schemaRegistry[tableCfg.SchemaType]; !ok {
-			allErrors = append(allErrors, fmt.Errorf("schema type '%s' for table '%s' not found in registry", tableCfg.SchemaType, tableCfg.Name))
-		}
-	}
-
-	if len(allErrors) > 0 {
-		return errors.Join(allErrors...)
-	}
-
-	m.logger.Info().Msg("BigQuery resource configuration is valid.")
-	return nil
-}
-
 // CreateResources creates all configured BigQuery datasets and tables concurrently.
-// It now receives the schemaRegistry at runtime.
-func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudResourcesSpec, schemaRegistry map[string]interface{}) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error) {
+func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error) {
 	m.logger.Info().Msg("Starting BigQuery setup...")
-	if err := m.Validate(resources, schemaRegistry); err != nil {
+	if err := m.Validate(resources); err != nil {
 		return nil, nil, fmt.Errorf("BigQuery configuration validation failed: %w", err)
 	}
 
@@ -227,7 +197,7 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				return
 			}
 			// Use the schemaRegistry passed in at runtime.
-			schema, _ := schemaRegistry[tableCfg.SchemaType]
+			schema, _ := registeredSchemas[tableCfg.SchemaType]
 			bqSchema, err := bigquery.InferSchema(schema)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to infer BigQuery schema for '%s': %w", tableCfg.SchemaType, err)
@@ -346,6 +316,40 @@ func (m *BigQueryManager) Teardown(ctx context.Context, resources CloudResources
 	}
 
 	m.logger.Info().Msg("BigQuery teardown completed successfully.")
+	return nil
+}
+
+// Validate performs pre-flight checks on the resource configuration.
+func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
+	m.logger.Info().Msg("Validating BigQuery resource configuration...")
+	var allErrors []error
+
+	for _, dsCfg := range resources.BigQueryDatasets {
+		if dsCfg.Name == "" {
+			allErrors = append(allErrors, errors.New("dataset configuration found with an empty name"))
+		}
+	}
+
+	for _, tableCfg := range resources.BigQueryTables {
+		if tableCfg.Name == "" || tableCfg.Dataset == "" {
+			allErrors = append(allErrors, fmt.Errorf("table '%s' has an empty name or dataset", tableCfg.Name))
+		}
+
+		// This now correctly uses the package-level registry from servicemanager.go
+		registryMu.RLock()
+		_, ok := registeredSchemas[tableCfg.SchemaType]
+		registryMu.RUnlock()
+
+		if !ok {
+			allErrors = append(allErrors, fmt.Errorf("schema type '%s' for table '%s' not found in registry", tableCfg.SchemaType, tableCfg.Name))
+		}
+	}
+
+	if len(allErrors) > 0 {
+		return errors.Join(allErrors...)
+	}
+
+	m.logger.Info().Msg("BigQuery resource configuration is valid.")
 	return nil
 }
 

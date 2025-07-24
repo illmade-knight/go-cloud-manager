@@ -3,7 +3,9 @@ package servicemanager_test
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"os"
 	"testing"
 
 	"cloud.google.com/go/bigquery"
@@ -90,6 +92,20 @@ type TestSchema struct {
 	Field2 int64  `bigquery:"field2"`
 }
 
+// TestMain is run once for the entire package before any other tests are run.
+func TestMain(m *testing.M) {
+	// --- One-time setup ---
+	// Register the schema so it's available globally for all tests.
+	servicemanager.RegisterSchema("testSchemaV1", TestSchema{})
+	log.Println("Test schema registered globally for all tests in the servicemanager_test package.")
+
+	// --- Run all tests ---
+	exitCode := m.Run()
+
+	// --- One-time teardown (if needed) ---
+	os.Exit(exitCode)
+}
+
 func setupBigQueryManagerTest(t *testing.T) (*servicemanager.BigQueryManager, *MockBQClient) {
 	mockClient := new(MockBQClient)
 	logger := zerolog.Nop()
@@ -111,14 +127,14 @@ func getTestBigQueryResources() servicemanager.CloudResourcesSpec {
 		},
 		BigQueryTables: []servicemanager.BigQueryTable{
 			{
-				CloudResource:    servicemanager.CloudResource{Name: "test_table_1"},
-				Dataset:          "test_dataset_1",
-				SchemaImportPath: "testSchemaV1",
+				CloudResource: servicemanager.CloudResource{Name: "test_table_1"},
+				Dataset:       "test_dataset_1",
+				SchemaType:    "testSchemaV1",
 			},
 			{
-				CloudResource:    servicemanager.CloudResource{Name: "test_table_2"},
-				Dataset:          "test_dataset_2",
-				SchemaImportPath: "testSchemaV1",
+				CloudResource: servicemanager.CloudResource{Name: "test_table_2"},
+				Dataset:       "test_dataset_2",
+				SchemaType:    "testSchemaV1",
 			},
 		},
 	}
@@ -141,26 +157,22 @@ func TestNewBigQueryManager(t *testing.T) {
 func TestBigQueryManager_Validate(t *testing.T) {
 	manager, _ := setupBigQueryManagerTest(t)
 
-	schemaRegistry := map[string]interface{}{
-		"testSchemaV1": TestSchema{},
-	}
-
 	t.Run("Success", func(t *testing.T) {
 		resources := getTestBigQueryResources()
-		err := manager.Validate(resources, schemaRegistry)
+		err := manager.Validate(resources)
 		assert.NoError(t, err)
 	})
 
 	t.Run("Invalid Table Schema", func(t *testing.T) {
 		resources := getTestBigQueryResources()
 		resources.BigQueryTables = append(resources.BigQueryTables, servicemanager.BigQueryTable{
-			CloudResource:    servicemanager.CloudResource{Name: "bad_table"},
-			Dataset:          "test_dataset_1",
-			SchemaImportPath: "nonExistentSchema",
+			CloudResource: servicemanager.CloudResource{Name: "bad_table"},
+			Dataset:       "test_dataset_1",
+			SchemaType:    "nonExistentSchema",
 		})
-		err := manager.Validate(resources, schemaRegistry)
+		err := manager.Validate(resources)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "schema 'nonExistentSchema' for table 'bad_table' not found in registry")
+		assert.Contains(t, err.Error(), "schema type 'nonExistentSchema' for table 'bad_table' not found in registry")
 	})
 }
 
@@ -188,10 +200,7 @@ func TestBigQueryManager_CreateResources(t *testing.T) {
 		mockTbl2.On("Metadata", ctx).Return(nil, notFoundErr).Once()
 		mockTbl2.On("Create", ctx, mock.AnythingOfType("*bigquery.TableMetadata")).Return(nil).Once()
 
-		schemaRegistry := map[string]interface{}{
-			"testSchemaV1": TestSchema{},
-		}
-		_, _, err := manager.CreateResources(ctx, resources, schemaRegistry)
+		_, _, err := manager.CreateResources(ctx, resources)
 
 		assert.NoError(t, err)
 		mockClient.AssertExpectations(t)
@@ -218,10 +227,7 @@ func TestBigQueryManager_CreateResources(t *testing.T) {
 		mockTbl2.On("Metadata", ctx).Return(nil, notFoundErr).Once()
 		mockTbl2.On("Create", ctx, mock.Anything).Return(creationErr).Once() // Fails
 
-		schemaRegistry := map[string]interface{}{
-			"testSchemaV1": TestSchema{},
-		}
-		_, _, err := manager.CreateResources(ctx, resources, schemaRegistry)
+		_, _, err := manager.CreateResources(ctx, resources)
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to create table 'test_table_2' in dataset 'test_dataset_2'")

@@ -48,7 +48,7 @@ func TestBigQueryManager_Integration(t *testing.T) {
 
 	// --- 3. Create the BigQueryManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	schemaRegistry := map[string]interface{}{"TestSchema": types.GardenMonitorReadings{}}
+	servicemanager.RegisterSchema("TestSchema", types.GardenMonitorReadings{})
 	environment := servicemanager.Environment{ProjectID: projectID, Location: "US"}
 
 	// Create a real BigQuery client adapter for the manager
@@ -62,7 +62,7 @@ func TestBigQueryManager_Integration(t *testing.T) {
 	// --- Phase 1: CREATE Resources ---
 	// =========================================================================
 	t.Log("--- Starting CreateResources ---")
-	provTables, provDatasets, err := manager.CreateResources(ctx, resources, schemaRegistry)
+	provTables, provDatasets, err := manager.CreateResources(ctx, resources)
 	require.NoError(t, err)
 	assert.Len(t, provDatasets, 1, "Should provision one dataset")
 	assert.Len(t, provTables, 1, "Should provision one table")

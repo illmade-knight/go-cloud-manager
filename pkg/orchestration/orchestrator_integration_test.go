@@ -42,8 +42,9 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 			Name: "in-memory-director", // A name for the service spec
 			Deployment: &servicemanager.DeploymentSpec{
 				EnvironmentVars: map[string]string{
-					"SD_COMMAND_TOPIC":    commandTopicID,
-					"SD_COMPLETION_TOPIC": completionTopicID,
+					"SD_COMMAND_TOPIC":        commandTopicID,
+					"SD_COMPLETION_TOPIC":     completionTopicID,
+					"SD_COMMAND_SUBSCRIPTION": commandSubID,
 				},
 			},
 		},
@@ -70,10 +71,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	// --- 3. Run ServiceDirector In-Memory ---
 	t.Log("Starting in-memory ServiceDirector...")
 	directorCfg := &servicedirector.Config{
-		BaseConfig:          microservice.BaseConfig{ProjectID: projectID},
-		CommandTopic:        commandTopicID,
-		CommandSubscription: commandSubID,
-		CompletionTopic:     completionTopicID,
+		BaseConfig: microservice.BaseConfig{ProjectID: projectID},
 	}
 	loader := orchestration.NewEmbeddedArchitectureLoader(arch)
 	// For this test, the ServiceManager just needs a messaging client.

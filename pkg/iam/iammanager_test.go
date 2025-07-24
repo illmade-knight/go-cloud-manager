@@ -16,6 +16,16 @@ type MockIAMClient struct {
 	mock.Mock
 }
 
+func (m *MockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m *MockIAMClient) Close() error {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (m *MockIAMClient) EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error) {
 	args := m.Called(ctx, accountName)
 	return args.String(0), args.Error(1)

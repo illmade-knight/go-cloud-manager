@@ -16,6 +16,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+type OrchestrateRequest struct {
+	DataflowName string `json:"dataflow_name"`
+}
+
 // NewDirectServiceDirector is a constructor for testing that allows injecting a pre-configured
 // ServiceManager and Pub/Sub client (e.g., one connected to an emulator).
 func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
@@ -109,14 +113,15 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 	}
 
 	mux := baseServer.Mux()
-	mux.HandleFunc("/orchestrate/setup", d.setupHandler)
+	mux.HandleFunc("/dataflow/verify", d.verifyDataflowHandler)
+	mux.HandleFunc("/dataflow/setup", d.setupDataflowHandler)
 	mux.HandleFunc("/orchestrate/teardown", d.teardownHandler)
-	mux.HandleFunc("/verify/dataflow", d.verifyHandler)
 
-	go d.listenForCommands(ctx)
-
-	if err := d.publishReadyEvent(ctx); err != nil {
-		d.logger.Error().Err(err).Msg("Failed to publish initial 'service_ready' event")
+	if d.commands != nil {
+		d.listenForCommands(ctx)
+		if err := d.publishReadyEvent(ctx); err != nil {
+			d.logger.Error().Err(err).Msg("Failed to publish initial 'service_ready' event")
+		}
 	}
 
 	directorLogger.Info().
@@ -250,13 +255,24 @@ func (d *Director) GetServiceManager() *servicemanager.ServiceManager {
 	return d.serviceManager
 }
 
-func (d *Director) setupHandler(w http.ResponseWriter, r *http.Request) {
-	if err := d.handleSetupCommand(r.Context(), "all"); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to setup all dataflows: %v", err), http.StatusInternalServerError)
+func (d *Director) setupDataflowHandler(w http.ResponseWriter, r *http.Request) {
+	req := OrchestrateRequest{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		d.logger.Warn().Err(err).Msg("Failed to unmarshal orchestrate request")
+	}
+
+	if req.DataflowName == "" {
+		req.DataflowName = "all"
 		return
 	}
+
+	if err := d.handleSetupCommand(r.Context(), req.DataflowName); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to setup dataflow '%s': %v", req.DataflowName, err), http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("All dataflows setup successfully triggered."))
+	_, _ = w.Write([]byte(fmt.Sprintf("Dataflow '%s' setup successfully triggered.", req.DataflowName)))
 }
 
 func (d *Director) teardownHandler(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +284,7 @@ func (d *Director) teardownHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("All ephemeral dataflows teardown successfully triggered."))
 }
 
-func (d *Director) verifyHandler(w http.ResponseWriter, r *http.Request) {
+func (d *Director) verifyDataflowHandler(w http.ResponseWriter, r *http.Request) {
 	var req VerifyDataflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)

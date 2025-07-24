@@ -3,6 +3,8 @@ package deployment
 import (
 	"archive/tar"
 	"bytes"
+	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
+	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -84,8 +86,13 @@ func NewCloudBuildDeployer(ctx context.Context, projectID, defaultRegion, source
 func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting native cloud build and deploy workflow...")
 
-	stupid := fmt.Sprintf("%+v", spec)
-	fmt.Printf("%s", stupid)
+	// ADDED: Ensure both GCS source bucket and Artifact Registry repo exist.
+	if err := d.ensureSourceBucketExists(ctx); err != nil {
+		return "", fmt.Errorf("failed to ensure GCS source bucket exists for service '%s': %w", serviceName, err)
+	}
+	if err := d.ensureArtifactRegistryRepoExists(ctx, spec); err != nil {
+		return "", fmt.Errorf("failed to ensure artifact registry repo exists for service '%s': %w", serviceName, err)
+	}
 
 	sourceObject := fmt.Sprintf("source/%s-%d.tar.gz", serviceName, time.Now().UnixNano())
 	if err := d.uploadSourceToGCS(ctx, spec.SourcePath, d.sourceBucket, sourceObject); err != nil {
@@ -109,6 +116,80 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 
 	d.logger.Info().Str("service", serviceName).Str("url", deployedSvc.Uri).Msg("Service deployed successfully.")
 	return deployedSvc.Uri, nil
+}
+
+// ADDED: New method to ensure the GCS source bucket exists.
+func (d *CloudBuildDeployer) ensureSourceBucketExists(ctx context.Context) error {
+	d.logger.Info().Str("bucket", d.sourceBucket).Msg("Verifying GCS source bucket...")
+	bucket := d.storageClient.Bucket(d.sourceBucket)
+	_, err := bucket.Attrs(ctx)
+	if err == nil {
+		d.logger.Info().Str("bucket", d.sourceBucket).Msg("GCS source bucket already exists.")
+		return nil // Bucket exists, we are done.
+	}
+	if !errors.Is(err, storage.ErrBucketNotExist) {
+		return fmt.Errorf("failed to check for GCS source bucket %s: %w", d.sourceBucket, err)
+	}
+
+	d.logger.Info().Str("bucket", d.sourceBucket).Msg("GCS source bucket not found, creating it now...")
+	if err := bucket.Create(ctx, d.projectID, nil); err != nil {
+		return fmt.Errorf("failed to create GCS source bucket %s: %w", d.sourceBucket, err)
+	}
+
+	d.logger.Info().Str("bucket", d.sourceBucket).Msg("✅ Successfully created GCS source bucket.")
+	return nil
+}
+
+// ADDED: New method to ensure the Artifact Registry repository exists.
+func (d *CloudBuildDeployer) ensureArtifactRegistryRepoExists(ctx context.Context, spec servicemanager.DeploymentSpec) error {
+	repoName := spec.ImageRepo
+	region := d.defaultRegion // Use the deployer's default region
+	if spec.Region != "" {
+		region = spec.Region // But prefer the service-specific region if provided
+	}
+
+	if repoName == "" {
+		return errors.New("cannot ensure repository exists: ImageRepo is not defined in the deployment spec")
+	}
+
+	d.logger.Info().Str("repository", repoName).Str("region", region).Msg("Verifying Artifact Registry repository...")
+
+	arClient, err := artifactregistry.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create artifact registry client: %w", err)
+	}
+	defer arClient.Close()
+
+	parent := fmt.Sprintf("projects/%s/locations/%s", d.projectID, region)
+	fullRepoName := fmt.Sprintf("%s/repositories/%s", parent, repoName)
+
+	_, err = arClient.GetRepository(ctx, &artifactregistrypb.GetRepositoryRequest{Name: fullRepoName})
+	if err == nil {
+		d.logger.Info().Str("repository", fullRepoName).Msg("Artifact Registry repository already exists.")
+		return nil
+	}
+
+	if status.Code(err) != codes.NotFound {
+		return fmt.Errorf("failed to check for repository '%s': %w", fullRepoName, err)
+	}
+
+	d.logger.Info().Str("repository", fullRepoName).Msg("Repository not found, creating it now...")
+	createOp, err := arClient.CreateRepository(ctx, &artifactregistrypb.CreateRepositoryRequest{
+		Parent:       parent,
+		RepositoryId: repoName,
+		Repository:   &artifactregistrypb.Repository{Format: artifactregistrypb.Repository_DOCKER},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to start repository creation for '%s': %w", repoName, err)
+	}
+
+	_, err = createOp.Wait(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to wait for repository creation '%s': %w", repoName, err)
+	}
+
+	d.logger.Info().Str("repository", fullRepoName).Msg("✅ Successfully created Artifact Registry repository.")
+	return nil
 }
 
 // Teardown deletes the specified Cloud Run service.

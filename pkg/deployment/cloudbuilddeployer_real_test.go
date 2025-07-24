@@ -211,19 +211,20 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	require.NoError(t, err)
 	defer arClient.Close()
 
-	// Ensure prerequisites exist
-	logger.Info().Msg("Verifying prerequisites (GCS Bucket and Artifact Registry Repo)...")
-	bucket := gcsClient.Bucket(sourceBucketName)
-	if _, err := bucket.Attrs(ctx); err != nil {
-		if errors.Is(err, storage.ErrBucketNotExist) {
-			logger.Info().Str("bucket", sourceBucketName).Msg("Cloud Build source bucket not found, creating it now...")
-			require.NoError(t, bucket.Create(ctx, projectID, nil), "Failed to create GCS source bucket")
-		} else {
-			t.Fatalf("Failed to check for GCS source bucket %s: %v", sourceBucketName, err)
-		}
-	}
-	require.NoError(t, deployment.EnsureArtifactRegistryRepositoryExists(ctx, projectID, region, imageRepoName, logger))
-	logger.Info().Msg("Prerequisites verified successfully.")
+	//Now in the Deploy method
+	//// Ensure prerequisites exist
+	//logger.Info().Msg("Verifying prerequisites (GCS Bucket and Artifact Registry Repo)...")
+	//bucket := gcsClient.Bucket(sourceBucketName)
+	//if _, err := bucket.Attrs(ctx); err != nil {
+	//	if errors.Is(err, storage.ErrBucketNotExist) {
+	//		logger.Info().Str("bucket", sourceBucketName).Msg("Cloud Build source bucket not found, creating it now...")
+	//		require.NoError(t, bucket.Create(ctx, projectID, nil), "Failed to create GCS source bucket")
+	//	} else {
+	//		t.Fatalf("Failed to check for GCS source bucket %s: %v", sourceBucketName, err)
+	//	}
+	//}
+	//require.NoError(t, deployment.EnsureArtifactRegistryRepositoryExists(ctx, projectID, region, imageRepoName, logger))
+	//logger.Info().Msg("Prerequisites verified successfully.")
 
 	// Create the deployer instance
 	deployer, err := deployment.NewCloudBuildDeployer(ctx, projectID, region, sourceBucketName, logger)
@@ -235,6 +236,7 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 	spec := servicemanager.DeploymentSpec{
 		SourcePath:          sourcePath,
 		Image:               imageTag,
+		ImageRepo:           imageRepoName,
 		CPU:                 "1",
 		Memory:              "512Mi",
 		BuildableModulePath: ".",
