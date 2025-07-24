@@ -22,7 +22,7 @@ import (
 )
 
 // Add this alongside the existing 'usePool' flag
-var expectedMessages = flag.Int("expected-messages", 1, "Number of messages the verifier should expect to receive.")
+var expectedMessages = flag.Int("expected-messages", 2, "Number of messages the verifier should expect to receive.")
 
 // Define a flag to enable the service account pool for testing.
 var usePool = flag.Bool("use-pool", false, "Use a pool of service accounts for testing to avoid quota issues.")
@@ -121,12 +121,12 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, servicemanager.HydrateArchitecture(arch, imageRepo, ""))
+	require.NoError(t, servicemanager.HydrateArchitecture(arch, imageRepo, runID))
 
 	// --- 2. Setup Verification and Orchestrators ---
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() { psClient.Close() })
 
 	// Create the verifier's resources, but don't start listening yet.
 	verifyTopic, verifySub := createVerificationResources(t, ctx, psClient, verificationTopicName)
@@ -136,8 +136,6 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 
 	// Now that we've confirmed the subscription works, start the main listener.
 	validationChan := startVerificationListener(t, ctx, verifySub, *expectedMessages)
-
-	t.Cleanup(func() { _ = verifySub.Delete(context.Background()) }) // Ensure subscription is deleted
 
 	iamOrch, err := orchestration.NewIAMOrchestrator(ctx, arch, logger)
 	require.NoError(t, err)
@@ -150,18 +148,18 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 		logger.Info().Msg("--- Starting Full Teardown ---")
 
 		// Tear down all services with the new, clear functions.
-		if err := orch.TeardownDataflowServices(cCtx, "tracer-flow"); err != nil {
+		if err = orch.TeardownDataflowServices(cCtx, "tracer-flow"); err != nil {
 			logger.Error().Err(err).Msg("Dataflow services teardown failed")
 		}
-		if err := orch.TeardownCloudRunService(cCtx, sdName); err != nil {
+		if err = orch.TeardownCloudRunService(cCtx, sdName); err != nil {
 			logger.Error().Err(err).Msg("Service director teardown failed")
 		}
 
 		// Teardown orchestrator and IAM resources
-		if err := orch.Teardown(cCtx); err != nil {
+		if err = orch.Teardown(cCtx); err != nil {
 			logger.Error().Err(err).Msg("Orchestrator teardown failed")
 		}
-		if err := iamOrch.Teardown(cCtx); err != nil {
+		if err = iamOrch.Teardown(cCtx); err != nil {
 			logger.Error().Err(err).Msg("IAM teardown failed")
 		}
 		logger.Info().Msg("--- Teardown Complete ---")
@@ -194,7 +192,6 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	t.Log("Application services deployed.")
 
 	// --- 4. Verify the Live Dataflow ---
-	// The old verification logic is replaced with this new block.
 	t.Logf("Waiting to receive %d verification message(s)...", *expectedMessages)
 	select {
 	case err := <-validationChan:
@@ -205,14 +202,11 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	}
 }
 
-// in orchestrator_dataflow_test.go
-
 // createVerificationResources just creates the topic and subscription.
 func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, topicName string) (*pubsub.Topic, *pubsub.Subscription) {
 	t.Helper()
 	verifyTopic, err := client.CreateTopic(ctx, topicName)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = verifyTopic.Delete(context.Background()) })
 
 	subID := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
 	verifySub, err := client.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
@@ -222,7 +216,19 @@ func createVerificationResources(t *testing.T, ctx context.Context, client *pubs
 		RetentionDuration:   10 * time.Minute,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = verifySub.Delete(context.Background()) })
+
+	t.Cleanup(func() {
+		t.Log("removing verify resources")
+		cleanupCtx := context.Background()
+		err = verifySub.Delete(cleanupCtx)
+		if err != nil {
+			t.Logf("error closing verify sub: %v", err)
+		}
+		err = verifyTopic.Delete(cleanupCtx)
+		if err != nil {
+			t.Logf("error closing verify topic: %v", err)
+		}
+	})
 
 	return verifyTopic, verifySub
 }
@@ -234,10 +240,10 @@ func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Su
 	var receivedCount atomic.Int32
 
 	go func() {
-		cctx, cancel := context.WithCancel(ctx)
-		// IMPORTANT do NOT place a defer cancel in this block - subscription recovers from errors a defer cancel will prevent this
+		receiveCtx, cancel := context.WithCancel(ctx)
+		// IMPORTANT do NOT place a defer cancel here - subscription recovers from errors a defer cancel will prevent this
 
-		err := sub.Receive(cctx, func(ctx context.Context, m *pubsub.Message) {
+		err := sub.Receive(receiveCtx, func(ctx context.Context, m *pubsub.Message) {
 			log.Info().Str("data", string(m.Data)).Msg("Verifier received a message.")
 			m.Ack()
 
@@ -246,6 +252,7 @@ func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Su
 				case validationChan <- fmt.Errorf("received message with invalid format: %s", string(m.Data)):
 				default:
 				}
+				//The cancel goes here INSIDE THE RECEIVE block
 				cancel()
 				return
 			}

@@ -82,6 +82,7 @@ func (c *TestIAMClient) Close() error {
 			errs = append(errs, fmt.Errorf("could not get policy for %s: %w", state.Email, err))
 			continue
 		}
+		c.logger.Info().Str("account", state.Email).Msg("removing polices")
 
 		if len(policy.InternalProto.Bindings) > 0 {
 			c.logger.Info().Str("email", state.Email).Msg("Cleaning roles...")
@@ -154,6 +155,7 @@ func (c *TestIAMClient) DeleteServiceAccount(ctx context.Context, accountEmail s
 		c.logger.Info().Str("email", accountEmail).Msg("Returning service account to the pool (fake delete).")
 		state.InUse = false
 	}
+
 	return nil
 }
 

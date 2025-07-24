@@ -166,7 +166,7 @@ func (o *IAMOrchestrator) SetupDataflowIAM(ctx context.Context) (map[string]stri
 
 // Teardown cleans up IAM resources and closes the client.
 func (o *IAMOrchestrator) Teardown(ctx context.Context) error {
-	o.logger.Info().Msg("Starting IAMOrchestrator cleanup...")
+	o.logger.Info().Int("created", len(o.createdServiceAccountEmails)).Msg("Starting IAMOrchestrator cleanup...")
 
 	// In test mode, this returns the SA to the pool. In standard mode, it deletes it.
 	for _, email := range o.createdServiceAccountEmails {

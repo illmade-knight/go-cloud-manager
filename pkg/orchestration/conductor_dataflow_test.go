@@ -83,10 +83,8 @@ func TestConductor_DataflowE2E(t *testing.T) {
 							SourcePath:          pubSourcePath,
 							BuildableModulePath: ".",
 							EnvironmentVars: map[string]string{
-								"TOPIC_ID":              tracerTopicName,
-								"AUTO_PUBLISH_ENABLED":  "true",
-								"AUTO_PUBLISH_COUNT":    fmt.Sprintf("%d", *expectedMessages),
-								"AUTO_PUBLISH_INTERVAL": "1s",
+								"TOPIC_ID":           tracerTopicName,
+								"AUTO_PUBLISH_COUNT": fmt.Sprintf("%d", *expectedMessages),
 							},
 						},
 					},
@@ -115,7 +113,7 @@ func TestConductor_DataflowE2E(t *testing.T) {
 	// --- 2. Setup Verification and Conductor ---
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() { psClient.Close() })
 
 	verifyTopic, verifySub := createVerificationResources(t, ctx, psClient, verificationTopicName)
 
