@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-iot/helpers/emulators"
-	"github.com/illmade-knight/go-iot/pkg/types"
+	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,7 +47,7 @@ func TestBigQueryManager_Integration(t *testing.T) {
 
 	// --- 3. Create the BigQueryManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	servicemanager.RegisterSchema("TestSchema", types.GardenMonitorReadings{})
+	servicemanager.RegisterSchema("TestSchema", GardenMonitorReadings{})
 	environment := servicemanager.Environment{ProjectID: projectID, Location: "US"}
 
 	// Create a real BigQuery client adapter for the manager

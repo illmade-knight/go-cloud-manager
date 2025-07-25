@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"google.golang.org/api/run/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"strings"
@@ -68,6 +69,7 @@ type GoogleIAMClient struct {
 	storageClient  *storage.Client
 	bigqueryClient *bigquery.Client
 	secretsClient  *secretmanager.Client
+	runService     *run.Service // ADDED
 }
 
 // NewGoogleIAMClient creates a new, fully initialized adminClient for real Google Cloud IAM operations.
@@ -93,6 +95,10 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 	if err != nil {
 		return nil, fmt.Errorf("failed to create secretmanager client: %w", err)
 	}
+	runService, err := run.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create run service: %w", err)
+	}
 
 	return &GoogleIAMClient{
 		projectID:      projectID,
@@ -101,6 +107,7 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 		storageClient:  gcsClient,
 		bigqueryClient: bqClient,
 		secretsClient:  secretsClient,
+		runService:     runService,
 	}, nil
 }
 
@@ -297,6 +304,46 @@ func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, resource
 			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, resourceID),
 		}
 		return removeStandardIAMBinding(ctx, handle, role, member)
+	case "cloudrun_service":
+		// The region is needed but not available here, so we assume a single region for now.
+		// A future improvement could be to pass the region through the binding.
+		// For now, we find the region from the service spec.
+		fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, "europe-west2", resourceID)
+
+		policy, err := c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
+		if err != nil {
+			return fmt.Errorf("failed to get IAM policy for Cloud Run service %s: %w", resourceID, err)
+		}
+
+		// Add the new member to the specified role.
+		var bindingToModify *run.GoogleIamV1Binding
+		for _, b := range policy.Bindings {
+			if b.Role == role {
+				bindingToModify = b
+				break
+			}
+		}
+
+		if bindingToModify == nil {
+			bindingToModify = &run.GoogleIamV1Binding{Role: role}
+			policy.Bindings = append(policy.Bindings, bindingToModify)
+		}
+
+		memberExists := false
+		for _, m := range bindingToModify.Members {
+			if m == member {
+				memberExists = true
+				break
+			}
+		}
+
+		if !memberExists {
+			bindingToModify.Members = append(bindingToModify.Members, member)
+		}
+
+		setPolicyRequest := &run.GoogleIamV1SetIamPolicyRequest{Policy: policy}
+		_, err = c.runService.Projects.Locations.Services.SetIamPolicy(fullServiceName, setPolicyRequest).Context(ctx).Do()
+		return err
 	default:
 		return fmt.Errorf("unsupported resource type for IAM binding removal: %s", resourceType)
 	}

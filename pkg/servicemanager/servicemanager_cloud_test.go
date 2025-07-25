@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-iot/pkg/types"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,8 +18,11 @@ import (
 	"testing"
 )
 
+type GardenMonitorReadings struct {
+}
+
 func init() {
-	servicemanager.RegisterSchema("TestSchema", types.GardenMonitorReadings{})
+	servicemanager.RegisterSchema("TestSchema", GardenMonitorReadings{})
 }
 
 // TestServiceManager_RealIntegration_FullLifecycle tests the top-level ServiceManager's ability

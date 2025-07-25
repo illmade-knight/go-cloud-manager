@@ -7,8 +7,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-iot/helpers/emulators"
-	"github.com/illmade-knight/go-iot/pkg/types"
+	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,7 +15,7 @@ import (
 )
 
 func init() {
-	servicemanager.RegisterSchema("TestSchema", types.GardenMonitorReadings{})
+	servicemanager.RegisterSchema("TestSchema", GardenMonitorReadings{})
 }
 
 // TestServiceManager_Integration_FullLifecycle tests the top-level ServiceManager's ability
@@ -93,7 +92,7 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 
 	// --- 3. Create the ServiceManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	schemaRegistry := map[string]interface{}{"TestSchema": types.GardenMonitorReadings{}}
+	schemaRegistry := map[string]interface{}{"TestSchema": GardenMonitorReadings{}}
 
 	// Use the production constructor, which creates all sub-managers internally.
 

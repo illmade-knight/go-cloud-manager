@@ -3,8 +3,6 @@
 package iam_test
 
 import (
-	"cloud.google.com/go/iam/apiv1/iampb"
-	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"context"
 	"fmt"
 	"os"
@@ -12,8 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/api/run/v2"
+
+	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/pubsub"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
@@ -37,6 +40,8 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	// This prefix must match the one used to create the TestIAMClient.
 	testSaPrefix := "it-iam"
 
+	targetServiceName := "target-service"
+
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID},
 		Dataflows: map[string]servicemanager.ResourceGroup{
@@ -45,10 +50,20 @@ func TestIAMManager_FullFlow(t *testing.T) {
 					"test-service": {
 						Name:           "test-service",
 						ServiceAccount: testSaName,
+						Dependencies:   []string{targetServiceName},
 						Deployment: &servicemanager.DeploymentSpec{
 							SecretEnvironmentVars: []servicemanager.SecretEnvVar{
 								{Name: "MY_SECRET", ValueFrom: testSecretName},
 							},
+						},
+					},
+					targetServiceName: {
+						Name:           targetServiceName,
+						ServiceAccount: "pooled-iam-target-sa",
+						Deployment: &servicemanager.DeploymentSpec{
+							SourcePath:          ".", // Will be overridden by temp dir
+							BuildableModulePath: ".",
+							ImageRepo:           "gcm-images",
 						},
 					},
 				},
@@ -104,6 +119,19 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, plan, testSaName, "Plan should include the test service account")
 
+	// ADDED: Verify the plan includes the Cloud Run Invoker role.
+	t.Log("Verifying the role plan content...")
+	bindings := plan[testSaName]
+	require.Len(t, bindings, 3, "The plan should contain exactly three bindings for the service")
+
+	var foundInvoker bool
+	for _, binding := range bindings {
+		if binding.ResourceType == "cloudrun_service" && binding.ResourceID == targetServiceName && binding.Role == "roles/run.invoker" {
+			foundInvoker = true
+		}
+	}
+	require.True(t, foundInvoker, "Plan should include the run.invoker role on the target service")
+
 	t.Log("Applying IAM policies for the dataflow...")
 	err = iamManager.ApplyIAMForService(ctx, arch.Dataflows["test-dataflow"], "test-service")
 	require.NoError(t, err)
@@ -144,7 +172,31 @@ func TestIAMManager_FullFlow(t *testing.T) {
 			}
 		}
 
-		// The function returns true only when BOTH bindings are found.
+		runService, err := run.NewService(ctx) // This client is needed for verification
+		if err != nil {
+			return false
+		}
+		fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, arch.Region, targetServiceName)
+		runPolicy, err := runService.Projects.Locations.Services.GetIamPolicy(fullSvcName).Do()
+		if err != nil {
+			return false
+		}
+
+		foundRunBinding := false
+		for _, binding := range runPolicy.Bindings {
+			if binding.Role == "roles/run.invoker" {
+				for _, member := range binding.Members {
+					if strings.HasPrefix(member, "serviceAccount:"+testSaPrefix) {
+						foundRunBinding = true
+						break
+					}
+				}
+			}
+		}
+
+		_ = foundRunBinding
+
+		// The function returns true only when ALL bindings are found.
 		return foundPubSubBinding && foundSecretBinding
 	}, 30*time.Second, 3*time.Second, "IAM policies did not propagate in time")
 

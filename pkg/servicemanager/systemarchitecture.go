@@ -52,8 +52,10 @@ type ServiceSpec struct {
 	Description    string                 `yaml:"description,omitempty"`
 	ServiceAccount string                 `yaml:"service_account"`
 	Metadata       map[string]interface{} `yaml:"metadata,omitempty"`
-	Deployment     *DeploymentSpec        `yaml:"deployment,omitempty"` // <-- The new section
+	Deployment     *DeploymentSpec        `yaml:"deployment,omitempty"`
 	HealthCheck    *HealthCheckSpec       `yaml:"health_check,omitempty"`
+	// other services this service can/needs to call
+	Dependencies []string `yaml:"dependencies,omitempty"`
 }
 
 type SecretEnvVar struct {

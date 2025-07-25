@@ -10,9 +10,10 @@ import (
 
 // IAMBinding represents a single "who gets what on where" permission.
 type IAMBinding struct {
-	ResourceType string
-	ResourceID   string
-	Role         string
+	ResourceType     string
+	ResourceID       string
+	Role             string
+	ResourceLocation string // ADDED: The location/region of the resource, e.g., "europe-west2"
 }
 
 // RolePlanner is responsible for analyzing a microservice architecture
@@ -73,41 +74,57 @@ func (p *RolePlanner) PlanRolesForApplicationServices(ctx context.Context, arch 
 
 	for _, dataflow := range arch.Dataflows {
 		for serviceName, serviceSpec := range dataflow.Services {
-			// --- Role Inference Logic ---
-			if serviceSpec.Deployment != nil && serviceSpec.Deployment.EnvironmentVars != nil {
+			if serviceSpec.Deployment != nil {
 				envVars := serviceSpec.Deployment.EnvironmentVars
 				// Infer Pub/Sub Publisher role
 				if topicID, ok := envVars["TOPIC_ID"]; ok {
 					p.logger.Info().Str("service", serviceName).Str("topic", topicID).Msg("Inferred publisher role")
-					addBindingToPlan(serviceSpec.ServiceAccount, "pubsub_topic", topicID, "roles/pubsub.publisher", finalPlan, &mu)
+					binding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: topicID, Role: "roles/pubsub.publisher"}
+					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
 				}
 				// Infer Pub/Sub Subscriber role
 				if subID, ok := envVars["SUBSCRIPTION_ID"]; ok {
 					p.logger.Info().Str("service", serviceName).Str("subscription", subID).Msg("Inferred subscriber role")
-					addBindingToPlan(serviceSpec.ServiceAccount, "pubsub_subscription", subID, "roles/pubsub.subscriber", finalPlan, &mu)
+					binding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: subID, Role: "roles/pubsub.subscriber"}
+					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
 				}
 				// Infer BigQuery Data Editor role
 				if datasetID, ok := envVars["BIGQUERY_DATASET_ID"]; ok {
 					p.logger.Info().Str("service", serviceName).Str("dataset", datasetID).Msg("Inferred bigquery data editor role")
-					addBindingToPlan(serviceSpec.ServiceAccount, "bigquery_dataset", datasetID, "roles/bigquery.dataEditor", finalPlan, &mu)
+					binding := IAMBinding{ResourceType: "bigquery_dataset", ResourceID: datasetID, Role: "roles/bigquery.dataEditor"}
+					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
 				}
 				// Infer GCS Object Admin role
 				if bucketName, ok := envVars["GCS_BUCKET_NAME"]; ok {
 					p.logger.Info().Str("service", serviceName).Str("bucket", bucketName).Msg("Inferred storage object admin role")
-					addBindingToPlan(serviceSpec.ServiceAccount, "gcs_bucket", bucketName, "roles/storage.objectAdmin", finalPlan, &mu)
+					binding := IAMBinding{ResourceType: "gcs_bucket", ResourceID: bucketName, Role: "roles/storage.objectAdmin"}
+					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
 				}
-				// --- NEW: Infer Secret Accessor role ---
-				// This block reads the new 'secret_environment_vars' section and adds the
-				// appropriate IAM binding to the plan.
-				if serviceSpec.Deployment.SecretEnvironmentVars != nil {
+				// Infer Secret Accessor role
+				if len(serviceSpec.Deployment.SecretEnvironmentVars) > 0 {
 					for _, secretVar := range serviceSpec.Deployment.SecretEnvironmentVars {
 						p.logger.Info().Str("service", serviceName).Str("secret", secretVar.ValueFrom).Msg("Inferred secret accessor role")
-						addBindingToPlan(serviceSpec.ServiceAccount, "secret", secretVar.ValueFrom, "roles/secretmanager.secretAccessor", finalPlan, &mu)
+						binding := IAMBinding{ResourceType: "secret", ResourceID: secretVar.ValueFrom, Role: "roles/secretmanager.secretAccessor"}
+						addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
 					}
 				}
 			}
 
-			// --- Scan for explicit policies ---
+			// Infer Cloud Run Invoker role from dependencies
+			if len(serviceSpec.Dependencies) > 0 {
+				for _, dependencyName := range serviceSpec.Dependencies {
+					p.logger.Info().Str("service", serviceName).Str("dependency", dependencyName).Msg("Inferred cloud run invoker role")
+					dependencyRegion := findServiceRegion(arch, dependencyName)
+					binding := IAMBinding{
+						ResourceType:     "cloudrun_service",
+						ResourceID:       dependencyName,
+						Role:             "roles/run.invoker",
+						ResourceLocation: dependencyRegion,
+					}
+					// CORRECTED: This now uses the same clean helper function.
+					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
+				}
+			}
 			scanResourcesForExplicitPolicies(serviceName, serviceSpec.ServiceAccount, dataflow.Resources, finalPlan, &mu)
 		}
 	}
@@ -122,7 +139,8 @@ func scanResourcesForExplicitPolicies(serviceName, serviceAccount string, resour
 	for _, topic := range resources.Topics {
 		for _, policy := range topic.IAMPolicy {
 			if policy.Name == serviceName {
-				addBindingToPlan(serviceAccount, "pubsub_topic", topic.Name, policy.Role, plan, mu)
+				binding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: topic.Name, Role: policy.Role}
+				addBindingToPlan(serviceAccount, binding, plan, mu)
 			}
 		}
 	}
@@ -130,7 +148,8 @@ func scanResourcesForExplicitPolicies(serviceName, serviceAccount string, resour
 	for _, sub := range resources.Subscriptions {
 		for _, policy := range sub.IAMPolicy {
 			if policy.Name == serviceName {
-				addBindingToPlan(serviceAccount, "pubsub_subscription", sub.Name, policy.Role, plan, mu)
+				binding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: sub.Name, Role: policy.Role}
+				addBindingToPlan(serviceAccount, binding, plan, mu)
 			}
 		}
 	}
@@ -138,7 +157,8 @@ func scanResourcesForExplicitPolicies(serviceName, serviceAccount string, resour
 	for _, bucket := range resources.GCSBuckets {
 		for _, policy := range bucket.IAMPolicy {
 			if policy.Name == serviceName {
-				addBindingToPlan(serviceAccount, "gcs_bucket", bucket.Name, policy.Role, plan, mu)
+				binding := IAMBinding{ResourceType: "gcs_bucket", ResourceID: bucket.Name, Role: policy.Role}
+				addBindingToPlan(serviceAccount, binding, plan, mu)
 			}
 		}
 	}
@@ -146,19 +166,39 @@ func scanResourcesForExplicitPolicies(serviceName, serviceAccount string, resour
 	for _, dataset := range resources.BigQueryDatasets {
 		for _, policy := range dataset.IAMPolicy {
 			if policy.Name == serviceName {
-				addBindingToPlan(serviceAccount, "bigquery_dataset", dataset.Name, policy.Role, plan, mu)
+				binding := IAMBinding{ResourceType: "bigquery_dataset", ResourceID: dataset.Name, Role: policy.Role}
+				addBindingToPlan(serviceAccount, binding, plan, mu)
 			}
 		}
 	}
 }
 
 // addBindingToPlan is a thread-safe helper to add a new binding to our final plan.
-func addBindingToPlan(serviceAccount, resourceType, resourceID, role string, plan map[string][]IAMBinding, mu *sync.Mutex) {
+func addBindingToPlan(serviceAccount string, binding IAMBinding, plan map[string][]IAMBinding, mu *sync.Mutex) {
 	mu.Lock()
 	defer mu.Unlock()
-	plan[serviceAccount] = append(plan[serviceAccount], IAMBinding{
-		ResourceType: resourceType,
-		ResourceID:   resourceID,
-		Role:         role,
-	})
+	plan[serviceAccount] = append(plan[serviceAccount], binding)
+}
+
+// ADD THIS HELPER to iamplanner.go
+// findServiceRegion searches the architecture for a service by name and returns its region.
+func findServiceRegion(arch *servicemanager.MicroserviceArchitecture, serviceName string) string {
+	// Check the service director first
+	if arch.ServiceManagerSpec.Name == serviceName && arch.ServiceManagerSpec.Deployment != nil {
+		if arch.ServiceManagerSpec.Deployment.Region != "" {
+			return arch.ServiceManagerSpec.Deployment.Region
+		}
+	}
+	// Check all dataflow services
+	for _, df := range arch.Dataflows {
+		for _, svc := range df.Services {
+			if svc.Name == serviceName && svc.Deployment != nil {
+				if svc.Deployment.Region != "" {
+					return svc.Deployment.Region
+				}
+			}
+		}
+	}
+	// Fallback to the global default region
+	return arch.Environment.Region
 }

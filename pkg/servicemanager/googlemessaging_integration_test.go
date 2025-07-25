@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-iot/helpers/emulators"
+	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

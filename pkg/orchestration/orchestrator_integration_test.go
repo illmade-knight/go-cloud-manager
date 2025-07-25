@@ -12,7 +12,7 @@ import (
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/illmade-knight/go-iot/helpers/emulators"
+	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
