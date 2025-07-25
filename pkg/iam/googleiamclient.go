@@ -8,6 +8,7 @@ import (
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
 	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/pubsub"
+	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/storage"
 	"context"
 	"fmt"
@@ -33,6 +34,32 @@ type iamHandle interface {
 	SetPolicy(ctx context.Context, p *iam.Policy) error
 }
 
+// secretIAMHandle implements the iamHandle interface for a Google Secret Manager secret.
+type secretIAMHandle struct {
+	client     *secretmanager.Client
+	resourceID string // This will be the full resource name of the secret
+}
+
+// Policy gets the IAM policy for the secret.
+func (h *secretIAMHandle) Policy(ctx context.Context) (*iam.Policy, error) {
+	policy, err := h.client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{
+		Resource: h.resourceID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &iam.Policy{InternalProto: policy}, nil
+}
+
+// SetPolicy sets the IAM policy for the secret.
+func (h *secretIAMHandle) SetPolicy(ctx context.Context, p *iam.Policy) error {
+	_, err := h.client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
+		Resource: h.resourceID,
+		Policy:   p.InternalProto,
+	})
+	return err
+}
+
 // GoogleIAMClient holds the necessary Google Cloud clients for IAM operations.
 type GoogleIAMClient struct {
 	projectID      string
@@ -40,6 +67,7 @@ type GoogleIAMClient struct {
 	pubsubClient   *pubsub.Client
 	storageClient  *storage.Client
 	bigqueryClient *bigquery.Client
+	secretsClient  *secretmanager.Client
 }
 
 // NewGoogleIAMClient creates a new, fully initialized adminClient for real Google Cloud IAM operations.
@@ -60,6 +88,11 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bigquery adminClient: %w", err)
 	}
+	// ADDED: Initialize the Secret Manager client.
+	secretsClient, err := secretmanager.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secretmanager client: %w", err)
+	}
 
 	return &GoogleIAMClient{
 		projectID:      projectID,
@@ -67,6 +100,7 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 		pubsubClient:   psClient,
 		storageClient:  gcsClient,
 		bigqueryClient: bqClient,
+		secretsClient:  secretsClient,
 	}, nil
 }
 
@@ -219,6 +253,12 @@ func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, resourceTyp
 		return addStandardIAMBinding(ctx, c.pubsubClient.Subscription(resourceID).IAM(), role, member)
 	case "gcs_bucket":
 		return addStandardIAMBinding(ctx, c.storageClient.Bucket(resourceID).IAM(), role, member)
+	case "secret":
+		handle := &secretIAMHandle{
+			client:     c.secretsClient,
+			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, resourceID),
+		}
+		return addStandardIAMBinding(ctx, handle, role, member)
 	default:
 		return fmt.Errorf("unsupported resource type for IAM binding: %s", resourceType)
 	}
@@ -251,6 +291,12 @@ func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, resource
 		return removeStandardIAMBinding(ctx, c.pubsubClient.Subscription(resourceID).IAM(), role, member)
 	case "gcs_bucket":
 		return removeStandardIAMBinding(ctx, c.storageClient.Bucket(resourceID).IAM(), role, member)
+	case "secret":
+		handle := &secretIAMHandle{
+			client:     c.secretsClient,
+			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, resourceID),
+		}
+		return removeStandardIAMBinding(ctx, handle, role, member)
 	default:
 		return fmt.Errorf("unsupported resource type for IAM binding removal: %s", resourceType)
 	}
@@ -347,6 +393,9 @@ func (c *GoogleIAMClient) Close() error {
 	}
 	if err := c.bigqueryClient.Close(); err != nil {
 		errs = append(errs, fmt.Sprintf("bigqueryClient: %v", err))
+	}
+	if err := c.secretsClient.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("secretsClient: %v", err))
 	}
 
 	if len(errs) > 0 {

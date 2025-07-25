@@ -438,7 +438,7 @@ func (o *Orchestrator) TriggerDataflowSetup(ctx context.Context, dataflowName st
 	o.logger.Info().Str("dataflow", dataflowName).Msg("dataflow setup")
 	cmdPayload := Command{
 		Instruction: Setup,
-		Value:       "toy-dataflow",
+		Value:       dataflowName,
 	}
 	cmdMsg, _ := json.Marshal(cmdPayload)
 	result := o.commandTopic.Publish(ctx, &pubsub.Message{Data: cmdMsg})

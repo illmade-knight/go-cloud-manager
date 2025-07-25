@@ -95,6 +95,16 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 		}
 	}
 
+	if serviceSpec.Deployment != nil && len(serviceSpec.Deployment.SecretEnvironmentVars) > 0 {
+		for _, secretVar := range serviceSpec.Deployment.SecretEnvironmentVars {
+			im.logger.Info().Str("secret", secretVar.ValueFrom).Msg("Applying secret accessor role...")
+			err := im.client.AddResourceIAMBinding(ctx, "secret", secretVar.ValueFrom, "roles/secretmanager.secretAccessor", member)
+			if err != nil {
+				return fmt.Errorf("failed to grant secret access for '%s' to service '%s': %w", secretVar.ValueFrom, serviceName, err)
+			}
+		}
+	}
+
 	im.logger.Info().Str("service", serviceName).Msg("Successfully applied all IAM policies.")
 	return nil
 }

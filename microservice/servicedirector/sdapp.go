@@ -39,7 +39,7 @@ type Director struct {
 	serviceManager *servicemanager.ServiceManager
 	architecture   *servicemanager.MicroserviceArchitecture
 	logger         zerolog.Logger
-	commands       *pubsubCommands // we don't require pubsub commands
+	commands       *pubsubCommands // if we don't require pubsub commands set to nil
 }
 
 // NewServiceDirector is the primary constructor for production use. It creates
