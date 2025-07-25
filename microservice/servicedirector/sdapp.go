@@ -109,20 +109,19 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 			commandSubscription: sub,
 			completionTopic:     topic,
 		}
-
+		if err = d.publishReadyEvent(ctx); err != nil {
+			d.logger.Error().Err(err).Msg("Failed to publish initial 'service_ready' event")
+		}
+		d.logger.Info().Msg("published 'service_ready' event")
+		go d.listenForCommands(ctx)
+	} else {
+		d.logger.Info().Msg("no command infrastructure created")
 	}
 
 	mux := baseServer.Mux()
 	mux.HandleFunc(verifyPath, d.verifyDataflowHandler)
 	mux.HandleFunc(setupPath, d.setupDataflowHandler)
 	mux.HandleFunc(teardownPath, d.teardownHandler)
-
-	if d.commands != nil {
-		d.listenForCommands(ctx)
-		if err := d.publishReadyEvent(ctx); err != nil {
-			d.logger.Error().Err(err).Msg("Failed to publish initial 'service_ready' event")
-		}
-	}
 
 	directorLogger.Info().
 		Str("http_port", cfg.HTTPPort).
@@ -133,9 +132,6 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 
 // publishReadyEvent is updated to get the topic name from the architecture.
 func (d *Director) publishReadyEvent(ctx context.Context) error {
-	if d.commands == nil {
-		return nil
-	}
 	d.logger.Info().Msg("Publishing 'service_ready' event...")
 
 	event := orchestration.CompletionEvent{
