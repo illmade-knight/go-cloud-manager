@@ -42,7 +42,12 @@ func TestMessagingManager_Integration(t *testing.T) {
 	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
 	psClient, err := pubsub.NewClient(ctx, projectID, psConnection.ClientOptions...)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() {
+		err = psClient.Close()
+		if err != nil {
+			t.Logf("Error closing Pub/Sub emulator: %v", err)
+		}
+	})
 
 	// --- 3. Create the MessagingManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())

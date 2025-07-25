@@ -113,7 +113,7 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 }
 
 // NewServiceManagerFromClients remains for testing purposes.
-func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, environment Environment, schemaRegistry map[string]interface{}, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, environment Environment, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	sm := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
 		writer:   writer,

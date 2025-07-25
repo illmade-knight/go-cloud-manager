@@ -115,6 +115,10 @@ type BigQueryManager struct {
 	environment Environment
 }
 
+func NewAdapter(client *bigquery.Client) BQClient {
+	return &bqClientAdapter{client: client}
+}
+
 // NewBigQueryManager creates a new BigQueryManager.
 // It no longer requires the schemaRegistry at construction time.
 func NewBigQueryManager(client BQClient, logger zerolog.Logger, environment Environment) (*BigQueryManager, error) {
@@ -248,76 +252,76 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 }
 
 // Teardown deletes all configured BigQuery resources concurrently.
-func (m *BigQueryManager) Teardown(ctx context.Context, resources CloudResourcesSpec) error {
-	m.logger.Info().Msg("Starting BigQuery teardown...")
-	var allErrors []error
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(resources.BigQueryTables)+len(resources.BigQueryDatasets))
-
-	// Teardown tables concurrently
-	m.logger.Info().Int("count", len(resources.BigQueryTables)).Msg("Tearing down BigQuery tables...")
-	for _, tableCfg := range resources.BigQueryTables {
-		wg.Add(1)
-		go func(tableCfg BigQueryTable) {
-			defer wg.Done()
-			if tableCfg.TeardownProtection {
-				m.logger.Warn().Str("table", tableCfg.Name).Msg("Teardown protection enabled, skipping deletion.")
-				return
-			}
-			table := m.client.Dataset(tableCfg.Dataset).Table(tableCfg.Name)
-			m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Attempting to delete table...")
-			if err := table.Delete(ctx); err != nil {
-				if isNotFound(err) {
-					m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table not found, skipping.")
-				} else {
-					errChan <- fmt.Errorf("failed to delete table %s in dataset %s: %w", tableCfg.Name, tableCfg.Dataset, err)
-				}
-			} else {
-				m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table deleted successfully.")
-			}
-		}(tableCfg)
-	}
-	wg.Wait()
-
-	// Then teardown datasets concurrently
-	m.logger.Info().Int("count", len(resources.BigQueryDatasets)).Msg("Tearing down BigQuery datasets...")
-	for _, dsCfg := range resources.BigQueryDatasets {
-		wg.Add(1)
-		go func(dsCfg BigQueryDataset) {
-			defer wg.Done()
-			if dsCfg.TeardownProtection {
-				m.logger.Warn().Str("dataset", dsCfg.Name).Msg("Teardown protection enabled, skipping deletion.")
-				return
-			}
-			dataset := m.client.Dataset(dsCfg.Name)
-			m.logger.Info().Str("dataset", dsCfg.Name).Msg("Attempting to delete dataset...")
-			// Note: Using DeleteWithContents for simplicity. In a real-world scenario, you might want a more granular check.
-			if err := dataset.DeleteWithContents(ctx); err != nil {
-				if isNotFound(err) {
-					m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset not found, skipping.")
-				} else {
-					errChan <- fmt.Errorf("failed to delete dataset %s: %w", dsCfg.Name, err)
-				}
-			} else {
-				m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset deleted successfully.")
-			}
-		}(dsCfg)
-	}
-	wg.Wait()
-	close(errChan)
-
-	for err := range errChan {
-		allErrors = append(allErrors, err)
-		m.logger.Error().Err(err).Msg("An error occurred during teardown.")
-	}
-
-	if len(allErrors) > 0 {
-		return fmt.Errorf("BigQuery teardown completed with errors: %w", errors.Join(allErrors...))
-	}
-
-	m.logger.Info().Msg("BigQuery teardown completed successfully.")
-	return nil
-}
+//func (m *BigQueryManager) Teardown(ctx context.Context, resources CloudResourcesSpec) error {
+//	m.logger.Info().Msg("Starting BigQuery teardown...")
+//	var allErrors []error
+//	var wg sync.WaitGroup
+//	errChan := make(chan error, len(resources.BigQueryTables)+len(resources.BigQueryDatasets))
+//
+//	// Teardown tables concurrently
+//	m.logger.Info().Int("count", len(resources.BigQueryTables)).Msg("Tearing down BigQuery tables...")
+//	for _, tableCfg := range resources.BigQueryTables {
+//		wg.Add(1)
+//		go func(tableCfg BigQueryTable) {
+//			defer wg.Done()
+//			if tableCfg.TeardownProtection {
+//				m.logger.Warn().Str("table", tableCfg.Name).Msg("Teardown protection enabled, skipping deletion.")
+//				return
+//			}
+//			table := m.client.Dataset(tableCfg.Dataset).Table(tableCfg.Name)
+//			m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Attempting to delete table...")
+//			if err := table.Delete(ctx); err != nil {
+//				if isNotFound(err) {
+//					m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table not found, skipping.")
+//				} else {
+//					errChan <- fmt.Errorf("failed to delete table %s in dataset %s: %w", tableCfg.Name, tableCfg.Dataset, err)
+//				}
+//			} else {
+//				m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table deleted successfully.")
+//			}
+//		}(tableCfg)
+//	}
+//	wg.Wait()
+//
+//	// Then teardown datasets concurrently
+//	m.logger.Info().Int("count", len(resources.BigQueryDatasets)).Msg("Tearing down BigQuery datasets...")
+//	for _, dsCfg := range resources.BigQueryDatasets {
+//		wg.Add(1)
+//		go func(dsCfg BigQueryDataset) {
+//			defer wg.Done()
+//			if dsCfg.TeardownProtection {
+//				m.logger.Warn().Str("dataset", dsCfg.Name).Msg("Teardown protection enabled, skipping deletion.")
+//				return
+//			}
+//			dataset := m.client.Dataset(dsCfg.Name)
+//			m.logger.Info().Str("dataset", dsCfg.Name).Msg("Attempting to delete dataset...")
+//			// Note: Using DeleteWithContents for simplicity. In a real-world scenario, you might want a more granular check.
+//			if err := dataset.DeleteWithContents(ctx); err != nil {
+//				if isNotFound(err) {
+//					m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset not found, skipping.")
+//				} else {
+//					errChan <- fmt.Errorf("failed to delete dataset %s: %w", dsCfg.Name, err)
+//				}
+//			} else {
+//				m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset deleted successfully.")
+//			}
+//		}(dsCfg)
+//	}
+//	wg.Wait()
+//	close(errChan)
+//
+//	for err := range errChan {
+//		allErrors = append(allErrors, err)
+//		m.logger.Error().Err(err).Msg("An error occurred during teardown.")
+//	}
+//
+//	if len(allErrors) > 0 {
+//		return fmt.Errorf("BigQuery teardown completed with errors: %w", errors.Join(allErrors...))
+//	}
+//
+//	m.logger.Info().Msg("BigQuery teardown completed successfully.")
+//	return nil
+//}
 
 // Validate performs pre-flight checks on the resource configuration.
 func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
@@ -415,4 +419,53 @@ func (m *BigQueryManager) VerifyTables(ctx context.Context, tablesToVerify []Big
 		m.logger.Debug().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table verified successfully.")
 	}
 	return errors.Join(allErrors...)
+}
+
+// Teardown deletes all configured BigQuery resources by deleting the parent datasets.
+func (m *BigQueryManager) Teardown(ctx context.Context, resources CloudResourcesSpec) error {
+	m.logger.Info().Msg("Starting BigQuery teardown...")
+	var allErrors []error
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(resources.BigQueryDatasets))
+
+	// CORRECTED: The explicit table deletion loop has been removed.
+	// We only need to delete the parent datasets with their contents.
+	m.logger.Info().Int("count", len(resources.BigQueryDatasets)).Msg("Tearing down BigQuery datasets...")
+	for _, dsCfg := range resources.BigQueryDatasets {
+		wg.Add(1)
+		go func(dsCfg BigQueryDataset) {
+			defer wg.Done()
+			if dsCfg.TeardownProtection {
+				m.logger.Warn().Str("dataset", dsCfg.Name).Msg("Teardown protection enabled, skipping deletion.")
+				return
+			}
+			dataset := m.client.Dataset(dsCfg.Name)
+			m.logger.Info().Str("dataset", dsCfg.Name).Msg("Attempting to delete dataset with its contents...")
+
+			// This single call is sufficient to delete the dataset and all tables within it.
+			if err := dataset.DeleteWithContents(ctx); err != nil {
+				if isNotFound(err) {
+					m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset not found, skipping.")
+				} else {
+					errChan <- fmt.Errorf("failed to delete dataset %s: %w", dsCfg.Name, err)
+				}
+			} else {
+				m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset deleted successfully.")
+			}
+		}(dsCfg)
+	}
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		allErrors = append(allErrors, err)
+		m.logger.Error().Err(err).Msg("An error occurred during teardown.")
+	}
+
+	if len(allErrors) > 0 {
+		return fmt.Errorf("BigQuery teardown completed with errors: %w", errors.Join(allErrors...))
+	}
+
+	m.logger.Info().Msg("BigQuery teardown completed successfully.")
+	return nil
 }

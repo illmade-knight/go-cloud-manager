@@ -4,6 +4,7 @@ package orchestration_test
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"testing"
 	"time"
@@ -15,6 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Define a flag to enable the service account pool for testing.
+var usePooling = flag.Bool("use-pool", false, "Use a pool of service accounts for testing to avoid quota issues.")
+
 // TestOrchestrator_RealCloud_FullLifecycle performs a full, real-world deployment
 // using the Orchestrator to set up IAM and deploy a simple, self-contained application.
 func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
@@ -25,7 +29,7 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	if *usePool {
+	if *usePooling {
 		logger.Info().Msg("✅ Test running in POOLED mode.")
 		t.Setenv("TEST_SA_POOL_MODE", "true")
 		t.Setenv("TEST_SA_POOL_PREFIX", "it-")

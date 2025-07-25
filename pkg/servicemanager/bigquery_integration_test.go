@@ -13,11 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
+	"time"
 )
 
 // TestBigQueryManager_Integration tests the manager against a live BigQuery emulator.
 func TestBigQueryManager_Integration(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
 	projectID := "bq-it-project"
 	runID := uuid.New().String()[:8]
 
@@ -31,28 +34,36 @@ func TestBigQueryManager_Integration(t *testing.T) {
 		},
 		BigQueryTables: []servicemanager.BigQueryTable{
 			{
-				CloudResource:    servicemanager.CloudResource{Name: tableName},
-				Dataset:          datasetName,
-				SchemaImportPath: "TestSchema",
+				CloudResource: servicemanager.CloudResource{Name: tableName},
+				Dataset:       datasetName,
+				SchemaType:    "BQTestSchema",
 			},
 		},
 	}
 
-	// --- 2. Setup Emulator and Real BigQuery Client ---
+	// --- 2. Setup Emulator and a SINGLE Real BigQuery Client ---
 	t.Log("Setting up BigQuery emulator...")
 	bqConnection := emulators.SetupBigQueryEmulator(t, ctx, emulators.GetDefaultBigQueryConfig(projectID, nil, nil))
+
+	// CORRECTED: Create only ONE client for the entire test.
 	bqClient, err := bigquery.NewClient(ctx, projectID, bqConnection.ClientOptions...)
 	require.NoError(t, err)
-	defer bqClient.Close()
+	// This cleanup now correctly closes the single client instance.
+	t.Cleanup(func() {
+		err = bqClient.Close()
+		if err != nil {
+			t.Logf("Failed to close BigQuery client: %v", err)
+		}
+	})
 
 	// --- 3. Create the BigQueryManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	servicemanager.RegisterSchema("TestSchema", GardenMonitorReadings{})
+	servicemanager.RegisterSchema("BQTestSchema", MonitorReadings{})
 	environment := servicemanager.Environment{ProjectID: projectID, Location: "US"}
 
-	// Create a real BigQuery client adapter for the manager
-	bqAdapter, err := servicemanager.CreateGoogleBigQueryClient(ctx, projectID, bqConnection.ClientOptions...)
-	require.NoError(t, err)
+	// CORRECTED: Use the new adapter to wrap the single client for the manager.
+	// Do NOT create a second client.
+	bqAdapter := servicemanager.NewAdapter(bqClient)
 
 	manager, err := servicemanager.NewBigQueryManager(bqAdapter, logger, environment)
 	require.NoError(t, err)
@@ -71,11 +82,10 @@ func TestBigQueryManager_Integration(t *testing.T) {
 	// --- Phase 2: VERIFY Resources Exist ---
 	// =========================================================================
 	t.Log("--- Verifying resources exist in emulator ---")
-	// Verify Dataset
+	// The test's own verification uses the real bqClient directly.
 	_, err = bqClient.Dataset(datasetName).Metadata(ctx)
 	assert.NoError(t, err, "BigQuery dataset should exist after creation")
 
-	// Verify Table
 	_, err = bqClient.Dataset(datasetName).Table(tableName).Metadata(ctx)
 	assert.NoError(t, err, "BigQuery table should exist after creation")
 	t.Log("--- Verification successful, all resources exist ---")
@@ -92,7 +102,6 @@ func TestBigQueryManager_Integration(t *testing.T) {
 	// --- Phase 4: VERIFY Resources are Deleted ---
 	// =========================================================================
 	t.Log("--- Verifying resources are deleted from emulator ---")
-	// Verify Dataset is gone
 	_, err = bqClient.Dataset(datasetName).Metadata(ctx)
 	assert.Error(t, err, "BigQuery dataset should NOT exist after teardown")
 	t.Log("--- Deletion verification successful ---")

@@ -14,8 +14,11 @@ import (
 	"testing"
 )
 
+type MonitorReadings struct {
+}
+
 func init() {
-	servicemanager.RegisterSchema("TestSchema", GardenMonitorReadings{})
+	servicemanager.RegisterSchema("TestSchema", MonitorReadings{})
 }
 
 // TestServiceManager_Integration_FullLifecycle tests the top-level ServiceManager's ability
@@ -62,7 +65,7 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 						{
 							CloudResource: servicemanager.CloudResource{Name: df2Table},
 							Dataset:       df2Dataset,
-							SchemaType:    "TestSchema",
+							SchemaType:    "SMTestSchema",
 						},
 					},
 				},
@@ -78,26 +81,40 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 	//gcsClient := emulators.GetStorageClient(t, ctx, gcsConfig, gcsConnection.ClientOptions)
 	gcsClient, err := servicemanager.CreateGoogleGCSClient(ctx, gcsConnection.ClientOptions...)
 	require.NoError(t, err)
-	defer gcsClient.Close()
+	t.Cleanup(func() {
+		err = gcsClient.Close()
+		if err != nil {
+			t.Logf("Error closing GCS client: %v", err)
+		}
+	})
 
 	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
 	psClient, err := servicemanager.CreateGoogleMessagingClient(ctx, projectID, psConnection.ClientOptions...)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() {
+		err = psClient.Close()
+		if err != nil {
+			t.Logf("Failed to close PubSub client: %v", err)
+		}
+	})
 
 	bqConnection := emulators.SetupBigQueryEmulator(t, ctx, emulators.GetDefaultBigQueryConfig(projectID, nil, nil))
 	bqClient, err := servicemanager.CreateGoogleBigQueryClient(ctx, projectID, bqConnection.ClientOptions...)
 	require.NoError(t, err)
-	defer bqClient.Close()
+	t.Cleanup(func() {
+		err = bqClient.Close()
+		if err != nil {
+			t.Logf("Error closing BigQuery client: %v", err)
+		}
+	})
 
 	// --- 3. Create the ServiceManager ---
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	schemaRegistry := map[string]interface{}{"TestSchema": GardenMonitorReadings{}}
 
 	// Use the production constructor, which creates all sub-managers internally.
-
+	servicemanager.RegisterSchema("SMTestSchema", MonitorReadings{})
 	// CORRECTED: Use the constructor designed for testing with pre-configured clients.
-	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, arch.Environment, schemaRegistry, nil, logger)
+	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
 	// --- 4. CREATE all resources for the entire architecture ---

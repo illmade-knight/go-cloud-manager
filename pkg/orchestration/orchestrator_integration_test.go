@@ -76,7 +76,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 
 	// For this test, the ServiceManager just needs a messaging client.
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
-	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, nil, logger)
+	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
 	directorCfg.Commands = &servicedirector.PubsubConfig{
