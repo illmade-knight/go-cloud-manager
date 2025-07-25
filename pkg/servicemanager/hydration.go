@@ -103,6 +103,12 @@ func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, projectID, default
 		spec.Memory = "512Mi"
 	}
 
+	if spec.EnvironmentVars != nil {
+		if _, ok := spec.EnvironmentVars["PROJECT_ID"]; ok {
+			spec.EnvironmentVars["PROJECT_ID"] = projectID
+		}
+	}
+
 	spec.Image = fmt.Sprintf(
 		"%s-docker.pkg.dev/%s/%s/%s:%s",
 		spec.Region,

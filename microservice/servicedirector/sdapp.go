@@ -22,12 +22,8 @@ type OrchestrateRequest struct {
 
 // NewDirectServiceDirector is a constructor for testing that allows injecting a pre-configured
 // ServiceManager and Pub/Sub client (e.g., one connected to an emulator).
-func NewDirectServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
+func NewDirectServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
-	arch, err := loader.LoadArchitecture(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("director: failed to load service definitions: %w", err)
-	}
 	return newInternalSD(ctx, cfg, arch, sm, psClient, directorLogger)
 }
 
@@ -42,21 +38,14 @@ type Director struct {
 	*microservice.BaseServer
 	serviceManager *servicemanager.ServiceManager
 	architecture   *servicemanager.MicroserviceArchitecture
-	config         *Config // This is now the smaller Config struct
 	logger         zerolog.Logger
 	commands       *pubsubCommands // we don't require pubsub commands
 }
 
 // NewServiceDirector is the primary constructor for production use. It creates
 // all necessary internal clients based on the provided configuration.
-func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.ArchitectureIO, logger zerolog.Logger) (*Director, error) {
+func NewServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
-
-	arch, err := loader.LoadArchitecture(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("director: failed to load service definitions: %w", err)
-	}
-	directorLogger.Info().Str("projectID", arch.ProjectID).Msg("loaded project architecture")
 
 	sm, err := servicemanager.NewServiceManager(ctx, arch, nil, directorLogger)
 	if err != nil {
@@ -65,7 +54,7 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 
 	// It creates its own Pub/Sub client if needed for the creating the command subscription and listening on it
 	var psClient *pubsub.Client
-	if arch.ServiceManagerSpec.Deployment != nil {
+	if cfg.Commands != nil {
 		psClient, err = pubsub.NewClient(ctx, arch.ProjectID)
 		if err != nil {
 			return nil, fmt.Errorf("director: failed to create pubsub Client: %w", err)
@@ -77,30 +66,22 @@ func NewServiceDirector(ctx context.Context, cfg *Config, loader servicemanager.
 
 // newInternalSD is an unexported helper updated to pull configuration from the 'arch' struct.
 func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, psClient *pubsub.Client, directorLogger zerolog.Logger) (*Director, error) {
-	// Get topic and subscription names directly from the architecture spec
-	spec := arch.ServiceManagerSpec
-
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
 
 	d := &Director{
 		BaseServer:     baseServer,
 		serviceManager: sm,
 		architecture:   arch,
-		config:         cfg,
 		logger:         directorLogger,
 	}
 
-	if spec.Deployment != nil {
-		commandTopicID := spec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
-		commandSubID := spec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"]
-		completionTopicID := spec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
-
+	if cfg.Commands != nil {
 		// Ensure the subscription for listening to commands exists.
-		sub, err := ensureCommandSubscriptionExists(ctx, psClient, commandTopicID, commandSubID)
+		sub, err := ensureCommandSubscriptionExists(ctx, psClient, cfg.Commands.CommandTopicID, cfg.Commands.CommandSubID)
 		if err != nil {
 			return nil, err
 		}
-		topic, err := ensureCompletionTopicExists(ctx, psClient, completionTopicID)
+		topic, err := ensureCompletionTopicExists(ctx, psClient, cfg.Commands.CompletionTopicID)
 		if err != nil {
 			return nil, err
 		}
@@ -190,6 +171,29 @@ func (d *Director) listenForCommands(ctx context.Context) {
 	}
 }
 
+func (d *Director) setupDataflowHandler(w http.ResponseWriter, r *http.Request) {
+	req := OrchestrateRequest{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Ignore EOF errors which happen with empty bodies, otherwise log.
+		if !errors.Is(err, errors.New("EOF")) {
+			d.logger.Warn().Err(err).Msg("Failed to unmarshal orchestrate request")
+		}
+	}
+
+	// CORRECTED: Removed the 'return' so that a default 'all' command will execute.
+	if req.DataflowName == "" {
+		req.DataflowName = "all"
+	}
+
+	if err := d.handleSetupCommand(r.Context(), req.DataflowName); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to setup dataflow '%s': %v", req.DataflowName, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(fmt.Sprintf("Dataflow '%s' setup successfully triggered.", req.DataflowName)))
+}
+
 // publishCompletionEvent is updated to get the topic name from the architecture.
 func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error) error {
 	d.logger.Info().Str("dataflow", dataflowName).Msg("Publishing completion event...")
@@ -251,26 +255,6 @@ func (d *Director) GetServiceManager() *servicemanager.ServiceManager {
 	return d.serviceManager
 }
 
-func (d *Director) setupDataflowHandler(w http.ResponseWriter, r *http.Request) {
-	req := OrchestrateRequest{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		d.logger.Warn().Err(err).Msg("Failed to unmarshal orchestrate request")
-	}
-
-	if req.DataflowName == "" {
-		req.DataflowName = "all"
-		return
-	}
-
-	if err := d.handleSetupCommand(r.Context(), req.DataflowName); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to setup dataflow '%s': %v", req.DataflowName, err), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(fmt.Sprintf("Dataflow '%s' setup successfully triggered.", req.DataflowName)))
-}
-
 func (d *Director) teardownHandler(w http.ResponseWriter, r *http.Request) {
 	if err := d.handleTeardownCommand(r.Context(), "all"); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to teardown all dataflows: %v", err), http.StatusInternalServerError)
@@ -330,13 +314,15 @@ func ensureCompletionTopicExists(ctx context.Context, psClient *pubsub.Client, t
 	topic := psClient.Topic(topicID)
 	exists, err := topic.Exists(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("could not check for command topic '%s': %w", topicID, err)
+		return nil, fmt.Errorf("could not check for completion topic '%s': %w", topicID, err)
 	}
 	if !exists {
+		log.Info().Str("topic", topicID).Msg("Completion topic not found, creating it now.")
 		topic, err = psClient.CreateTopic(ctx, topicID)
+
 		if err != nil {
+			return nil, fmt.Errorf("failed to create completion topic '%s': %w", topicID, err)
 		}
 	}
-
 	return topic, nil
 }

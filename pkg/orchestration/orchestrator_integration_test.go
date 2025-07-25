@@ -73,13 +73,19 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	directorCfg := &servicedirector.Config{
 		BaseConfig: microservice.BaseConfig{ProjectID: projectID},
 	}
-	loader := orchestration.NewEmbeddedArchitectureLoader(arch)
+
 	// For this test, the ServiceManager just needs a messaging client.
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, nil, logger)
 	require.NoError(t, err)
 
-	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, loader, sm, psClient, logger)
+	directorCfg.Commands = &servicedirector.PubsubConfig{
+		CommandTopicID:    commandTopicID,
+		CommandSubID:      commandSubID,
+		CompletionTopicID: completionTopicID,
+	}
+
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, psClient, logger)
 	require.NoError(t, err)
 	require.NoError(t, director.Start())
 	t.Cleanup(director.Shutdown)

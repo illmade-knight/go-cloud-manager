@@ -15,10 +15,17 @@ const (
 	teardownPath = "/orchestrate/teardown"
 )
 
+type PubsubConfig struct {
+	CommandTopicID    string
+	CommandSubID      string
+	CompletionTopicID string
+}
+
 // Config now only holds configuration that is NOT defined in the architecture spec.
 // This is primarily for runtime operational concerns of the service container itself.
 type Config struct {
 	microservice.BaseConfig
+	Commands *PubsubConfig
 }
 
 // NewConfig creates a new, minimal Config instance.
@@ -35,12 +42,22 @@ func NewConfig() (*Config, error) {
 	flag.StringVar(&cfg.HTTPPort, "http-port", cfg.HTTPPort, "HTTP health check port for Director")
 	flag.Parse()
 
+	cfg.ProjectID = os.Getenv("PROJECT_ID")
+
 	// Override with environment variables if they are set.
 	if envVal := os.Getenv("SD_HTTP_PORT"); envVal != "" {
 		if !strings.HasPrefix(envVal, ":") {
 			envVal = ":" + envVal
 		}
 		cfg.HTTPPort = envVal
+	}
+
+	if commandTopicID := os.Getenv("SD_COMMAND_TOPIC"); commandTopicID != "" {
+		cfg.Commands = &PubsubConfig{
+			CommandTopicID:    commandTopicID,
+			CommandSubID:      os.Getenv("SD_COMMAND_SUBSCRIPTION"),
+			CompletionTopicID: os.Getenv("SD_COMPLETION_TOPIC"),
+		}
 	}
 
 	// Cloud Run's special 'PORT' variable takes highest precedence.
