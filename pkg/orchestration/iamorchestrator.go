@@ -71,7 +71,7 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	o.logger.Info().Msg("Starting ServiceDirector IAM setup...")
 	serviceEmails := make(map[string]string)
 
-	requiredRoles, err := o.planner.PlanRolesForServiceDirector(ctx, o.arch)
+	requiredRoles, err := o.planner.PlanRolesForServiceDirector(o.arch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to plan IAM roles for ServiceDirector: %w", err)
 	}
@@ -124,7 +124,7 @@ func (o *IAMOrchestrator) SetupDataflowIAM(ctx context.Context) (map[string]stri
 	o.logger.Info().Msg("Starting Dataflow application services IAM setup...")
 	serviceEmails := make(map[string]string)
 
-	plan, err := o.planner.PlanRolesForApplicationServices(ctx, o.arch)
+	plan, err := o.planner.PlanRolesForApplicationServices(o.arch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to plan application service IAM roles: %w", err)
 	}

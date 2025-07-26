@@ -100,9 +100,9 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 	}
 
 	mux := baseServer.Mux()
-	mux.HandleFunc(verifyPath, d.verifyDataflowHandler)
-	mux.HandleFunc(setupPath, d.setupDataflowHandler)
-	mux.HandleFunc(teardownPath, d.teardownHandler)
+	mux.HandleFunc(VerifyPath, d.verifyDataflowHandler)
+	mux.HandleFunc(SetupPath, d.setupDataflowHandler)
+	mux.HandleFunc(TeardownPath, d.teardownHandler)
 
 	directorLogger.Info().
 		Str("http_port", cfg.HTTPPort).

@@ -46,8 +46,8 @@ type VerifyDataflowRequest struct {
 func (c *Client) VerifyDataflow(ctx context.Context, dataflowName, serviceName string) error {
 	c.logger.Info().Str("dataflow", dataflowName).Str("service", serviceName).Msg("Verifying dataflow resources with Director...")
 
-	//link verifyPath directly with sdapp paths
-	relURL := &url.URL{Path: verifyPath}
+	//link VerifyPath directly with sdapp paths
+	relURL := &url.URL{Path: VerifyPath}
 	fullURL := c.baseURL.ResolveReference(relURL)
 
 	reqBody, err := json.Marshal(VerifyDataflowRequest{

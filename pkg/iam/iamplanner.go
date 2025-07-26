@@ -1,7 +1,6 @@
 package iam
 
 import (
-	"context"
 	"sync"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -31,7 +30,7 @@ func NewRolePlanner(logger zerolog.Logger) *RolePlanner {
 
 // PlanRolesForServiceDirector inspects the architecture and synthesizes the roles
 // needed by the main ServiceDirector service account to manage all resources.
-func (p *RolePlanner) PlanRolesForServiceDirector(ctx context.Context, arch *servicemanager.MicroserviceArchitecture) ([]string, error) {
+func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.MicroserviceArchitecture) ([]string, error) {
 	p.logger.Info().Str("architecture", arch.Name).Msg("Planning required IAM roles for ServiceDirector...")
 
 	requiredRoles := make(map[string]struct{})
@@ -66,7 +65,7 @@ func (p *RolePlanner) PlanRolesForServiceDirector(ctx context.Context, arch *ser
 
 // PlanRolesForApplicationServices now infers common roles from environment variables
 // for Pub/Sub, BigQuery, and GCS, in addition to reading explicit policies.
-func (p *RolePlanner) PlanRolesForApplicationServices(ctx context.Context, arch *servicemanager.MicroserviceArchitecture) (map[string][]IAMBinding, error) {
+func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.MicroserviceArchitecture) (map[string][]IAMBinding, error) {
 	p.logger.Info().Str("architecture", arch.Name).Msg("Planning required IAM roles for all application services...")
 
 	finalPlan := make(map[string][]IAMBinding)

@@ -181,12 +181,12 @@ func (c *TestIAMClient) initializePool(ctx context.Context) error {
 
 // --- Passthrough Methods ---
 
-func (c *TestIAMClient) AddResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
-	return c.realClient.AddResourceIAMBinding(ctx, resourceType, resourceID, role, member)
+func (c *TestIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	return c.realClient.AddResourceIAMBinding(ctx, binding, member)
 }
 
-func (c *TestIAMClient) RemoveResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
-	return c.realClient.RemoveResourceIAMBinding(ctx, resourceType, resourceID, role, member)
+func (c *TestIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	return c.realClient.RemoveResourceIAMBinding(ctx, binding, member)
 }
 
 func (c *TestIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {

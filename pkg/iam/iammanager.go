@@ -51,7 +51,12 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 	for _, topic := range resources.Topics {
 		for _, policy := range topic.IAMPolicy {
 			if policy.Name == serviceName {
-				err := im.client.AddResourceIAMBinding(ctx, "pubsub_topic", topic.Name, policy.Role, member)
+				binding := IAMBinding{
+					ResourceType: "pubsub_topic",
+					ResourceID:   topic.Name,
+					Role:         policy.Role,
+				}
+				err := im.client.AddResourceIAMBinding(ctx, binding, member)
 				if err != nil {
 					return err
 				}
@@ -63,7 +68,12 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 	for _, sub := range resources.Subscriptions {
 		for _, policy := range sub.IAMPolicy {
 			if policy.Name == serviceName {
-				err := im.client.AddResourceIAMBinding(ctx, "pubsub_subscription", sub.Name, policy.Role, member)
+				binding := IAMBinding{
+					ResourceType: "pubsub_subscription",
+					ResourceID:   sub.Name,
+					Role:         policy.Role,
+				}
+				err := im.client.AddResourceIAMBinding(ctx, binding, member)
 				if err != nil {
 					return err
 				}
@@ -75,7 +85,12 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 	for _, bucket := range resources.GCSBuckets {
 		for _, policy := range bucket.IAMPolicy {
 			if policy.Name == serviceName {
-				err := im.client.AddResourceIAMBinding(ctx, "gcs_bucket", bucket.Name, policy.Role, member)
+				binding := IAMBinding{
+					ResourceType: "gcs_bucket",
+					ResourceID:   bucket.Name,
+					Role:         policy.Role,
+				}
+				err := im.client.AddResourceIAMBinding(ctx, binding, member)
 				if err != nil {
 					return err
 				}
@@ -87,7 +102,12 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 	for _, dataset := range resources.BigQueryDatasets {
 		for _, policy := range dataset.IAMPolicy {
 			if policy.Name == serviceName {
-				err := im.client.AddResourceIAMBinding(ctx, "bigquery_dataset", dataset.Name, policy.Role, member)
+				binding := IAMBinding{
+					ResourceType: "bigquery_dataset",
+					ResourceID:   dataset.Name,
+					Role:         policy.Role,
+				}
+				err := im.client.AddResourceIAMBinding(ctx, binding, member)
 				if err != nil {
 					return err
 				}
@@ -98,7 +118,12 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 	if serviceSpec.Deployment != nil && len(serviceSpec.Deployment.SecretEnvironmentVars) > 0 {
 		for _, secretVar := range serviceSpec.Deployment.SecretEnvironmentVars {
 			im.logger.Info().Str("secret", secretVar.ValueFrom).Msg("Applying secret accessor role...")
-			err := im.client.AddResourceIAMBinding(ctx, "secret", secretVar.ValueFrom, "roles/secretmanager.secretAccessor", member)
+			binding := IAMBinding{
+				ResourceType: "secret",
+				ResourceID:   secretVar.ValueFrom,
+				Role:         "roles/secretmanager.secretAccessor",
+			}
+			err := im.client.AddResourceIAMBinding(ctx, binding, member)
 			if err != nil {
 				return fmt.Errorf("failed to grant secret access for '%s' to service '%s': %w", secretVar.ValueFrom, serviceName, err)
 			}

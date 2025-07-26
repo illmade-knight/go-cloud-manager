@@ -10,12 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/api/run/v2"
-
 	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/pubsub"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"google.golang.org/api/run/v2"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -23,10 +22,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ensureTestCloudRunService is a new helper to create and clean up the target service for the test.
+func ensureTestCloudRunService(t *testing.T, ctx context.Context, projectID, location, serviceName string) {
+	t.Helper()
+	runService, err := run.NewService(ctx)
+	require.NoError(t, err)
+
+	fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, location, serviceName)
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)
+
+	// Create a minimal service for the test.
+	createOp, err := runService.Projects.Locations.Services.Create(parent, &run.GoogleCloudRunV2Service{
+		Template: &run.GoogleCloudRunV2RevisionTemplate{
+			Containers: []*run.GoogleCloudRunV2Container{
+				{Image: "us-docker.pkg.dev/cloudrun/container/hello"},
+			},
+		},
+	}).ServiceId(serviceName).Do()
+	require.NoError(t, err)
+
+	// Wait for the creation to complete.
+	// CORRECTED: The Wait call now includes the required request object.
+	_, err = runService.Projects.Locations.Operations.Wait(createOp.Name, &run.GoogleLongrunningWaitOperationRequest{}).Do()
+	require.NoError(t, err)
+	t.Logf("Successfully created dummy Cloud Run service: %s", serviceName)
+
+	// Register a cleanup function to delete the service after the test.
+	t.Cleanup(func() {
+		t.Logf("Cleaning up Cloud Run service: %s", serviceName)
+		deleteOp, err := runService.Projects.Locations.Services.Delete(fullSvcName).Do()
+		if err != nil {
+			// Don't fail the test if cleanup fails, just log it.
+			t.Logf("Failed to initiate deletion of Cloud Run service %s: %v", serviceName, err)
+			return
+		}
+		// CORRECTED: The Wait call now includes the required request object.
+		_, err = runService.Projects.Locations.Operations.Wait(deleteOp.Name, &run.GoogleLongrunningWaitOperationRequest{}).Do()
+		if err != nil {
+			t.Logf("Failed to wait for deletion of Cloud Run service %s: %v", serviceName, err)
+		}
+		t.Logf("Successfully deleted Cloud Run service: %s", serviceName)
+	})
+}
+
 func TestIAMManager_FullFlow(t *testing.T) {
 	// --- Arrange ---
 	projectID := CheckGCPAuth(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute) // Increased timeout for service creation
 	defer cancel()
 
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("test", "TestIAMManager_FullFlow").Logger()
@@ -35,15 +77,13 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	runID := time.Now().UnixNano()
 	testTopicName := fmt.Sprintf("test-topic-for-iam-%d", runID)
 	testSecretName := fmt.Sprintf("test-secret-for-iam-%d", runID)
-	// This is now a logical name, not a specific SA to be created.
 	testSaName := "pooled-iam-test-sa"
-	// This prefix must match the one used to create the TestIAMClient.
 	testSaPrefix := "it-iam"
-
-	targetServiceName := "target-service"
+	targetServiceName := fmt.Sprintf("target-service-%d", runID)
+	const testLocation = "europe-west1"
 
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{ProjectID: projectID},
+		Environment: servicemanager.Environment{ProjectID: projectID, Region: testLocation},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-dataflow": {
 				Services: map[string]servicemanager.ServiceSpec{
@@ -61,9 +101,7 @@ func TestIAMManager_FullFlow(t *testing.T) {
 						Name:           targetServiceName,
 						ServiceAccount: "pooled-iam-target-sa",
 						Deployment: &servicemanager.DeploymentSpec{
-							SourcePath:          ".", // Will be overridden by temp dir
-							BuildableModulePath: ".",
-							ImageRepo:           "gcm-images",
+							Region: testLocation, // Explicitly set the region for the service
 						},
 					},
 				},
@@ -83,16 +121,14 @@ func TestIAMManager_FullFlow(t *testing.T) {
 		},
 	}
 
-	// 2. CORRECTED: Create the TestIAMClient for pooling instead of the GoogleIAMClient.
 	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, testSaPrefix)
 	require.NoError(t, err)
-	// ADDED: Ensure the test client is closed to clean up roles on all SAs in the pool.
 	t.Cleanup(func() { iamClient.Close() })
 
 	iamManager := iam.NewIAMManager(iamClient, logger)
 	rolePlanner := iam.NewRolePlanner(logger)
 
-	// 3. Ensure prerequisite resources exist (no changes here).
+	// 2. Ensure prerequisite resources exist.
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
 	defer psClient.Close()
@@ -104,33 +140,19 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	require.NoError(t, err)
 	defer secretClient.Close()
 	secret, err := servicemanager.EnsureSecretExistsWithValue(ctx, secretClient, projectID, testSecretName, "test-data")
-	require.NoError(t, err, "Failed to set up test secret")
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		secretPath := fmt.Sprintf("projects/%s/secrets/%s", projectID, testSecretName)
-		err = secretClient.DeleteSecret(context.Background(), &secretmanagerpb.DeleteSecretRequest{Name: secretPath})
-		if err != nil {
-			logger.Warn().Msg("failed to delete secret")
-		}
+		secretClient.DeleteSecret(context.Background(), &secretmanagerpb.DeleteSecretRequest{Name: secretPath})
 	})
+
+	ensureTestCloudRunService(t, ctx, projectID, testLocation, targetServiceName)
 
 	// --- Act ---
 	t.Log("Planning IAM roles for application services...")
-	plan, err := rolePlanner.PlanRolesForApplicationServices(ctx, arch)
+	plan, err := rolePlanner.PlanRolesForApplicationServices(arch)
 	require.NoError(t, err)
-	require.Contains(t, plan, testSaName, "Plan should include the test service account")
-
-	// ADDED: Verify the plan includes the Cloud Run Invoker role.
-	t.Log("Verifying the role plan content...")
-	bindings := plan[testSaName]
-	require.Len(t, bindings, 3, "The plan should contain exactly three bindings for the service")
-
-	var foundInvoker bool
-	for _, binding := range bindings {
-		if binding.ResourceType == "cloudrun_service" && binding.ResourceID == targetServiceName && binding.Role == "roles/run.invoker" {
-			foundInvoker = true
-		}
-	}
-	require.True(t, foundInvoker, "Plan should include the run.invoker role on the target service")
+	require.Contains(t, plan, testSaName)
 
 	t.Log("Applying IAM policies for the dataflow...")
 	err = iamManager.ApplyIAMForService(ctx, arch.Dataflows["test-dataflow"], "test-service")
@@ -138,12 +160,11 @@ func TestIAMManager_FullFlow(t *testing.T) {
 
 	// --- Assert ---
 	t.Log("Verifying the IAM policies were set correctly...")
-
 	require.Eventually(t, func() bool {
 		// Verify Pub/Sub policy
 		topicPolicy, err := topic.IAM().Policy(ctx)
 		if err != nil {
-			return false // Retry if we can't get the policy
+			return false
 		}
 		foundPubSubBinding := false
 		for _, member := range topicPolicy.Members("roles/pubsub.publisher") {
@@ -155,10 +176,9 @@ func TestIAMManager_FullFlow(t *testing.T) {
 
 		// Verify Secret Manager policy
 		secretName := strings.Split(secret.Name, "/versions/")[0]
-
 		secretPolicy, err := secretClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: secretName})
 		if err != nil {
-			return false // Retry if we can't get the policy
+			return false
 		}
 		foundSecretBinding := false
 		for _, binding := range secretPolicy.Bindings {
@@ -172,11 +192,12 @@ func TestIAMManager_FullFlow(t *testing.T) {
 			}
 		}
 
-		runService, err := run.NewService(ctx) // This client is needed for verification
+		// Verify Cloud Run policy
+		runService, err := run.NewService(ctx)
 		if err != nil {
 			return false
 		}
-		fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, arch.Region, targetServiceName)
+		fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, testLocation, targetServiceName)
 		runPolicy, err := runService.Projects.Locations.Services.GetIamPolicy(fullSvcName).Do()
 		if err != nil {
 			return false
@@ -194,17 +215,9 @@ func TestIAMManager_FullFlow(t *testing.T) {
 			}
 		}
 
-		_ = foundRunBinding
-
-		// The function returns true only when ALL bindings are found.
-		return foundPubSubBinding && foundSecretBinding
-	}, 30*time.Second, 3*time.Second, "IAM policies did not propagate in time")
+		return foundPubSubBinding && foundSecretBinding && foundRunBinding
+	}, 60*time.Second, 5*time.Second, "IAM policies did not propagate in time")
 
 	t.Log("✅ Verification successful.")
-
-	// --- Cleanup ---
-	// CORRECTED: Explicit cleanup of the SA and its roles is no longer needed.
-	// The `iamClient.Close()` call registered with `t.Cleanup` handles returning the
-	// SA to the pool and wiping its IAM roles automatically.
-	t.Log("Cleanup will be handled automatically by TestIAMClient.Close()")
+	t.Log("Cleanup will be handled automatically by t.Cleanup and TestIAMClient.Close()")
 }

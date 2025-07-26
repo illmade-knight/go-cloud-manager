@@ -36,13 +36,13 @@ func (m *MockIAMClient) DeleteServiceAccount(ctx context.Context, accountName st
 	return args.Error(0)
 }
 
-func (m *MockIAMClient) AddResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
-	args := m.Called(ctx, resourceType, resourceID, role, member)
+func (m *MockIAMClient) AddResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+	args := m.Called(ctx, binding, member)
 	return args.Error(0)
 }
 
-func (m *MockIAMClient) RemoveResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
-	args := m.Called(ctx, resourceType, resourceID, role, member)
+func (m *MockIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+	args := m.Called(ctx, binding, member)
 	return args.Error(0)
 }
 

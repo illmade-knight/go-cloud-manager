@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	verifyPath   = "/dataflow/verify"
-	setupPath    = "/dataflow/setup"
-	teardownPath = "/orchestrate/teardown"
+	VerifyPath   = "/dataflow/verify"
+	SetupPath    = "/dataflow/setup"
+	TeardownPath = "/orchestrate/teardown"
 )
 
 type PubsubConfig struct {

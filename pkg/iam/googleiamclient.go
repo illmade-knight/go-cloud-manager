@@ -250,24 +250,52 @@ func (c *GoogleIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Co
 }
 
 // AddResourceIAMBinding uses the correct handle for the given resource type to add an IAM binding.
-func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
-	switch resourceType {
+func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	switch binding.ResourceType {
 	case "bigquery_dataset":
-		return c.addBigQueryDatasetIAMBinding(ctx, resourceID, role, member)
+		return c.addBigQueryDatasetIAMBinding(ctx, binding, member)
 	case "pubsub_topic":
-		return addStandardIAMBinding(ctx, c.pubsubClient.Topic(resourceID).IAM(), role, member)
+		return addStandardIAMBinding(ctx, c.pubsubClient.Topic(binding.ResourceID).IAM(), binding.Role, member)
 	case "pubsub_subscription":
-		return addStandardIAMBinding(ctx, c.pubsubClient.Subscription(resourceID).IAM(), role, member)
+		return addStandardIAMBinding(ctx, c.pubsubClient.Subscription(binding.ResourceID).IAM(), binding.Role, member)
 	case "gcs_bucket":
-		return addStandardIAMBinding(ctx, c.storageClient.Bucket(resourceID).IAM(), role, member)
+		return addStandardIAMBinding(ctx, c.storageClient.Bucket(binding.ResourceID).IAM(), binding.Role, member)
 	case "secret":
 		handle := &secretIAMHandle{
 			client:     c.secretsClient,
-			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, resourceID),
+			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
 		}
-		return addStandardIAMBinding(ctx, handle, role, member)
+		return addStandardIAMBinding(ctx, handle, binding.Role, member)
+	case "cloudrun_service":
+		// The location is now correctly passed in via the binding struct.
+		return c.addCloudRunServiceIAMBinding(ctx, binding, member)
 	default:
-		return fmt.Errorf("unsupported resource type for IAM binding: %s", resourceType)
+		return fmt.Errorf("unsupported resource type for IAM binding: %s", binding.ResourceType)
+	}
+}
+
+// RemoveResourceIAMBinding is also updated to take an IAMBinding struct.
+func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	switch binding.ResourceType {
+	case "bigquery_dataset":
+		return c.removeBigQueryDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+	case "pubsub_topic":
+		return removeStandardIAMBinding(ctx, c.pubsubClient.Topic(binding.ResourceID).IAM(), binding.Role, member)
+	case "pubsub_subscription":
+		return removeStandardIAMBinding(ctx, c.pubsubClient.Subscription(binding.ResourceID).IAM(), binding.Role, member)
+	case "gcs_bucket":
+		return removeStandardIAMBinding(ctx, c.storageClient.Bucket(binding.ResourceID).IAM(), binding.Role, member)
+	case "secret":
+		handle := &secretIAMHandle{
+			client:     c.secretsClient,
+			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
+		}
+		return removeStandardIAMBinding(ctx, handle, binding.Role, member)
+	case "cloudrun_service":
+		// The location is now correctly passed in via the binding struct.
+		return c.removeCloudRunServiceIAMBinding(ctx, binding.ResourceLocation, binding.ResourceID, binding.Role, member)
+	default:
+		return fmt.Errorf("unsupported resource type for IAM binding removal: %s", binding.ResourceType)
 	}
 }
 
@@ -285,68 +313,6 @@ func (c *GoogleIAMClient) DeleteServiceAccount(ctx context.Context, accountName 
 		log.Info().Str("email", email).Msg("Successfully deleted service account.")
 	}
 	return nil
-}
-
-// RemoveResourceIAMBinding uses the correct handle for the given resource type to remove an IAM binding.
-func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, resourceType, resourceID, role, member string) error {
-	switch resourceType {
-	case "bigquery_dataset":
-		return c.removeBigQueryDatasetIAMBinding(ctx, resourceID, role, member)
-	case "pubsub_topic":
-		return removeStandardIAMBinding(ctx, c.pubsubClient.Topic(resourceID).IAM(), role, member)
-	case "pubsub_subscription":
-		return removeStandardIAMBinding(ctx, c.pubsubClient.Subscription(resourceID).IAM(), role, member)
-	case "gcs_bucket":
-		return removeStandardIAMBinding(ctx, c.storageClient.Bucket(resourceID).IAM(), role, member)
-	case "secret":
-		handle := &secretIAMHandle{
-			client:     c.secretsClient,
-			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, resourceID),
-		}
-		return removeStandardIAMBinding(ctx, handle, role, member)
-	case "cloudrun_service":
-		// The region is needed but not available here, so we assume a single region for now.
-		// A future improvement could be to pass the region through the binding.
-		// For now, we find the region from the service spec.
-		fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, "europe-west2", resourceID)
-
-		policy, err := c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
-		if err != nil {
-			return fmt.Errorf("failed to get IAM policy for Cloud Run service %s: %w", resourceID, err)
-		}
-
-		// Add the new member to the specified role.
-		var bindingToModify *run.GoogleIamV1Binding
-		for _, b := range policy.Bindings {
-			if b.Role == role {
-				bindingToModify = b
-				break
-			}
-		}
-
-		if bindingToModify == nil {
-			bindingToModify = &run.GoogleIamV1Binding{Role: role}
-			policy.Bindings = append(policy.Bindings, bindingToModify)
-		}
-
-		memberExists := false
-		for _, m := range bindingToModify.Members {
-			if m == member {
-				memberExists = true
-				break
-			}
-		}
-
-		if !memberExists {
-			bindingToModify.Members = append(bindingToModify.Members, member)
-		}
-
-		setPolicyRequest := &run.GoogleIamV1SetIamPolicyRequest{Policy: policy}
-		_, err = c.runService.Projects.Locations.Services.SetIamPolicy(fullServiceName, setPolicyRequest).Context(ctx).Do()
-		return err
-	default:
-		return fmt.Errorf("unsupported resource type for IAM binding removal: %s", resourceType)
-	}
 }
 
 // --- Private Helper functions for Standard IAM ---
@@ -375,16 +341,113 @@ func removeStandardIAMBinding(ctx context.Context, handle iamHandle, role, membe
 	return handle.SetPolicy(ctx, policy)
 }
 
+// --- NEW HELPER FUNCTION for Cloud Run IAM ---
+// This encapsulates the specific logic for Cloud Run, keeping the main switch statement clean.
+func (c *GoogleIAMClient) addCloudRunServiceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, binding.ResourceLocation, binding.ResourceID)
+
+	// 1. Get the current IAM policy for the Cloud Run service.
+	policy, err := c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("failed to get IAM policy for Cloud Run service %s: %w", binding.ResourceID, err)
+	}
+
+	// 2. Add the new member to the specified role in the policy.
+	var bindingToModify *run.GoogleIamV1Binding
+	for _, b := range policy.Bindings {
+		if b.Role == binding.Role {
+			bindingToModify = b
+			break
+		}
+	}
+
+	if bindingToModify == nil {
+		bindingToModify = &run.GoogleIamV1Binding{Role: binding.Role}
+		policy.Bindings = append(policy.Bindings, bindingToModify)
+	}
+
+	memberExists := false
+	for _, m := range bindingToModify.Members {
+		if m == member {
+			memberExists = true
+			break
+		}
+	}
+
+	if !memberExists {
+		bindingToModify.Members = append(bindingToModify.Members, member)
+	} else {
+		log.Info().Str("member", member).Str("role", binding.Role).Str("service", binding.ResourceID).Msg("Member already has role on Cloud Run service. No changes needed.")
+		return nil
+	}
+
+	// 3. Set the updated policy on the Cloud Run service.
+	setPolicyRequest := &run.GoogleIamV1SetIamPolicyRequest{Policy: policy}
+	_, err = c.runService.Projects.Locations.Services.SetIamPolicy(fullServiceName, setPolicyRequest).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("failed to set IAM policy for Cloud Run service %s: %w", binding.ResourceID, err)
+	}
+
+	log.Info().Str("member", member).Str("role", binding.Role).Str("service", binding.ResourceID).Msg("Successfully added IAM binding to Cloud Run service.")
+	return nil
+}
+
+// removeCloudRunServiceIAMBinding contains the corrected logic to remove a member.
+func (c *GoogleIAMClient) removeCloudRunServiceIAMBinding(ctx context.Context, location, serviceID, role, member string) error {
+	if location == "" {
+		return fmt.Errorf("location is required for Cloud Run service IAM binding but was not provided")
+	}
+	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, location, serviceID)
+
+	policy, err := c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			log.Warn().Str("service", serviceID).Msg("Cloud Run service not found, cannot remove IAM binding.")
+			return nil
+		}
+		return fmt.Errorf("failed to get IAM policy for Cloud Run service %s: %w", serviceID, err)
+	}
+
+	bindingModified := false
+	for _, b := range policy.Bindings {
+		if b.Role == role {
+			var newMembers []string
+			for _, m := range b.Members {
+				if m != member {
+					newMembers = append(newMembers, m)
+				} else {
+					bindingModified = true
+				}
+			}
+			b.Members = newMembers
+		}
+	}
+
+	if !bindingModified {
+		log.Info().Str("member", member).Str("role", role).Str("service", serviceID).Msg("Member/role binding not found on Cloud Run service. No changes needed.")
+		return nil
+	}
+
+	setPolicyRequest := &run.GoogleIamV1SetIamPolicyRequest{Policy: policy}
+	_, err = c.runService.Projects.Locations.Services.SetIamPolicy(fullServiceName, setPolicyRequest).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("failed to set updated IAM policy for Cloud Run service %s: %w", serviceID, err)
+	}
+
+	log.Info().Str("member", member).Str("role", role).Str("service", serviceID).Msg("Successfully removed IAM binding from Cloud Run service.")
+	return nil
+}
+
 // --- BigQuery IAM (Handled separately) ---
-func (c *GoogleIAMClient) addBigQueryDatasetIAMBinding(ctx context.Context, datasetID, role, member string) error {
-	dataset := c.bigqueryClient.Dataset(datasetID)
+func (c *GoogleIAMClient) addBigQueryDatasetIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	dataset := c.bigqueryClient.Dataset(binding.ResourceID)
 	meta, err := dataset.Metadata(ctx)
 	if err != nil {
 		return err
 	}
 	update := bigquery.DatasetMetadataToUpdate{
 		Access: append(meta.Access, &bigquery.AccessEntry{
-			Role:       bigquery.AccessRole(role),
+			Role:       bigquery.AccessRole(binding.Role),
 			EntityType: bigquery.IAMMemberEntity,
 			Entity:     strings.TrimPrefix(member, "serviceAccount:"),
 		}),
