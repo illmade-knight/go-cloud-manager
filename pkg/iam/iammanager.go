@@ -9,34 +9,56 @@ import (
 )
 
 // IAMManager defines the high-level orchestration logic for applying IAM policies.
+// The interface remains unchanged, preventing cascading refactors.
 type IAMManager interface {
 	ApplyIAMForService(ctx context.Context, dataflow servicemanager.ResourceGroup, serviceName string) error
 }
 
 type simpleIAMManager struct {
-	client IAMClient
-	logger zerolog.Logger
+	client  IAMClient
+	logger  zerolog.Logger
+	planner *RolePlanner
+	// The manager now holds the full architecture and the complete IAM plan.
+	architecture *servicemanager.MicroserviceArchitecture
+	iamPlan      map[string][]IAMBinding
 }
 
-func NewIAMManager(client IAMClient, logger zerolog.Logger) IAMManager {
-	return &simpleIAMManager{
-		client: client,
-		logger: logger.With().Str("component", "IAMManager").Logger(),
+// NewIAMManager now accepts the full architecture at creation time.
+// It immediately plans all roles, making the Apply step a simple lookup.
+func NewIAMManager(client IAMClient, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) (IAMManager, error) {
+	planner := NewRolePlanner(logger)
+	// The plan for the entire architecture is generated once, right at the start.
+	fullPlan, err := planner.PlanRolesForApplicationServices(arch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate IAM plan during manager initialization: %w", err)
 	}
+
+	return &simpleIAMManager{
+		client:       client,
+		logger:       logger.With().Str("component", "IAMManager").Logger(),
+		planner:      planner,
+		architecture: arch,
+		iamPlan:      fullPlan,
+	}, nil
 }
 
-// ApplyIAMForService handles all IAM policies for a single service within its dataflow.
+// ApplyIAMForService's signature is unchanged. It now uses its internal plan.
 func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow servicemanager.ResourceGroup, serviceName string) error {
 	im.logger.Info().Str("service", serviceName).Str("dataflow", dataflow.Name).Msg("Applying IAM policies...")
 
-	// 1. Find the service's defined service account name.
 	serviceSpec, ok := dataflow.Services[serviceName]
 	if !ok {
 		return fmt.Errorf("service '%s' not found in dataflow '%s'", serviceName, dataflow.Name)
 	}
 	serviceAccountName := serviceSpec.ServiceAccount
 
-	// 2. Ensure the service account exists.
+	// Look up the pre-computed bindings for this service account from the master plan.
+	bindings, ok := im.iamPlan[serviceAccountName]
+	if !ok {
+		im.logger.Info().Str("service_account", serviceAccountName).Msg("No IAM bindings were planned for this service. Nothing to apply.")
+		return nil
+	}
+
 	saEmail, err := im.client.EnsureServiceAccountExists(ctx, serviceAccountName)
 	if err != nil {
 		return fmt.Errorf("failed to ensure service account '%s' exists: %w", serviceAccountName, err)
@@ -44,92 +66,18 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 
 	member := "serviceAccount:" + saEmail
 
-	// 3. Iterate through all resources within this dataflow and apply policies.
-	resources := dataflow.Resources
+	// Execute the plan for this service.
+	for _, binding := range bindings {
+		im.logger.Info().
+			Str("resource", binding.ResourceID).
+			Str("role", binding.Role).
+			Msgf("Applying binding for service '%s'", serviceName)
 
-	// Handle Pub/Sub Topics
-	for _, topic := range resources.Topics {
-		for _, policy := range topic.IAMPolicy {
-			if policy.Name == serviceName {
-				binding := IAMBinding{
-					ResourceType: "pubsub_topic",
-					ResourceID:   topic.Name,
-					Role:         policy.Role,
-				}
-				err := im.client.AddResourceIAMBinding(ctx, binding, member)
-				if err != nil {
-					return err
-				}
-			}
+		if err := im.client.AddResourceIAMBinding(ctx, binding, member); err != nil {
+			return fmt.Errorf("failed to apply binding for resource '%s' with role '%s': %w", binding.ResourceID, binding.Role, err)
 		}
 	}
 
-	// Handle Pub/Sub Subscriptions
-	for _, sub := range resources.Subscriptions {
-		for _, policy := range sub.IAMPolicy {
-			if policy.Name == serviceName {
-				binding := IAMBinding{
-					ResourceType: "pubsub_subscription",
-					ResourceID:   sub.Name,
-					Role:         policy.Role,
-				}
-				err := im.client.AddResourceIAMBinding(ctx, binding, member)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// Handle GCS Buckets
-	for _, bucket := range resources.GCSBuckets {
-		for _, policy := range bucket.IAMPolicy {
-			if policy.Name == serviceName {
-				binding := IAMBinding{
-					ResourceType: "gcs_bucket",
-					ResourceID:   bucket.Name,
-					Role:         policy.Role,
-				}
-				err := im.client.AddResourceIAMBinding(ctx, binding, member)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// Handle BigQuery Datasets
-	for _, dataset := range resources.BigQueryDatasets {
-		for _, policy := range dataset.IAMPolicy {
-			if policy.Name == serviceName {
-				binding := IAMBinding{
-					ResourceType: "bigquery_dataset",
-					ResourceID:   dataset.Name,
-					Role:         policy.Role,
-				}
-				err := im.client.AddResourceIAMBinding(ctx, binding, member)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	if serviceSpec.Deployment != nil && len(serviceSpec.Deployment.SecretEnvironmentVars) > 0 {
-		for _, secretVar := range serviceSpec.Deployment.SecretEnvironmentVars {
-			im.logger.Info().Str("secret", secretVar.ValueFrom).Msg("Applying secret accessor role...")
-			binding := IAMBinding{
-				ResourceType: "secret",
-				ResourceID:   secretVar.ValueFrom,
-				Role:         "roles/secretmanager.secretAccessor",
-			}
-			err := im.client.AddResourceIAMBinding(ctx, binding, member)
-			if err != nil {
-				return fmt.Errorf("failed to grant secret access for '%s' to service '%s': %w", secretVar.ValueFrom, serviceName, err)
-			}
-		}
-	}
-
-	im.logger.Info().Str("service", serviceName).Msg("Successfully applied all IAM policies.")
+	im.logger.Info().Str("service", serviceName).Int("bindings_applied", len(bindings)).Msg("Successfully applied all planned IAM policies.")
 	return nil
 }

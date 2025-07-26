@@ -67,10 +67,16 @@ func (c *Conductor) Run(ctx context.Context) error {
 		c.logger.Info().Str("dataflow", dataflowName).Msg("Resource setup is complete.")
 	}
 
-	// 4. NOW that resources exist, set up IAM for the individual application services.
-	dfSaEmails, err := c.iamOrch.SetupDataflowIAM(ctx)
-	if err != nil {
-		return fmt.Errorf("failed during application service IAM setup: %w", err)
+	// 4. Set up IAM for the application services and collect their SA emails.
+	allDataflowSaEmails := make(map[string]string)
+	for dataflowName := range c.arch.Dataflows {
+		dfSaEmails, err := c.iamOrch.ApplyIAMForDataflow(ctx, dataflowName)
+		if err != nil {
+			return fmt.Errorf("failed during application service IAM setup for dataflow '%s': %w", dataflowName, err)
+		}
+		for k, v := range dfSaEmails {
+			allDataflowSaEmails[k] = v
+		}
 	}
 
 	// Combine all service account maps for the final deployment step.
@@ -78,7 +84,7 @@ func (c *Conductor) Run(ctx context.Context) error {
 	for k, v := range sdSaEmails {
 		allSaEmails[k] = v
 	}
-	for k, v := range dfSaEmails {
+	for k, v := range allDataflowSaEmails {
 		allSaEmails[k] = v
 	}
 
@@ -98,7 +104,6 @@ func (c *Conductor) Teardown(ctx context.Context) error {
 	c.logger.Info().Msg("--- Starting Conductor Teardown ---")
 	var errs []error
 
-	// Teardown is LIFO: first the main orchestrator's resources, then IAM.
 	if err := c.orch.Teardown(ctx); err != nil {
 		c.logger.Error().Err(err).Msg("Orchestrator teardown failed")
 		errs = append(errs, err)

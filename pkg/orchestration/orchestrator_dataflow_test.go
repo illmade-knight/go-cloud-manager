@@ -21,10 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Add this alongside the existing 'usePool' flag
 var expectedMessages = flag.Int("expected-messages", 2, "Number of messages the verifier should expect to receive.")
-
-// Define a flag to enable the service account pool for testing.
 var usePool = flag.Bool("use-pool", false, "Use a pool of service accounts for testing to avoid quota issues.")
 
 func TestOrchestrator_DataflowE2E(t *testing.T) {
@@ -38,7 +35,6 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	defer cancel()
 
 	if *usePool {
-		logger.Info().Msg("✅ Test running in POOLED mode.")
 		t.Setenv("TEST_SA_POOL_MODE", "true")
 		t.Setenv("TEST_SA_POOL_PREFIX", "it-")
 		t.Setenv("TEST_SA_POOL_NO_CREATE", "true")
@@ -176,7 +172,7 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 	require.NoError(t, err)
 	err = orch.AwaitDataflowReady(ctx, "tracer-flow")
 	require.NoError(t, err)
-	dfSaEmails, err := iamOrch.SetupDataflowIAM(ctx)
+	dfSaEmails, err := iamOrch.ApplyIAMForDataflow(ctx, "tracer-flow")
 	require.NoError(t, err)
 
 	allSaEmails := make(map[string]string)

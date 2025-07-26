@@ -22,16 +22,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ensureTestCloudRunService is a new helper to create and clean up the target service for the test.
+// ensureTestCloudRunService is a helper to create and clean up the target service for the test.
 func ensureTestCloudRunService(t *testing.T, ctx context.Context, projectID, location, serviceName string) {
 	t.Helper()
 	runService, err := run.NewService(ctx)
 	require.NoError(t, err)
 
-	fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, location, serviceName)
 	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)
 
-	// Create a minimal service for the test.
 	createOp, err := runService.Projects.Locations.Services.Create(parent, &run.GoogleCloudRunV2Service{
 		Template: &run.GoogleCloudRunV2RevisionTemplate{
 			Containers: []*run.GoogleCloudRunV2Container{
@@ -41,39 +39,33 @@ func ensureTestCloudRunService(t *testing.T, ctx context.Context, projectID, loc
 	}).ServiceId(serviceName).Do()
 	require.NoError(t, err)
 
-	// Wait for the creation to complete.
-	// CORRECTED: The Wait call now includes the required request object.
 	_, err = runService.Projects.Locations.Operations.Wait(createOp.Name, &run.GoogleLongrunningWaitOperationRequest{}).Do()
 	require.NoError(t, err)
 	t.Logf("Successfully created dummy Cloud Run service: %s", serviceName)
 
-	// Register a cleanup function to delete the service after the test.
 	t.Cleanup(func() {
+		fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, location, serviceName)
 		t.Logf("Cleaning up Cloud Run service: %s", serviceName)
 		deleteOp, err := runService.Projects.Locations.Services.Delete(fullSvcName).Do()
 		if err != nil {
-			// Don't fail the test if cleanup fails, just log it.
 			t.Logf("Failed to initiate deletion of Cloud Run service %s: %v", serviceName, err)
 			return
 		}
-		// CORRECTED: The Wait call now includes the required request object.
 		_, err = runService.Projects.Locations.Operations.Wait(deleteOp.Name, &run.GoogleLongrunningWaitOperationRequest{}).Do()
 		if err != nil {
 			t.Logf("Failed to wait for deletion of Cloud Run service %s: %v", serviceName, err)
 		}
-		t.Logf("Successfully deleted Cloud Run service: %s", serviceName)
 	})
 }
 
 func TestIAMManager_FullFlow(t *testing.T) {
 	// --- Arrange ---
 	projectID := CheckGCPAuth(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute) // Increased timeout for service creation
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("test", "TestIAMManager_FullFlow").Logger()
 
-	// 1. Define a sample architecture for the test.
 	runID := time.Now().UnixNano()
 	testTopicName := fmt.Sprintf("test-topic-for-iam-%d", runID)
 	testSecretName := fmt.Sprintf("test-secret-for-iam-%d", runID)
@@ -101,7 +93,7 @@ func TestIAMManager_FullFlow(t *testing.T) {
 						Name:           targetServiceName,
 						ServiceAccount: "pooled-iam-target-sa",
 						Deployment: &servicemanager.DeploymentSpec{
-							Region: testLocation, // Explicitly set the region for the service
+							Region: testLocation,
 						},
 					},
 				},
@@ -125,8 +117,9 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { iamClient.Close() })
 
-	iamManager := iam.NewIAMManager(iamClient, logger)
-	rolePlanner := iam.NewRolePlanner(logger)
+	// UPDATED: The manager is now created with the full architecture.
+	iamManager, err := iam.NewIAMManager(iamClient, arch, logger)
+	require.NoError(t, err)
 
 	// 2. Ensure prerequisite resources exist.
 	psClient, err := pubsub.NewClient(ctx, projectID)
@@ -149,12 +142,8 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	ensureTestCloudRunService(t, ctx, projectID, testLocation, targetServiceName)
 
 	// --- Act ---
-	t.Log("Planning IAM roles for application services...")
-	plan, err := rolePlanner.PlanRolesForApplicationServices(arch)
-	require.NoError(t, err)
-	require.Contains(t, plan, testSaName)
-
 	t.Log("Applying IAM policies for the dataflow...")
+	// The call here remains unchanged, as the signature was preserved.
 	err = iamManager.ApplyIAMForService(ctx, arch.Dataflows["test-dataflow"], "test-service")
 	require.NoError(t, err)
 
@@ -219,5 +208,4 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	}, 60*time.Second, 5*time.Second, "IAM policies did not propagate in time")
 
 	t.Log("✅ Verification successful.")
-	t.Log("Cleanup will be handled automatically by t.Cleanup and TestIAMClient.Close()")
 }

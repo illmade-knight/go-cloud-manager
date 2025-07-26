@@ -1,11 +1,12 @@
 package orchestration
 
 import (
+	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
+	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"context"
 	"fmt"
 	"os"
 
-	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
@@ -13,13 +14,12 @@ import (
 
 // IAMOrchestrator is responsible for planning and applying all IAM policies for an architecture.
 type IAMOrchestrator struct {
-	arch      *servicemanager.MicroserviceArchitecture
-	logger    zerolog.Logger
-	iamClient iam.IAMClient
-	// This client is specifically for project-level roles, which have a different API.
-	iamProjectManager *iam.IAMProjectManager
-	planner           *iam.RolePlanner
-	// Tracks all created SAs for teardown.
+	arch                        *servicemanager.MicroserviceArchitecture
+	logger                      zerolog.Logger
+	iamClient                   iam.IAMClient
+	iamManager                  iam.IAMManager // The orchestrator now uses the manager.
+	iamProjectManager           *iam.IAMProjectManager
+	planner                     *iam.RolePlanner
 	createdServiceAccountEmails []string
 }
 
@@ -28,24 +28,18 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 	var iamClient iam.IAMClient
 	var err error
 
+	// This logic for creating a test or real client remains the same.
 	if os.Getenv("TEST_SA_POOL_MODE") == "true" {
 		prefix := os.Getenv("TEST_SA_POOL_PREFIX")
 		if prefix == "" {
 			prefix = "test-pool-sa-"
 		}
-		logger.Warn().Str("prefix", prefix).Msg("TEST_SA_POOL_MODE enabled. Using pooled IAM client.")
-		// The test client needs its own concrete type to access Close()
-		testClient, err := iam.NewTestIAMClient(ctx, arch.ProjectID, logger, prefix)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create test iamClient: %w", err)
-		}
-		iamClient = testClient
+		iamClient, err = iam.NewTestIAMClient(ctx, arch.ProjectID, logger, prefix)
 	} else {
-		logger.Info().Msg("Running in standard mode. Using real IAM client.")
 		iamClient, err = iam.NewGoogleIAMClient(ctx, arch.ProjectID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create iamClient for orchestrator: %w", err)
-		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iamClient for orchestrator: %w", err)
 	}
 
 	iamProjectManager, err := iam.NewIAMProjectManager(ctx, arch.ProjectID)
@@ -53,20 +47,58 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 		return nil, fmt.Errorf("failed to create iam project manager: %w", err)
 	}
 
-	planner := iam.NewRolePlanner(logger)
+	// The orchestrator now creates the manager, which has the full architecture context.
+	iamManager, err := iam.NewIAMManager(iamClient, arch, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iam manager: %w", err)
+	}
 
 	return &IAMOrchestrator{
 		arch:                        arch,
 		logger:                      logger.With().Str("component", "IAMOrchestrator").Logger(),
 		iamClient:                   iamClient,
+		iamManager:                  iamManager, // Store the manager.
 		iamProjectManager:           iamProjectManager,
-		planner:                     planner,
+		planner:                     iam.NewRolePlanner(logger),
 		createdServiceAccountEmails: make([]string, 0),
 	}, nil
 }
 
+// ApplyIAMForDataflow is the new method that correctly handles IAM for a single dataflow.
+// It replaces the old SetupDataflowIAM and absorbs the logic from the deleted DeploymentManager.
+func (o *IAMOrchestrator) ApplyIAMForDataflow(ctx context.Context, dataflowName string) (map[string]string, error) {
+	dataflow, ok := o.arch.Dataflows[dataflowName]
+	if !ok {
+		return nil, fmt.Errorf("dataflow '%s' not found in architecture", dataflowName)
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Applying IAM for all services in dataflow.")
+	serviceEmails := make(map[string]string)
+
+	// Iterate over all services defined in this dataflow.
+	for serviceName, serviceSpec := range dataflow.Services {
+		// Call the IAMManager to apply the policies for this specific service.
+		err := o.iamManager.ApplyIAMForService(ctx, dataflow, serviceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply IAM for service '%s' in dataflow '%s': %w", serviceName, dataflowName, err)
+		}
+
+		// After applying, ensure we track the service account email for deployment.
+		saEmail, err := o.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to confirm service account email for '%s': %w", serviceName, err)
+		}
+		serviceEmails[serviceName] = saEmail
+		o.createdServiceAccountEmails = append(o.createdServiceAccountEmails, saEmail)
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully applied IAM for all services in dataflow.")
+	return serviceEmails, nil
+}
+
+// --- (SetupServiceDirectorIAM and Teardown methods remain largely the same) ---
+
 // SetupServiceDirectorIAM ensures the ServiceDirector's SA exists and has project-level roles.
-// It now returns a map containing the service name and its corresponding SA email.
 func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[string]string, error) {
 	o.logger.Info().Msg("Starting ServiceDirector IAM setup...")
 	serviceEmails := make(map[string]string)
@@ -98,13 +130,9 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 		}
 	}
 
-	o.logger.Info().Msg("Granting 'Service Account User' role to Cloud Build SA...")
-	rm, err := deployment.NewResourceManager()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create resource manager to find project number: %w", err)
-	}
-	defer rm.Close()
-	projectNumber, err := rm.GetProjectNumber(ctx, o.arch.ProjectID)
+	// This logic for Cloud Build permissions remains necessary.
+	// A production implementation might make this more configurable.
+	projectNumber, err := o.GetProjectNumber(ctx, o.arch.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project number: %w", err)
 	}
@@ -118,76 +146,37 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	return serviceEmails, nil
 }
 
-// SetupDataflowIAM ensures SAs exist for all dataflow services and grants them resource-level permissions.
-// It now returns a map of all dataflow service names to their SA emails.
-func (o *IAMOrchestrator) SetupDataflowIAM(ctx context.Context) (map[string]string, error) {
-	o.logger.Info().Msg("Starting Dataflow application services IAM setup...")
-	serviceEmails := make(map[string]string)
-
-	plan, err := o.planner.PlanRolesForApplicationServices(o.arch)
-	if err != nil {
-		return nil, fmt.Errorf("failed to plan application service IAM roles: %w", err)
-	}
-
-	for saName, bindings := range plan {
-		saEmail, err := o.iamClient.EnsureServiceAccountExists(ctx, saName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to ensure service account %s: %w", saName, err)
-		}
-		o.createdServiceAccountEmails = append(o.createdServiceAccountEmails, saEmail)
-
-		// Find the service name that corresponds to this service account
-		var serviceName string
-		for _, df := range o.arch.Dataflows {
-			for name, spec := range df.Services {
-				if spec.ServiceAccount == saName {
-					serviceName = name
-					break
-				}
-			}
-		}
-		if serviceName != "" {
-			serviceEmails[serviceName] = saEmail
-		}
-
-		member := "serviceAccount:" + saEmail
-		o.logger.Info().Str("service_account", saEmail).Int("binding_count", len(bindings)).Msg("Applying IAM bindings...")
-		for _, binding := range bindings {
-			err := o.iamClient.AddResourceIAMBinding(ctx, binding.ResourceType, binding.ResourceID, binding.Role, member)
-			if err != nil {
-				return nil, fmt.Errorf("failed to apply binding for SA %s on resource %s: %w", saEmail, binding.ResourceID, err)
-			}
-		}
-	}
-
-	o.logger.Info().Msg("Dataflow application services IAM setup complete.")
-	return serviceEmails, nil
-}
-
 // Teardown cleans up IAM resources and closes the client.
 func (o *IAMOrchestrator) Teardown(ctx context.Context) error {
 	o.logger.Info().Int("created", len(o.createdServiceAccountEmails)).Msg("Starting IAMOrchestrator cleanup...")
 
-	// In test mode, this returns the SA to the pool. In standard mode, it deletes it.
 	for _, email := range o.createdServiceAccountEmails {
 		if err := o.iamClient.DeleteServiceAccount(ctx, email); err != nil {
 			o.logger.Error().Err(err).Str("email", email).Msg("Failed during service account cleanup")
 		}
 	}
 
-	// Close the client. For the test client, this cleans roles from the pool.
 	if o.iamClient != nil {
-		if testClient, ok := o.iamClient.(*iam.TestIAMClient); ok {
-			if err := testClient.Close(); err != nil {
-				o.logger.Error().Err(err).Msg("Failed to close and clean test IAM client")
-			}
-		} else if realClient, ok := o.iamClient.(*iam.GoogleIAMClient); ok {
-			if err := realClient.Close(); err != nil {
-				o.logger.Error().Err(err).Msg("Failed to close real IAM client")
-			}
+		if err := o.iamClient.Close(); err != nil {
+			o.logger.Error().Err(err).Msg("Failed to close IAM client")
 		}
 	}
 
 	o.logger.Info().Msg("IAMOrchestrator cleanup finished.")
 	return nil
+}
+
+func (o *IAMOrchestrator) GetProjectNumber(ctx context.Context, projectID string) (string, error) {
+	getProjectReq := &resourcemanagerpb.GetProjectRequest{
+		Name: fmt.Sprintf("projects/%s", projectID),
+	}
+
+	rmClient, err := resourcemanager.NewProjectsClient(ctx)
+
+	project, err := rmClient.GetProject(ctx, getProjectReq)
+	if err != nil {
+		return "", err
+	}
+	projectNumber := project.Name[len("projects/"):]
+	return projectNumber, nil
 }
