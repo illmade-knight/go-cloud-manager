@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// TestBigQueryManager_Integration tests the manager against a live BigQuery emulator.
+// TestBigQueryManager_Integration tests the manager against a BigQuery emulator.
 func TestBigQueryManager_Integration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

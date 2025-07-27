@@ -10,10 +10,10 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"os"
 	"strings"
 	"testing"
 )
@@ -29,10 +29,7 @@ func init() {
 // to set up and tear down an entire architecture against REAL Google Cloud services.
 func TestServiceManager_RealIntegration_FullLifecycle(t *testing.T) {
 	ctx := context.Background()
-	projectID := os.Getenv("GCP_PROJECT_ID")
-	if projectID == "" {
-		t.Skip("Skipping real integration test: GCP_PROJECT_ID environment variable is not set.")
-	}
+	projectID := auth.CheckGCPAuth(t)
 
 	runID := uuid.New().String()
 

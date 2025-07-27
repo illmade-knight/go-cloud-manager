@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/illmade-knight/go-test/auth"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ var expectedCMessages = flag.Int("expected-messages", 2, "Number of messages the
 var useCPool = flag.Bool("use-pool", false, "Use a pool of service accounts for testing to avoid quota issues.")
 
 func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
-	projectID := CheckGCPAuth(t)
+	projectID := auth.CheckGCPAuth(t)
 	require.NotEmpty(t, projectID, "GCP_PROJECT_ID environment variable must be set")
 
 	region := "us-central1"

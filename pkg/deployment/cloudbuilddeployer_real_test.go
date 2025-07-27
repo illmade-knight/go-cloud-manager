@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
@@ -67,10 +68,7 @@ func main() {
 // CheckGCPAuth is a helper that fails fast if the test is not configured to run.
 func CheckGCPAuth(t *testing.T) string {
 	t.Helper()
-	projectID := os.Getenv("GCP_PROJECT_ID")
-	if projectID == "" {
-		t.Skip("Skipping real integration test: GCP_PROJECT_ID environment variable is not set")
-	}
+	projectID := auth.CheckGCPAuth(t)
 	// A simple adminClient creation is enough to check basic auth config
 	// without performing a full API call like listing resources.
 	_, err := pubsub.NewClient(context.Background(), projectID)

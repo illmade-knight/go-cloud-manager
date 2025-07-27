@@ -33,7 +33,9 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() {
+		psClient.Close()
+	})
 
 	// --- 2. Define Architecture and Create Orchestrator ---
 	arch := &servicemanager.MicroserviceArchitecture{

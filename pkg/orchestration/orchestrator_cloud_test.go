@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/illmade-knight/go-test/auth"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ var usePooling = flag.Bool("use-pool", false, "Use a pool of service accounts fo
 // TestOrchestrator_RealCloud_FullLifecycle performs a full, real-world deployment
 // using the Orchestrator to set up IAM and deploy a simple, self-contained application.
 func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
-	projectID := CheckGCPAuth(t)
+	projectID := auth.CheckGCPAuth(t)
 	require.NotEmpty(t, projectID, "GCP_PROJECT_ID must be set")
 
 	logger := log.With().Str("test", "TestOrchestrator_RealCloud_FullLifecycle").Logger()

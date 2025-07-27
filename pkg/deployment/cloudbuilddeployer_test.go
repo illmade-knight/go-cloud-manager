@@ -38,33 +38,3 @@ func (m *MockCloudRunAPI) CreateOrUpdateService(ctx context.Context, parent, ser
 	args := m.Called(ctx, parent, serviceID, cfg)
 	return args.Error(0)
 }
-
-//func TestCloudBuildDeployer_Deploy(t *testing.T) {
-//	// --- Arrange ---
-//	mockUploader := new(MockStorageUploader)
-//	mockBuilder := new(MockCloudBuilder)
-//	mockRunClient := new(MockCloudRunAPI)
-//
-//	deployer := deployment.NewCloudBuildDeployerForTest(mockUploader, mockBuilder, mockRunClient, zerolog.Nop())
-//
-//	serviceName := "my-native-service"
-//	imageTag := "gcr.io/proj/my-native-service:v1"
-//	spec := servicemanager.DeploymentSpec{Image: imageTag}
-//	saEmail := "test-sa@proj.iam.gserviceaccount.com"
-//	mockOperation := &longrunningpb.Operation{Name: "operations/test-build-op-123"}
-//
-//	// Set up the full sequence of expected calls
-//	mockUploader.On("Upload", mock.Anything, "test-source-bucket", mock.AnythingOfType("string"), mock.Anything).Return(nil).Once()
-//	mockBuilder.On("TriggerBuild", mock.Anything, mock.AnythingOfType("*cloudbuildpb.CreateBuildRequest")).Return(mockOperation, nil).Once()
-//	mockBuilder.On("PollBuildOperation", mock.Anything, mockOperation.Name).Return(&cloudbuildpb.Build{}, nil).Once()
-//	mockRunClient.On("CreateOrUpdateService", mock.Anything, "projects/test-project/locations/us-central1", serviceName, mock.AnythingOfType("*run.GoogleCloudRunV2Service")).Return(nil).Once()
-//
-//	// --- Act ---
-//	err := deployer.Deploy(context.Background(), serviceName, saEmail, spec)
-//
-//	// --- Assert ---
-//	require.NoError(t, err)
-//	mockUploader.AssertExpectations(t)
-//	mockBuilder.AssertExpectations(t)
-//	mockRunClient.AssertExpectations(t)
-//}

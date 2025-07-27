@@ -5,6 +5,7 @@ package iam_test
 import (
 	"context"
 	"fmt"
+	"github.com/illmade-knight/go-test/auth"
 	"os"
 	"strings"
 	"testing"
@@ -60,7 +61,7 @@ func ensureTestCloudRunService(t *testing.T, ctx context.Context, projectID, loc
 
 func TestIAMManager_FullFlow(t *testing.T) {
 	// --- Arrange ---
-	projectID := CheckGCPAuth(t)
+	projectID := auth.CheckGCPAuth(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
