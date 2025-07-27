@@ -9,42 +9,42 @@ import (
 )
 
 // IAMManager defines the high-level orchestration logic for applying IAM policies.
-// The interface remains unchanged, preventing cascading refactors.
 type IAMManager interface {
-	ApplyIAMForService(ctx context.Context, dataflow servicemanager.ResourceGroup, serviceName string) error
+	ApplyIAMForService(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, dataflowName string, serviceName string) error
 }
 
 type simpleIAMManager struct {
 	client  IAMClient
 	logger  zerolog.Logger
 	planner *RolePlanner
-	// The manager now holds the full architecture and the complete IAM plan.
-	architecture *servicemanager.MicroserviceArchitecture
-	iamPlan      map[string][]IAMBinding
 }
 
-// NewIAMManager now accepts the full architecture at creation time.
-// It immediately plans all roles, making the Apply step a simple lookup.
-func NewIAMManager(client IAMClient, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) (IAMManager, error) {
-	planner := NewRolePlanner(logger)
-	// The plan for the entire architecture is generated once, right at the start.
-	fullPlan, err := planner.PlanRolesForApplicationServices(arch)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate IAM plan during manager initialization: %w", err)
-	}
-
+// NewIAMManager creates a new IAMManager.
+// It is now simpler and no longer creates a full IAM plan upon initialization.
+func NewIAMManager(client IAMClient, logger zerolog.Logger) (IAMManager, error) {
 	return &simpleIAMManager{
-		client:       client,
-		logger:       logger.With().Str("component", "IAMManager").Logger(),
-		planner:      planner,
-		architecture: arch,
-		iamPlan:      fullPlan,
+		client:  client,
+		logger:  logger.With().Str("component", "IAMManager").Logger(),
+		planner: NewRolePlanner(logger),
 	}, nil
 }
 
-// ApplyIAMForService's signature is unchanged. It now uses its internal plan.
-func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow servicemanager.ResourceGroup, serviceName string) error {
-	im.logger.Info().Str("service", serviceName).Str("dataflow", dataflow.Name).Msg("Applying IAM policies...")
+// ApplyIAMForService plans and applies all necessary IAM roles for a single service.
+// It now looks up the dataflow by name and runs the planner just-in-time.
+func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, dataflowName string, serviceName string) error {
+	// Lookup the dataflow object from the architecture using the name.
+	dataflow, ok := arch.Dataflows[dataflowName]
+	if !ok {
+		return fmt.Errorf("dataflow '%s' not found in architecture", dataflowName)
+	}
+
+	im.logger.Info().Str("service", serviceName).Str("dataflow", dataflow.Name).Msg("Planning and applying IAM policies...")
+
+	// 1. Plan roles for all services now that resources are expected to exist.
+	iamPlan, err := im.planner.PlanRolesForApplicationServices(arch)
+	if err != nil {
+		return fmt.Errorf("failed to generate IAM plan for service '%s': %w", serviceName, err)
+	}
 
 	serviceSpec, ok := dataflow.Services[serviceName]
 	if !ok {
@@ -52,8 +52,8 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 	}
 	serviceAccountName := serviceSpec.ServiceAccount
 
-	// Look up the pre-computed bindings for this service account from the master plan.
-	bindings, ok := im.iamPlan[serviceAccountName]
+	// 2. Look up the bindings from the plan we just created.
+	bindings, ok := iamPlan[serviceAccountName]
 	if !ok {
 		im.logger.Info().Str("service_account", serviceAccountName).Msg("No IAM bindings were planned for this service. Nothing to apply.")
 		return nil
@@ -66,7 +66,7 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, dataflow ser
 
 	member := "serviceAccount:" + saEmail
 
-	// Execute the plan for this service.
+	// 3. Execute the plan.
 	for _, binding := range bindings {
 		im.logger.Info().
 			Str("resource", binding.ResourceID).

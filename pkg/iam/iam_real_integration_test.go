@@ -5,7 +5,6 @@ package iam_test
 import (
 	"context"
 	"fmt"
-	"github.com/illmade-knight/go-test/auth"
 	"os"
 	"strings"
 	"testing"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -116,36 +116,45 @@ func TestIAMManager_FullFlow(t *testing.T) {
 
 	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, testSaPrefix)
 	require.NoError(t, err)
-	t.Cleanup(func() { iamClient.Close() })
+	t.Cleanup(func() { _ = iamClient.Close() })
 
-	// UPDATED: The manager is now created with the full architecture.
-	iamManager, err := iam.NewIAMManager(iamClient, arch, logger)
+	// The manager is now created without the architecture.
+	iamManager, err := iam.NewIAMManager(iamClient, logger)
 	require.NoError(t, err)
 
 	// 2. Ensure prerequisite resources exist.
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() { _ = psClient.Close() })
 	topic, err := psClient.CreateTopic(ctx, testTopicName)
 	require.NoError(t, err)
-	t.Cleanup(func() { topic.Delete(context.Background()) })
+	t.Cleanup(func() {
+		// Use a background context for cleanup to ensure it runs even if the test context times out.
+		if err := topic.Delete(context.Background()); err != nil {
+			t.Logf("Failed to delete topic %s: %v", testTopicName, err)
+		}
+	})
 
 	secretClient, err := secretmanager.NewClient(ctx)
 	require.NoError(t, err)
-	defer secretClient.Close()
+	t.Cleanup(func() { _ = secretClient.Close() })
 	secret, err := servicemanager.EnsureSecretExistsWithValue(ctx, secretClient, projectID, testSecretName, "test-data")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		secretPath := fmt.Sprintf("projects/%s/secrets/%s", projectID, testSecretName)
-		secretClient.DeleteSecret(context.Background(), &secretmanagerpb.DeleteSecretRequest{Name: secretPath})
+		req := &secretmanagerpb.DeleteSecretRequest{Name: secretPath}
+		// Use a background context for cleanup.
+		if err := secretClient.DeleteSecret(context.Background(), req); err != nil {
+			t.Logf("Failed to delete secret %s: %v", testSecretName, err)
+		}
 	})
 
 	ensureTestCloudRunService(t, ctx, projectID, testLocation, targetServiceName)
 
 	// --- Act ---
 	t.Log("Applying IAM policies for the dataflow...")
-	// The call here remains unchanged, as the signature was preserved.
-	err = iamManager.ApplyIAMForService(ctx, arch.Dataflows["test-dataflow"], "test-service")
+	// The call now passes the full architecture and dataflow name.
+	err = iamManager.ApplyIAMForService(ctx, arch, "test-dataflow", "test-service")
 	require.NoError(t, err)
 
 	// --- Assert ---
@@ -154,6 +163,7 @@ func TestIAMManager_FullFlow(t *testing.T) {
 		// Verify Pub/Sub policy
 		topicPolicy, err := topic.IAM().Policy(ctx)
 		if err != nil {
+			t.Logf("Attempt failed to get topic IAM policy: %v", err)
 			return false
 		}
 		foundPubSubBinding := false
@@ -163,11 +173,15 @@ func TestIAMManager_FullFlow(t *testing.T) {
 				break
 			}
 		}
+		if !foundPubSubBinding {
+			t.Log("Attempt failed: Pub/Sub binding not found.")
+		}
 
 		// Verify Secret Manager policy
 		secretName := strings.Split(secret.Name, "/versions/")[0]
 		secretPolicy, err := secretClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: secretName})
 		if err != nil {
+			t.Logf("Attempt failed to get secret IAM policy: %v", err)
 			return false
 		}
 		foundSecretBinding := false
@@ -181,15 +195,20 @@ func TestIAMManager_FullFlow(t *testing.T) {
 				}
 			}
 		}
+		if !foundSecretBinding {
+			t.Log("Attempt failed: Secret binding not found.")
+		}
 
 		// Verify Cloud Run policy
 		runService, err := run.NewService(ctx)
 		if err != nil {
+			t.Logf("Attempt failed to create Cloud Run client: %v", err)
 			return false
 		}
 		fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, testLocation, targetServiceName)
 		runPolicy, err := runService.Projects.Locations.Services.GetIamPolicy(fullSvcName).Do()
 		if err != nil {
+			t.Logf("Attempt failed to get Cloud Run IAM policy: %v", err)
 			return false
 		}
 
@@ -203,6 +222,9 @@ func TestIAMManager_FullFlow(t *testing.T) {
 					}
 				}
 			}
+		}
+		if !foundRunBinding {
+			t.Log("Attempt failed: Cloud Run binding not found.")
 		}
 
 		return foundPubSubBinding && foundSecretBinding && foundRunBinding

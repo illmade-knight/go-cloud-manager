@@ -2,9 +2,9 @@ package iam_test
 
 import (
 	"context"
-	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"testing"
 
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/mock"
@@ -25,6 +25,9 @@ func (m *MockIAMClient) AddResourceIAMBinding(ctx context.Context, binding iam.I
 	args := m.Called(ctx, binding, member)
 	return args.Error(0)
 }
+
+// ... (other mock methods remain unchanged) ...
+
 func (m *MockIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
 	return nil
 }
@@ -50,7 +53,6 @@ func TestIAMManager_ApplyIAMForService(t *testing.T) {
 	testServiceAccountEmail := "test-sa-for-iam@my-project.iam.gserviceaccount.com"
 	testMemberString := "serviceAccount:" + testServiceAccountEmail
 
-	// The test now defines the full architecture that the manager needs for planning.
 	arch := &servicemanager.MicroserviceArchitecture{
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-dataflow": {
@@ -86,16 +88,14 @@ func TestIAMManager_ApplyIAMForService(t *testing.T) {
 		},
 	}
 
-	// The manager is now created with the architecture.
-	iamManager, err := iam.NewIAMManager(mockClient, arch, logger)
+	// UPDATED: Manager is now created without the architecture.
+	iamManager, err := iam.NewIAMManager(mockClient, logger)
 	require.NoError(t, err)
 
 	// Set up mock expectations.
 	mockClient.On("EnsureServiceAccountExists", mock.Anything, testServiceAccount).
 		Return(testServiceAccountEmail, nil).Once()
 
-	// The test expects the manager to have planned and now be executing the bindings.
-	// We use mock.MatchedBy to check the struct fields without worrying about order.
 	mockClient.On("AddResourceIAMBinding", mock.Anything, mock.MatchedBy(func(b iam.IAMBinding) bool {
 		return b.ResourceType == "pubsub_topic" && b.ResourceID == "my-topic" && b.Role == "roles/pubsub.publisher"
 	}), testMemberString).Return(nil).Once()
@@ -105,8 +105,8 @@ func TestIAMManager_ApplyIAMForService(t *testing.T) {
 	}), testMemberString).Return(nil).Once()
 
 	// --- Act ---
-	// The call signature remains the same, so no changes are needed in the DeploymentManager.
-	err = iamManager.ApplyIAMForService(context.Background(), arch.Dataflows["test-dataflow"], "test-service")
+	// UPDATED: The call now passes the full architecture and the dataflow name string.
+	err = iamManager.ApplyIAMForService(context.Background(), arch, "test-dataflow", "test-service")
 
 	// --- Assert ---
 	require.NoError(t, err)

@@ -1,12 +1,12 @@
 package orchestration
 
 import (
-	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
-	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"context"
 	"fmt"
 	"os"
 
+	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
+	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
@@ -47,8 +47,8 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 		return nil, fmt.Errorf("failed to create iam project manager: %w", err)
 	}
 
-	// The orchestrator now creates the manager, which has the full architecture context.
-	iamManager, err := iam.NewIAMManager(iamClient, arch, logger)
+	// The manager no longer needs the full architecture at creation time.
+	iamManager, err := iam.NewIAMManager(iamClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iam manager: %w", err)
 	}
@@ -64,10 +64,9 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 	}, nil
 }
 
-// ApplyIAMForDataflow is the new method that correctly handles IAM for a single dataflow.
-// It replaces the old SetupDataflowIAM and absorbs the logic from the deleted DeploymentManager.
+// ApplyIAMForDataflow handles IAM for a single dataflow.
 func (o *IAMOrchestrator) ApplyIAMForDataflow(ctx context.Context, dataflowName string) (map[string]string, error) {
-	dataflow, ok := o.arch.Dataflows[dataflowName]
+	_, ok := o.arch.Dataflows[dataflowName]
 	if !ok {
 		return nil, fmt.Errorf("dataflow '%s' not found in architecture", dataflowName)
 	}
@@ -76,9 +75,10 @@ func (o *IAMOrchestrator) ApplyIAMForDataflow(ctx context.Context, dataflowName 
 	serviceEmails := make(map[string]string)
 
 	// Iterate over all services defined in this dataflow.
-	for serviceName, serviceSpec := range dataflow.Services {
+	for serviceName, serviceSpec := range o.arch.Dataflows[dataflowName].Services {
 		// Call the IAMManager to apply the policies for this specific service.
-		err := o.iamManager.ApplyIAMForService(ctx, dataflow, serviceName)
+		// It now passes the full architecture and the dataflow name string.
+		err := o.iamManager.ApplyIAMForService(ctx, o.arch, dataflowName, serviceName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to apply IAM for service '%s' in dataflow '%s': %w", serviceName, dataflowName, err)
 		}
@@ -95,8 +95,6 @@ func (o *IAMOrchestrator) ApplyIAMForDataflow(ctx context.Context, dataflowName 
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully applied IAM for all services in dataflow.")
 	return serviceEmails, nil
 }
-
-// --- (SetupServiceDirectorIAM and Teardown methods remain largely the same) ---
 
 // SetupServiceDirectorIAM ensures the ServiceDirector's SA exists and has project-level roles.
 func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[string]string, error) {
@@ -131,7 +129,6 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	}
 
 	// This logic for Cloud Build permissions remains necessary.
-	// A production implementation might make this more configurable.
 	projectNumber, err := o.GetProjectNumber(ctx, o.arch.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project number: %w", err)
@@ -166,17 +163,24 @@ func (o *IAMOrchestrator) Teardown(ctx context.Context) error {
 	return nil
 }
 
+// GetProjectNumber retrieves the numeric ID for a given project ID string.
 func (o *IAMOrchestrator) GetProjectNumber(ctx context.Context, projectID string) (string, error) {
-	getProjectReq := &resourcemanagerpb.GetProjectRequest{
+	c, err := resourcemanager.NewProjectsClient(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resourcemanager.NewProjectsClient: %w", err)
+	}
+	defer c.Close()
+
+	req := &resourcemanagerpb.GetProjectRequest{
 		Name: fmt.Sprintf("projects/%s", projectID),
 	}
 
-	rmClient, err := resourcemanager.NewProjectsClient(ctx)
-
-	project, err := rmClient.GetProject(ctx, getProjectReq)
+	project, err := c.GetProject(ctx, req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("GetProject: %w", err)
 	}
+
+	// The project name is returned as "projects/123456789". We just want the number.
 	projectNumber := project.Name[len("projects/"):]
 	return projectNumber, nil
 }

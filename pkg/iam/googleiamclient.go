@@ -330,6 +330,40 @@ func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, ser
 	log.Info().Str("member", member).Str("role", role).Str("on_sa", serviceAccountEmail).Msg("Successfully added IAM binding to service account.")
 	return nil
 }
+
+func addStandardIAMBinding(ctx context.Context, handle iamHandle, role, member string) error {
+	policy, err := handle.Policy(ctx)
+	if err != nil {
+		// This error is already handled, but it's good to confirm.
+		return fmt.Errorf("failed to get policy: %w", err)
+	}
+
+	// This adds the member to the policy object in memory.
+	policy.Add(member, iam.RoleName(role))
+
+	// Attempt to apply the updated policy back to the resource.
+	err = handle.SetPolicy(ctx, policy)
+
+	// ADD THIS LOGGING BLOCK to explicitly report the outcome of the SetPolicy call.
+	if err != nil {
+		// If the API call fails, we will now see a clear error log.
+		log.Error().
+			Err(err).
+			Str("role", role).
+			Str("member", member).
+			Msg("GoogleIAMClient: FAILED to set IAM policy.")
+		return fmt.Errorf("failed to set policy: %w", err)
+	}
+
+	// If the API call succeeds, we log that confirmation.
+	log.Info().
+		Str("role", role).
+		Str("member", member).
+		Msg("GoogleIAMClient: Successfully set IAM policy.")
+
+	return nil
+}
+
 func (c *GoogleIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
 	arClient, err := artifactregistry.NewClient(ctx)
 	if err != nil {
@@ -392,14 +426,7 @@ func (c *GoogleIAMClient) DeleteServiceAccount(ctx context.Context, accountName 
 	}
 	return nil
 }
-func addStandardIAMBinding(ctx context.Context, handle iamHandle, role, member string) error {
-	policy, err := handle.Policy(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get policy: %w", err)
-	}
-	policy.Add(member, iam.RoleName(role))
-	return handle.SetPolicy(ctx, policy)
-}
+
 func removeStandardIAMBinding(ctx context.Context, handle iamHandle, role, member string) error {
 	policy, err := handle.Policy(ctx)
 	if err != nil {

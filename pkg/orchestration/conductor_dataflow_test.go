@@ -6,7 +6,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/illmade-knight/go-test/auth"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,12 +14,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
 var expectedCMessages = flag.Int("expected-messages", 2, "Number of messages the verifier should expect to receive.")
 var useCPool = flag.Bool("use-pool", false, "Use a pool of service accounts for testing to avoid quota issues.")
+
+// Test helper functions (createVerificationResources, startVerificationListener) are assumed to be in a separate _test.go file
+// and are not shown here for brevity, as they are not part of the core test logic being updated.
 
 func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
 	projectID := auth.CheckGCPAuth(t)
@@ -115,14 +118,25 @@ func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
 	// --- 2. Setup Verification Listener ---
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
-	defer psClient.Close()
+	t.Cleanup(func() {
+		_ = psClient.Close()
+	})
 
 	_, verifySub := createVerificationResources(t, ctx, psClient, verificationTopicName)
 	validationChan := startVerificationListener(t, ctx, verifySub, *expectedCMessages)
 
 	// --- 3. Create and Run the Conductor ---
+	// Define the options for the conductor to run the full, end-to-end workflow.
+	conductorOptions := orchestration.ConductorOptions{
+		SetupServiceDirectorIAM: true,
+		DeployServiceDirector:   true,
+		SetupDataflowResources:  true,
+		ApplyDataflowIAM:        true,
+		DeployDataflowServices:  true,
+	}
+
 	// The Conductor now encapsulates the entire setup and deployment flow.
-	conductor, err := orchestration.NewConductor(ctx, arch, logger)
+	conductor, err := orchestration.NewConductor(ctx, arch, logger, conductorOptions)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
