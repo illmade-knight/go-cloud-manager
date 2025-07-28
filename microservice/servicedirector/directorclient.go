@@ -68,7 +68,9 @@ func (c *Client) VerifyDataflow(ctx context.Context, dataflowName, serviceName s
 	if err != nil {
 		return fmt.Errorf("failed to send verification request to Director: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)

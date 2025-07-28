@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-dataflow/pkg/microservice"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -243,8 +243,11 @@ func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName strin
 	return d.serviceManager.TeardownDataflow(ctx, d.architecture, dataflowName)
 }
 
-func (d *Director) Shutdown() {
-	d.BaseServer.Shutdown()
+func (d *Director) Shutdown(ctx context.Context) {
+	err := d.BaseServer.Shutdown(ctx)
+	if err != nil {
+		d.logger.Error().Err(err).Msg("Error shutting down base server")
+	}
 
 	if d.commands != nil {
 		d.commands.client.Close()

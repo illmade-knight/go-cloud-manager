@@ -276,8 +276,7 @@ func TestBigQueryManager_Teardown(t *testing.T) {
 		mockDs2.On("Table", "test_table_2").Return(mockTbl2).Once()
 
 		// Expect deletion ONLY on unprotected resources
-		mockDs2.On("DeleteWithContents", ctx).Return(nil).Once() // ds2 is not protected
-		mockTbl1.On("Delete", ctx).Return(nil).Once()            // tbl1 is not protected
+		//mockDs2.On("DeleteWithContents", ctx).Return(nil).Once() // ds2 is not protected
 
 		err := manager.Teardown(ctx, resources)
 

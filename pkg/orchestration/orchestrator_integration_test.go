@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"github.com/illmade-knight/go-cloud-manager/microservice"
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-dataflow/pkg/microservice"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
@@ -90,7 +90,9 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, psClient, logger)
 	require.NoError(t, err)
 	require.NoError(t, director.Start())
-	t.Cleanup(director.Shutdown)
+	t.Cleanup(func() {
+		director.Shutdown(ctx)
+	})
 
 	// --- 4. Act and Assert in Sequence ---
 

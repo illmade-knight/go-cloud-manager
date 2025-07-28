@@ -14,15 +14,14 @@ require (
 	cloud.google.com/go/secretmanager v1.15.0
 	cloud.google.com/go/storage v1.56.0
 	github.com/google/uuid v1.6.0
+	github.com/illmade-knight/go-dataflow v0.0.12-beta
+	github.com/illmade-knight/go-test v0.0.2-beta
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
 	google.golang.org/api v0.243.0
 	google.golang.org/grpc v1.74.2
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
-
-
-	github.com/illmade-knight/go-test v0.0.2-beta
 )
 
 require (
