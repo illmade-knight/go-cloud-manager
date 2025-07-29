@@ -12,7 +12,7 @@ type IAMBinding struct {
 	ResourceType     string
 	ResourceID       string
 	Role             string
-	ResourceLocation string // ADDED: The location/region of the resource, e.g., "europe-west2"
+	ResourceLocation string // The location/region of the resource, e.g., "europe-west2"
 }
 
 // RolePlanner is responsible for analyzing a microservice architecture
@@ -63,8 +63,8 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 	return rolesSlice, nil
 }
 
-// PlanRolesForApplicationServices now infers common roles from environment variables
-// for Pub/Sub, BigQuery, and GCS, in addition to reading explicit policies.
+// PlanRolesForApplicationServices now infers roles from a combination of explicit
+// resource links (for Pub/Sub) and environment variables for other services.
 func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.MicroserviceArchitecture) (map[string][]IAMBinding, error) {
 	p.logger.Info().Str("architecture", arch.Name).Msg("Planning required IAM roles for all application services...")
 
@@ -72,23 +72,17 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	var mu sync.Mutex
 
 	for _, dataflow := range arch.Dataflows {
+		// REFACTOR: Plan Pub/Sub roles based on explicit links in the resource definitions.
+		// This is more reliable than inferring from environment variables.
+		p.planPubSubRolesFromResources(dataflow, finalPlan, &mu)
+
+		// Plan other roles based on service-level definitions (dependencies, other env vars).
 		for serviceName, serviceSpec := range dataflow.Services {
 			if serviceSpec.Deployment != nil {
 				envVars := serviceSpec.Deployment.EnvironmentVars
-				// Infer Pub/Sub Publisher role
-				if topicID, ok := envVars["TOPIC_ID"]; ok {
-					p.logger.Info().Str("service", serviceName).Str("topic", topicID).Msg("Inferred publisher role")
-					binding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: topicID, Role: "roles/pubsub.publisher"}
-					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
-				}
-				// Infer Pub/Sub Subscriber role
-				if subID, ok := envVars["SUBSCRIPTION_ID"]; ok {
-					p.logger.Info().Str("service", serviceName).Str("subscription", subID).Msg("Inferred subscriber role")
-					binding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: subID, Role: "roles/pubsub.subscriber"}
-					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
-				}
+
 				// Infer BigQuery Data Editor role
-				if datasetID, ok := envVars["BIGQUERY_DATASET_ID"]; ok {
+				if datasetID, ok := envVars["BIGQUERY_DATASET"]; ok {
 					p.logger.Info().Str("service", serviceName).Str("dataset", datasetID).Msg("Inferred bigquery data editor role")
 					binding := IAMBinding{ResourceType: "bigquery_dataset", ResourceID: datasetID, Role: "roles/bigquery.dataEditor"}
 					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
@@ -120,7 +114,6 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 						Role:             "roles/run.invoker",
 						ResourceLocation: dependencyRegion,
 					}
-					// CORRECTED: This now uses the same clean helper function.
 					addBindingToPlan(serviceSpec.ServiceAccount, binding, finalPlan, &mu)
 				}
 			}
@@ -130,6 +123,39 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 
 	p.logger.Info().Int("services_planned", len(finalPlan)).Msg("Application service IAM role plan complete.")
 	return finalPlan, nil
+}
+
+// REFACTOR: This new helper function encapsulates the explicit Pub/Sub role planning.
+func (p *RolePlanner) planPubSubRolesFromResources(dataflow servicemanager.ResourceGroup, plan map[string][]IAMBinding, mu *sync.Mutex) {
+	// Plan Publisher roles from Topics
+	for _, topic := range dataflow.Resources.Topics {
+		if topic.ProducerService != "" {
+			if service, ok := dataflow.Services[topic.ProducerService]; ok {
+				p.logger.Info().Str("service", service.Name).Str("topic", topic.Name).Msg("Planning explicit publisher and viewer roles")
+				// Publisher role on the topic
+				pubBinding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: topic.Name, Role: "roles/pubsub.publisher"}
+				addBindingToPlan(service.ServiceAccount, pubBinding, plan, mu)
+				// Viewer role on the topic
+				viewBinding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: topic.Name, Role: "roles/pubsub.viewer"}
+				addBindingToPlan(service.ServiceAccount, viewBinding, plan, mu)
+			}
+		}
+	}
+
+	// Plan Subscriber roles from Subscriptions
+	for _, sub := range dataflow.Resources.Subscriptions {
+		if sub.ConsumerService != "" {
+			if service, ok := dataflow.Services[sub.ConsumerService]; ok {
+				p.logger.Info().Str("service", service.Name).Str("subscription", sub.Name).Msg("Planning explicit subscriber and topic viewer roles")
+				// Subscriber role on the subscription
+				subBinding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: sub.Name, Role: "roles/pubsub.subscriber"}
+				addBindingToPlan(service.ServiceAccount, subBinding, plan, mu)
+				// Viewer role on the subscription's TOPIC
+				viewBinding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: sub.Topic, Role: "roles/pubsub.viewer"}
+				addBindingToPlan(service.ServiceAccount, viewBinding, plan, mu)
+			}
+		}
+	}
 }
 
 // scanResourcesForExplicitPolicies is a helper that checks all resource types for explicit IAM policies.
@@ -179,7 +205,6 @@ func addBindingToPlan(serviceAccount string, binding IAMBinding, plan map[string
 	plan[serviceAccount] = append(plan[serviceAccount], binding)
 }
 
-// ADD THIS HELPER to iamplanner.go
 // findServiceRegion searches the architecture for a service by name and returns its region.
 func findServiceRegion(arch *servicemanager.MicroserviceArchitecture, serviceName string) string {
 	// Check the service director first
@@ -190,11 +215,9 @@ func findServiceRegion(arch *servicemanager.MicroserviceArchitecture, serviceNam
 	}
 	// Check all dataflow services
 	for _, df := range arch.Dataflows {
-		for _, svc := range df.Services {
-			if svc.Name == serviceName && svc.Deployment != nil {
-				if svc.Deployment.Region != "" {
-					return svc.Deployment.Region
-				}
+		if svc, ok := df.Services[serviceName]; ok && svc.Deployment != nil {
+			if svc.Deployment.Region != "" {
+				return svc.Deployment.Region
 			}
 		}
 	}

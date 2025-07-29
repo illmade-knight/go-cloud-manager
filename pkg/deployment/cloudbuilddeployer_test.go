@@ -13,7 +13,7 @@ import (
 
 type MockStorageUploader struct{ mock.Mock }
 
-func (m *MockStorageUploader) Upload(ctx context.Context, bucket, object string, content io.Reader) error {
+func (m *MockStorageUploader) Upload(ctx context.Context, bucket, object string, _ io.Reader) error {
 	args := m.Called(ctx, bucket, object, mock.Anything)
 	return args.Error(0)
 }

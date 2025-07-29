@@ -3,33 +3,31 @@ package deployment
 import (
 	"archive/tar"
 	"bytes"
-	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
-	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"google.golang.org/api/googleapi"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/rs/zerolog"
-
+	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
+	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"cloud.google.com/go/cloudbuild/apiv1/v2"
 	"cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	"cloud.google.com/go/longrunning/autogen"
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	"cloud.google.com/go/storage"
+	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/rs/zerolog"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
-	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 )
 
 // CloudBuildDeployer implements the ContainerDeployer interface using Google Cloud services.
@@ -86,7 +84,6 @@ func NewCloudBuildDeployer(ctx context.Context, projectID, defaultRegion, source
 func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting native cloud build and deploy workflow...")
 
-	// ADDED: Ensure both GCS source bucket and Artifact Registry repo exist.
 	if err := d.ensureSourceBucketExists(ctx); err != nil {
 		return "", fmt.Errorf("failed to ensure GCS source bucket exists for service '%s': %w", serviceName, err)
 	}
@@ -118,7 +115,7 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 	return deployedSvc.Uri, nil
 }
 
-// ADDED: New method to ensure the GCS source bucket exists.
+// ensureSourceBucketExists ensures the GCS source bucket exists.
 func (d *CloudBuildDeployer) ensureSourceBucketExists(ctx context.Context) error {
 	d.logger.Info().Str("bucket", d.sourceBucket).Msg("Verifying GCS source bucket...")
 	bucket := d.storageClient.Bucket(d.sourceBucket)
@@ -140,7 +137,7 @@ func (d *CloudBuildDeployer) ensureSourceBucketExists(ctx context.Context) error
 	return nil
 }
 
-// ADDED: New method to ensure the Artifact Registry repository exists.
+// ensureArtifactRegistryRepoExists ensures the Artifact Registry repository exists.
 func (d *CloudBuildDeployer) ensureArtifactRegistryRepoExists(ctx context.Context, spec servicemanager.DeploymentSpec) error {
 	repoName := spec.ImageRepo
 	region := d.defaultRegion // Use the deployer's default region
@@ -158,7 +155,9 @@ func (d *CloudBuildDeployer) ensureArtifactRegistryRepoExists(ctx context.Contex
 	if err != nil {
 		return fmt.Errorf("failed to create artifact registry client: %w", err)
 	}
-	defer arClient.Close()
+	defer func(arClient *artifactregistry.Client) {
+		_ = arClient.Close()
+	}(arClient)
 
 	parent := fmt.Sprintf("projects/%s/locations/%s", d.projectID, region)
 	fullRepoName := fmt.Sprintf("%s/repositories/%s", parent, repoName)
@@ -213,6 +212,7 @@ func (d *CloudBuildDeployer) Teardown(ctx context.Context, serviceName string) e
 }
 
 // --- Private Helper Methods ---
+
 func (d *CloudBuildDeployer) createOrUpdateCloudRunService(ctx context.Context, serviceName, saEmail string, spec servicemanager.DeploymentSpec) (*run.GoogleCloudRunV2Service, error) {
 	parent := fmt.Sprintf("projects/%s/locations/%s", d.projectID, d.defaultRegion)
 	fullServiceName := fmt.Sprintf("%s/services/%s", parent, serviceName)
@@ -258,10 +258,26 @@ func (d *CloudBuildDeployer) pollRunOperation(ctx context.Context, opName string
 	}
 }
 
+// REFACTOR: This function is updated to process both plain-text and secret-backed environment variables.
 func buildRunServiceConfig(saEmail string, spec servicemanager.DeploymentSpec) *run.GoogleCloudRunV2Service {
 	var envVars []*run.GoogleCloudRunV2EnvVar
+
+	// Process plain-text environment variables.
 	for k, v := range spec.EnvironmentVars {
 		envVars = append(envVars, &run.GoogleCloudRunV2EnvVar{Name: k, Value: v})
+	}
+
+	// Process secret-backed environment variables.
+	for _, secretVar := range spec.SecretEnvironmentVars {
+		envVars = append(envVars, &run.GoogleCloudRunV2EnvVar{
+			Name: secretVar.Name,
+			ValueSource: &run.GoogleCloudRunV2EnvVarSource{
+				SecretKeyRef: &run.GoogleCloudRunV2SecretKeySelector{
+					Secret:  secretVar.ValueFrom,
+					Version: "latest",
+				},
+			},
+		})
 	}
 
 	return &run.GoogleCloudRunV2Service{
@@ -270,7 +286,7 @@ func buildRunServiceConfig(saEmail string, spec servicemanager.DeploymentSpec) *
 			Containers: []*run.GoogleCloudRunV2Container{
 				{
 					Image: spec.Image,
-					Env:   envVars,
+					Env:   envVars, // The 'Env' slice now contains both types of variables.
 					Resources: &run.GoogleCloudRunV2ResourceRequirements{
 						Limits: map[string]string{"cpu": spec.CPU, "memory": spec.Memory},
 					},
@@ -300,26 +316,25 @@ func (d *CloudBuildDeployer) uploadSourceToGCS(ctx context.Context, sourceDir, b
 		if err != nil {
 			return err
 		}
-
-		// Get the relative path of the file.
 		header.Name, err = filepath.Rel(sourceDir, path)
 		if err != nil {
 			return err
 		}
-
-		// This is the crucial fix: ensure all path separators are forward
-		// slashes for compatibility with the Linux build environment.
 		header.Name = filepath.ToSlash(header.Name)
 
-		if err := tarWriter.WriteHeader(header); err != nil {
+		err = tarWriter.WriteHeader(header)
+		if err != nil {
 			return err
 		}
 		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		defer file.Close()
-		if _, err := io.Copy(tarWriter, file); err != nil {
+		defer func(file *os.File) {
+			_ = file.Close()
+		}(file)
+		_, err = io.Copy(tarWriter, file)
+		if err != nil {
 			return err
 		}
 		return nil
@@ -335,11 +350,12 @@ func (d *CloudBuildDeployer) uploadSourceToGCS(ctx context.Context, sourceDir, b
 	}
 	w := d.storageClient.Bucket(bucket).Object(objectName).NewWriter(ctx)
 	if _, err = io.Copy(w, buf); err != nil {
-		w.Close()
+		_ = w.Close()
 		return fmt.Errorf("failed to copy source to GCS: %w", err)
 	}
 	return w.Close()
 }
+
 func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObject, serviceAccountEmail string, spec servicemanager.DeploymentSpec) error {
 	d.logger.Info().Str("service account", serviceAccountEmail).Msg("Triggering Cloud Build")
 
@@ -360,7 +376,6 @@ func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObj
 		},
 	}
 
-	// If we are building a module in a subdirectory, prepend the copy step.
 	if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
 		d.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Prepending 'copy-module-files' step for monorepo build")
 		copyStep := &cloudbuildpb.BuildStep{
@@ -369,22 +384,15 @@ func (d *CloudBuildDeployer) triggerCloudBuild(ctx context.Context, gcsSourceObj
 			Entrypoint: "bash",
 			Args: []string{
 				"-c",
-				// This robust command copies go.sum only if it exists.
 				fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
 			},
 		}
-		// Prepend the copy step to the beginning of the slice.
 		buildSteps = append([]*cloudbuildpb.BuildStep{copyStep}, buildSteps...)
 	}
 
-	//fullSaName := fmt.Sprintf("projects/%s/serviceAccounts/%s", d.projectID, serviceAccountEmail)
-
-	// Now, construct the final build request with the correct steps.
 	req := &cloudbuildpb.CreateBuildRequest{
 		ProjectId: d.projectID,
 		Build: &cloudbuildpb.Build{
-			// It's easier if we never fill in ServiceAccount field, that way it chooses the right one for us
-			// ServiceAccount: the cloud build service account,
 			Source: &cloudbuildpb.Source{
 				Source: &cloudbuildpb.Source_StorageSource{
 					StorageSource: &cloudbuildpb.StorageSource{

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
+	"strings"
 )
 
 // Validate performs a pre-flight check on the architecture definition to ensure
@@ -42,15 +43,13 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID
 		return errors.New("cannot hydrate a nil architecture")
 	}
 
-	// --- THIS IS THE FIX ---
-	// Perform a pre-flight validation check before doing any work.
 	if err := arch.Validate(); err != nil {
 		return fmt.Errorf("architecture validation failed: %w", err)
 	}
-	// --- END OF FIX ---
 
 	defaultRegion := arch.Environment.Region
 
+	// Hydrate the service manager first
 	if arch.ServiceManagerSpec.Deployment != nil {
 		if runID != "" {
 			arch.ServiceManagerSpec.Name = fmt.Sprintf("%s-%s", arch.ServiceManagerSpec.Name, runID)
@@ -58,16 +57,16 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID
 		hydrateDeploymentSpec(
 			arch.ServiceManagerSpec.Deployment,
 			arch.ServiceManagerSpec.Name,
+			"conductor",
 			arch.ProjectID,
 			defaultRegion,
 			defaultImageRepo,
 		)
 	}
 
-	for _, dataflow := range arch.Dataflows {
+	// First pass: Hydrate basic deployment specs and names for all services
+	for dataflowName, dataflow := range arch.Dataflows {
 		for serviceKey, service := range dataflow.Services {
-			// NOTE: We use the serviceKey to update the map, but the service.Name for hydration.
-			// This is important because the name might be modified by the runID.
 			if runID != "" {
 				service.Name = fmt.Sprintf("%s-%s", service.Name, runID)
 				dataflow.Services[serviceKey] = service // Re-assign the modified struct back to the map
@@ -77,6 +76,7 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID
 				hydrateDeploymentSpec(
 					service.Deployment,
 					service.Name,
+					dataflowName,
 					arch.ProjectID,
 					defaultRegion,
 					defaultImageRepo,
@@ -84,12 +84,45 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID
 			}
 		}
 	}
+
+	// REFACTOR: Second pass to inject environment variables based on explicit resource links.
+	// This makes the YAML purely declarative about which service uses which resource.
+	for _, dataflow := range arch.Dataflows {
+		// Inject environment variables for topics
+		for _, topic := range dataflow.Resources.Topics {
+			if topic.ProducerService != "" {
+				if service, ok := dataflow.Services[topic.ProducerService]; ok {
+					if service.Deployment.EnvironmentVars == nil {
+						service.Deployment.EnvironmentVars = make(map[string]string)
+					}
+					envKey := fmt.Sprintf("%s_TOPIC_ID", strings.ToUpper(topic.Name))
+					service.Deployment.EnvironmentVars[envKey] = topic.Name
+					dataflow.Services[topic.ProducerService] = service
+				}
+			}
+		}
+
+		// Inject environment variables for subscriptions
+		for _, sub := range dataflow.Resources.Subscriptions {
+			if sub.ConsumerService != "" {
+				if service, ok := dataflow.Services[sub.ConsumerService]; ok {
+					if service.Deployment.EnvironmentVars == nil {
+						service.Deployment.EnvironmentVars = make(map[string]string)
+					}
+					envKey := fmt.Sprintf("%s_SUBSCRIPTION_ID", strings.ToUpper(sub.Name))
+					service.Deployment.EnvironmentVars[envKey] = sub.Name
+					dataflow.Services[sub.ConsumerService] = service
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
 // hydrateDeploymentSpec is a private helper that fills in default and dynamically
 // generated values for a single DeploymentSpec.
-func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, projectID, defaultRegion, defaultImageRepo string) {
+func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, dataflowName, projectID, defaultRegion, defaultImageRepo string) {
 	if spec.Region == "" {
 		spec.Region = defaultRegion
 	}
@@ -103,11 +136,14 @@ func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, projectID, default
 		spec.Memory = "512Mi"
 	}
 
-	if spec.EnvironmentVars != nil {
-		if _, ok := spec.EnvironmentVars["PROJECT_ID"]; ok {
-			spec.EnvironmentVars["PROJECT_ID"] = projectID
-		}
+	if spec.EnvironmentVars == nil {
+		spec.EnvironmentVars = make(map[string]string)
 	}
+
+	// Standard injected variables
+	spec.EnvironmentVars["PROJECT_ID"] = projectID
+	spec.EnvironmentVars["SERVICE_NAME"] = serviceName
+	spec.EnvironmentVars["DATAFLOW_NAME"] = dataflowName
 
 	spec.Image = fmt.Sprintf(
 		"%s-docker.pkg.dev/%s/%s/%s:%s",
