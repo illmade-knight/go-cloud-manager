@@ -10,17 +10,17 @@ import (
 	"testing"
 	"time"
 
+	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/pubsub"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
-	"google.golang.org/api/run/v2"
-
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/api/run/v2"
 )
 
 // ensureTestCloudRunService is a helper to create and clean up the target service for the test.
@@ -70,11 +70,13 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	runID := time.Now().UnixNano()
 	testTopicName := fmt.Sprintf("test-topic-for-iam-%d", runID)
 	testSecretName := fmt.Sprintf("test-secret-for-iam-%d", runID)
+	testDatasetName := fmt.Sprintf("test_dataset_for_iam_%d", runID) // BQ names need underscores
 	testSaName := "pooled-iam-test-sa"
 	testSaPrefix := "it-iam"
 	targetServiceName := fmt.Sprintf("target-service-%d", runID)
 	const testLocation = "europe-west1"
 
+	// REFACTOR: Added BigQuery dataset with a primitive WRITER role to the architecture.
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID, Region: testLocation},
 		Dataflows: map[string]servicemanager.ResourceGroup{
@@ -109,6 +111,18 @@ func TestIAMManager_FullFlow(t *testing.T) {
 							},
 						},
 					},
+					BigQueryDatasets: []servicemanager.BigQueryDataset{
+						{
+							CloudResource: servicemanager.CloudResource{
+								Name: testDatasetName,
+								IAMPolicy: []servicemanager.IAM{
+									// Note: For dataset ACLs, we use primitive roles.
+									// "WRITER" corresponds to roles/bigquery.dataEditor.
+									{Name: "test-service", Role: "WRITER"},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -118,7 +132,6 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = iamClient.Close() })
 
-	// The manager is now created without the architecture.
 	iamManager, err := iam.NewIAMManager(iamClient, logger)
 	require.NoError(t, err)
 
@@ -129,7 +142,6 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	topic, err := psClient.CreateTopic(ctx, testTopicName)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		// Use a background context for cleanup to ensure it runs even if the test context times out.
 		if err := topic.Delete(context.Background()); err != nil {
 			t.Logf("Failed to delete topic %s: %v", testTopicName, err)
 		}
@@ -143,9 +155,19 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	t.Cleanup(func() {
 		secretPath := fmt.Sprintf("projects/%s/secrets/%s", projectID, testSecretName)
 		req := &secretmanagerpb.DeleteSecretRequest{Name: secretPath}
-		// Use a background context for cleanup.
 		if err := secretClient.DeleteSecret(context.Background(), req); err != nil {
 			t.Logf("Failed to delete secret %s: %v", testSecretName, err)
+		}
+	})
+
+	// REFACTOR: Create the BigQuery dataset needed for the test.
+	bqClient, err := bigquery.NewClient(ctx, projectID)
+	require.NoError(t, err)
+	err = bqClient.Dataset(testDatasetName).Create(ctx, &bigquery.DatasetMetadata{Location: "EU"})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := bqClient.Dataset(testDatasetName).Delete(context.Background()); err != nil {
+			t.Logf("Failed to delete dataset %s: %v", testDatasetName, err)
 		}
 	})
 
@@ -153,7 +175,6 @@ func TestIAMManager_FullFlow(t *testing.T) {
 
 	// --- Act ---
 	t.Log("Applying IAM policies for the dataflow...")
-	// The call now passes the full architecture and dataflow name.
 	err = iamManager.ApplyIAMForService(ctx, arch, "test-dataflow", "test-service")
 	require.NoError(t, err)
 
@@ -227,7 +248,24 @@ func TestIAMManager_FullFlow(t *testing.T) {
 			t.Log("Attempt failed: Cloud Run binding not found.")
 		}
 
-		return foundPubSubBinding && foundSecretBinding && foundRunBinding
+		// REFACTOR: Verify BigQuery dataset policy
+		foundBQBinding := false
+		meta, err := bqClient.Dataset(testDatasetName).Metadata(ctx)
+		if err != nil {
+			t.Logf("Attempt failed to get BQ dataset metadata: %v", err)
+			return false
+		}
+		for _, entry := range meta.Access {
+			if entry.Role == bigquery.WriterRole && strings.Contains(entry.Entity, testSaPrefix) {
+				foundBQBinding = true
+				break
+			}
+		}
+		if !foundBQBinding {
+			t.Log("Attempt failed: BigQuery binding not found.")
+		}
+
+		return foundPubSubBinding && foundSecretBinding && foundRunBinding && foundBQBinding
 	}, 60*time.Second, 5*time.Second, "IAM policies did not propagate in time")
 
 	t.Log("✅ Verification successful.")

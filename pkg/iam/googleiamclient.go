@@ -438,6 +438,9 @@ func removeStandardIAMBinding(ctx context.Context, handle iamHandle, role, membe
 	policy.Remove(member, iam.RoleName(role))
 	return handle.SetPolicy(ctx, policy)
 }
+
+// from googleiamclient.go
+
 func (c *GoogleIAMClient) addBigQueryDatasetIAMBinding(ctx context.Context, datasetID, role, member string) error {
 	dataset := c.bigqueryClient.Dataset(datasetID)
 	meta, err := dataset.Metadata(ctx)
@@ -446,14 +449,17 @@ func (c *GoogleIAMClient) addBigQueryDatasetIAMBinding(ctx context.Context, data
 	}
 	update := bigquery.DatasetMetadataToUpdate{
 		Access: append(meta.Access, &bigquery.AccessEntry{
-			Role:       bigquery.AccessRole(role),
+			Role: bigquery.AccessRole(role),
+			// REFACTOR: Use the correct entity type for an email-based identity, which includes service accounts.
 			EntityType: bigquery.IAMMemberEntity,
-			Entity:     strings.TrimPrefix(member, "serviceAccount:"),
+			Entity:     member,
+			//Entity:     strings.TrimPrefix(member, "serviceAccount:"),
 		}),
 	}
 	_, err = dataset.Update(ctx, update, meta.ETag)
 	return err
 }
+
 func (c *GoogleIAMClient) removeBigQueryDatasetIAMBinding(ctx context.Context, datasetID, role, member string) error {
 	dataset := c.bigqueryClient.Dataset(datasetID)
 	meta, err := dataset.Metadata(ctx)
@@ -461,9 +467,9 @@ func (c *GoogleIAMClient) removeBigQueryDatasetIAMBinding(ctx context.Context, d
 		return err
 	}
 	var updatedAccess []*bigquery.AccessEntry
-	email := strings.TrimPrefix(member, "serviceAccount:")
+	// This function does not need to strip the prefix, as it's just comparing the full member string.
 	for _, entry := range meta.Access {
-		if !(entry.Role == bigquery.AccessRole(role) && entry.EntityType == bigquery.IAMMemberEntity && entry.Entity == email) {
+		if !(entry.Role == bigquery.AccessRole(role) && entry.EntityType == bigquery.IAMMemberEntity && entry.Entity == member) {
 			updatedAccess = append(updatedAccess, entry)
 		}
 	}
@@ -471,6 +477,7 @@ func (c *GoogleIAMClient) removeBigQueryDatasetIAMBinding(ctx context.Context, d
 	_, err = dataset.Update(ctx, update, meta.ETag)
 	return err
 }
+
 func (c *GoogleIAMClient) Close() error {
 	var errs []string
 	if err := c.iamAdminClient.Close(); err != nil {
