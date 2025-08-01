@@ -12,20 +12,25 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// EnsureArtifactRegistryRepositoryExists checks if a repository exists and creates it if not.
+// EnsureArtifactRegistryRepositoryExists checks if a specific Artifact Registry repository
+// exists in the given project and location. If it does not exist, it creates it.
+// This function is idempotent and safe to call multiple times.
 func EnsureArtifactRegistryRepositoryExists(
 	ctx context.Context,
 	projectID, location, repositoryID string,
 	logger zerolog.Logger,
 	opts ...option.ClientOption,
 ) error {
-	logger.Info().Str("repository", repositoryID).Msg("Checking for Artifact Registry repository...")
+	log := logger.With().Str("repository", repositoryID).Str("location", location).Logger()
+	log.Info().Msg("Checking for Artifact Registry repository...")
 
 	client, err := artifactregistry.NewClient(ctx, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to create artifact registry adminClient: %w", err)
+		return fmt.Errorf("failed to create artifact registry client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)
 	repoName := fmt.Sprintf("%s/repositories/%s", parent, repositoryID)
@@ -33,17 +38,18 @@ func EnsureArtifactRegistryRepositoryExists(
 	// Check if the repository already exists.
 	_, err = client.GetRepository(ctx, &artifactregistrypb.GetRepositoryRequest{Name: repoName})
 	if err == nil {
-		logger.Info().Str("repository", repositoryID).Msg("Artifact Registry repository already exists.")
-		return nil // Repository exists, nothing to do.
+		log.Info().Msg("Artifact Registry repository already exists.")
+		return nil // Repository exists, nothing more to do.
 	}
 
-	// If the error is anything other than "Not Found", it's a real problem.
-	if s, ok := status.FromError(err); !ok || s.Code() != codes.NotFound {
+	// If the error is anything other than "Not Found", it's an unexpected issue.
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
 		return fmt.Errorf("failed to check for repository '%s': %w", repositoryID, err)
 	}
 
 	// Repository does not exist, so create it.
-	logger.Info().Str("repository", repositoryID).Msg("Repository not found, creating it now...")
+	log.Info().Msg("Repository not found, creating it now...")
 	createReq := &artifactregistrypb.CreateRepositoryRequest{
 		Parent:       parent,
 		RepositoryId: repositoryID,
@@ -58,11 +64,12 @@ func EnsureArtifactRegistryRepositoryExists(
 		return fmt.Errorf("failed to trigger repository creation: %w", err)
 	}
 
-	// Wait for the creation operation to complete.
-	if _, err := op.Wait(ctx); err != nil {
+	// Wait for the long-running creation operation to complete.
+	_, err = op.Wait(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to create repository '%s': %w", repositoryID, err)
 	}
 
-	logger.Info().Str("repository", repositoryID).Msg("Successfully created Artifact Registry repository.")
+	log.Info().Msg("✅ Successfully created Artifact Registry repository.")
 	return nil
 }

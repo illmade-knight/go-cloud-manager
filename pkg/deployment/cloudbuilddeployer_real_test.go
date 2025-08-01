@@ -3,34 +3,89 @@
 package deployment_test
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-test/auth"
-	"github.com/stretchr/testify/assert"
-	"google.golang.org/api/option"
-	"google.golang.org/api/run/v2"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/artifactregistry/apiv1"
-	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"cloud.google.com/go/iam/admin/apiv1"
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
-	"cloud.google.com/go/storage"
+	"cloud.google.com/go/pubsub"
+	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
+	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/api/option"
+	"google.golang.org/api/run/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// ensureCloudBuildPermissions uses the refactored iam package to programmatically
+// grant the necessary roles to the default Cloud Build service account. This replaces
+// the functionality of the deleted googleresourcemanager.go file.
+func ensureCloudBuildPermissions(t *testing.T, ctx context.Context, projectID string) {
+	t.Helper()
+	t.Log("Ensuring default Cloud Build service account has necessary permissions...")
+
+	// 1. Get the project number to construct the SA email.
+	rmClient, err := resourcemanager.NewProjectsClient(ctx)
+	require.NoError(t, err)
+	defer func() {
+		_ = rmClient.Close()
+	}()
+
+	proj, err := rmClient.GetProject(ctx, &resourcemanagerpb.GetProjectRequest{
+		Name: fmt.Sprintf("projects/%s", projectID),
+	})
+	require.NoError(t, err)
+	projectNumber := proj.Name[len("projects/"):]
+
+	// 2. Define the required roles and the member.
+	cloudBuildMember := fmt.Sprintf("serviceAccount:%s@cloudbuild.gserviceaccount.com", projectNumber)
+	requiredRoles := []string{
+		"roles/cloudbuild.serviceAgent",
+		"roles/storage.objectViewer",
+		"roles/artifactregistry.writer",
+		"roles/run.admin",
+		"roles/iam.serviceAccountUser",
+	}
+
+	// 3. Use the IAMProjectManager to grant the roles.
+	projectManager, err := iam.NewIAMProjectManager(ctx, projectID)
+	require.NoError(t, err)
+	defer func() {
+		_ = projectManager.Close()
+	}()
+
+	var grantedRoles bool
+	for _, role := range requiredRoles {
+		err = projectManager.AddProjectIAMBinding(ctx, cloudBuildMember, role)
+		if err == nil {
+			// This is a simplification; the real AddProjectIAMBinding is idempotent.
+			// We track if any change was likely made.
+			grantedRoles = true
+		}
+		require.NoError(t, err, "Failed to grant role %s", role)
+	}
+
+	// If we granted new roles, wait for them to propagate.
+	if grantedRoles {
+		t.Log("Granted new IAM roles to Cloud Build SA. Waiting 2 minutes for propagation...")
+		time.Sleep(2 * time.Minute)
+	} else {
+		t.Log("All required Cloud Build permissions already exist.")
+	}
+}
 
 // --- Test-Local Helper Code ---
 var (
@@ -69,22 +124,10 @@ func main() {
 func CheckGCPAuth(t *testing.T) string {
 	t.Helper()
 	projectID := auth.CheckGCPAuth(t)
-	// A simple adminClient creation is enough to check basic auth config
-	// without performing a full API call like listing resources.
+	// A simple client creation is enough to check basic auth config.
 	_, err := pubsub.NewClient(context.Background(), projectID)
 	if err != nil {
-		t.Fatalf(`
-		---------------------------------------------------------------------
-		GCP AUTHENTICATION FAILED!
-		---------------------------------------------------------------------
-		Could not create a Google Cloud adminClient. This is likely due to
-		expired or missing Application Default Credentials (ADC).
-
-		To fix this, please run 'gcloud auth application-default login'.
-
-		Original Error: %v
-		---------------------------------------------------------------------
-		`, err)
+		t.Fatalf("GCP AUTHENTICATION FAILED! Please run 'gcloud auth application-default login'. Original Error: %v", err)
 	}
 	return projectID
 }
@@ -97,27 +140,27 @@ func setupTestRunnerSA(t *testing.T, ctx context.Context, projectID string) stri
 	}
 
 	t.Log("GCP_TEST_RUNNER_SA not set. Creating temporary service account for this test run.")
-	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
+	iamClient, err := admin.NewIamClient(ctx)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = iamClient.Close() })
 
 	runID := uuid.New().String()[:8]
 	saName := fmt.Sprintf("temp-runner-sa-%s", runID)
+	saEmail := fmt.Sprintf("%s@%s.iam.gserviceaccount.com", saName, projectID)
 
-	saEmail, err := iamClient.EnsureServiceAccountExists(ctx, saName)
+	_, err = iamClient.CreateServiceAccount(ctx, &adminpb.CreateServiceAccountRequest{
+		Name:      fmt.Sprintf("projects/%s", projectID),
+		AccountId: saName,
+	})
 	require.NoError(t, err)
 	t.Logf("Created temporary service account: %s", saEmail)
 
 	t.Cleanup(func() {
 		t.Logf("Cleaning up temporary service account: %s", saName)
-		adminClient, err := admin.NewIamClient(context.Background())
-		if err != nil {
-			t.Logf("Failed to create IAM admin adminClient for cleanup: %v", err)
-			return
-		}
-		defer adminClient.Close()
 		resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, saEmail)
 		req := &adminpb.DeleteServiceAccountRequest{Name: resourceName}
-		if err := adminClient.DeleteServiceAccount(context.Background(), req); err != nil && status.Code(err) != codes.NotFound {
+		err := iamClient.DeleteServiceAccount(context.Background(), req)
+		if err != nil && status.Code(err) != codes.NotFound {
 			t.Logf("Failed to delete temporary service account %s: %v", saEmail, err)
 		}
 	})
@@ -132,7 +175,7 @@ func createTestSourceDir(t *testing.T, files map[string]string) (string, func())
 		p := filepath.Join(tmpDir, name)
 		require.NoError(t, os.WriteFile(p, []byte(content), 0644))
 	}
-	return tmpDir, func() { os.RemoveAll(tmpDir) }
+	return tmpDir, func() { _ = os.RemoveAll(tmpDir) }
 }
 
 // --- Main Integration Test ---
@@ -142,54 +185,24 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 		flag.Parse()
 	}
 	projectID := CheckGCPAuth(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute) // Increased timeout for IAM propagation
 	defer cancel()
 
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("test", "CloudBuildDeployer_Real").Logger()
 
 	// --- Arrange ---
+	// REFACTOR: Ensure Cloud Build permissions are set before running the test.
+	ensureCloudBuildPermissions(t, ctx, projectID)
+
 	runID := uuid.New().String()[:8]
 	serviceName := fmt.Sprintf("it-cb-deployer-svc-%s", runID)
-
-	// Use the values from the flags.
 	region := *regionFlag
 	imageRepoName := *imageRepoFlag
-
 	sourceBucketName := fmt.Sprintf("%s_cloudbuild", projectID)
 	imageName := serviceName
 	imageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:latest", region, projectID, imageRepoName, imageName)
 
-	sourceObject := fmt.Sprintf("source/%s-%d.tar.gz", serviceName, time.Now().UnixNano())
-
-	createdCloudBuildPermissions, err := deployment.DiagnoseAndFixCloudBuildPermissions(ctx, projectID, logger)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to diagnose and fix Cloud Build Permissions")
-	}
-
-	resourceManager, err := deployment.NewResourceManager()
-	require.NoError(t, err)
-
-	projectNumber, err := resourceManager.GetProjectNumber(ctx, projectID)
-	require.NoError(t, err)
-
-	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
-	require.NoError(t, err)
-
-	agentPermissionCreated, err := iam.GrantCloudRunAgentPermissions(ctx, iam.RepoConfig{
-		ProjectID:     projectID,
-		ProjectNumber: projectNumber,
-		Name:          imageRepoName,
-		Location:      region,
-	}, iamClient)
-	require.NoError(t, err)
-
-	if createdCloudBuildPermissions || agentPermissionCreated {
-		logger.Info().Msg("Waiting 2 minutes for IAM permissions to propagate...")
-		time.Sleep(2 * time.Minute)
-		logger.Info().Msg("Wait complete. You can now run the main integration test.")
-	}
-
-	// Set source path based on flag
+	// Set source path based on flag or use in-memory default.
 	var sourcePath string
 	if *sourcePathFlag != "" {
 		logger.Info().Str("path", *sourcePathFlag).Msg("Using provided source path from -source-path flag.")
@@ -198,37 +211,14 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 		logger.Info().Msg("Using in-memory 'hello-world' source for deployment.")
 		var cleanupSource func()
 		sourcePath, cleanupSource = createTestSourceDir(t, helloWorldSource)
-		defer cleanupSource()
+		t.Cleanup(cleanupSource)
 	}
 
-	// Create all necessary clients
-	gcsClient, err := storage.NewClient(ctx)
-	require.NoError(t, err)
-	defer gcsClient.Close()
-	arClient, err := artifactregistry.NewClient(ctx)
-	require.NoError(t, err)
-	defer arClient.Close()
-
-	//Now in the Deploy method
-	//// Ensure prerequisites exist
-	//logger.Info().Msg("Verifying prerequisites (GCS Bucket and Artifact Registry Repo)...")
-	//bucket := gcsClient.Bucket(sourceBucketName)
-	//if _, err := bucket.Attrs(ctx); err != nil {
-	//	if errors.Is(err, storage.ErrBucketNotExist) {
-	//		logger.Info().Str("bucket", sourceBucketName).Msg("Cloud Build source bucket not found, creating it now...")
-	//		require.NoError(t, bucket.Create(ctx, projectID, nil), "Failed to create GCS source bucket")
-	//	} else {
-	//		t.Fatalf("Failed to check for GCS source bucket %s: %v", sourceBucketName, err)
-	//	}
-	//}
-	//require.NoError(t, deployment.EnsureArtifactRegistryRepositoryExists(ctx, projectID, region, imageRepoName, logger))
-	//logger.Info().Msg("Prerequisites verified successfully.")
-
-	// Create the deployer instance
+	// Create the deployer instance.
 	deployer, err := deployment.NewCloudBuildDeployer(ctx, projectID, region, sourceBucketName, logger)
 	require.NoError(t, err)
 
-	// Get a service account for the test run
+	// Get a service account for the test run.
 	saEmail := setupTestRunnerSA(t, ctx, projectID)
 
 	spec := servicemanager.DeploymentSpec{
@@ -238,98 +228,62 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 		CPU:                 "1",
 		Memory:              "512Mi",
 		BuildableModulePath: ".",
+		Region:              region,
 	}
 
-	// Setup full cleanup for all created resources
+	// Setup full cleanup for all created resources.
 	t.Cleanup(func() {
-		// Use a new background context for cleanup to ensure it runs even if the test context timed out.
 		cleanupCtx := context.Background()
 		t.Logf("--- Starting Full Cleanup for %s ---", serviceName)
-
-		// Teardown the Cloud Run service first.
 		assert.NoError(t, deployer.Teardown(cleanupCtx, serviceName), "Teardown of Cloud Run service should not fail")
-
-		// Create a NEW client specifically for the cleanup task.
-		arClientForCleanup, err := artifactregistry.NewClient(cleanupCtx)
-		if err != nil {
-			t.Errorf("Failed to create Artifact Registry client for cleanup: %v", err)
-			return // Cannot proceed if client creation fails
-		}
-		defer arClientForCleanup.Close()
-
-		imagePackageName := fmt.Sprintf("projects/%s/locations/%s/repositories/%s/packages/%s", projectID, region, imageRepoName, imageName)
-		op, err := arClientForCleanup.DeletePackage(cleanupCtx, &artifactregistrypb.DeletePackageRequest{Name: imagePackageName})
-		if err == nil {
-			op.Wait(cleanupCtx)
-		} else if status.Code(err) != codes.NotFound {
-			t.Errorf("Failed to trigger Artifact Registry package deletion: %v", err)
-		}
-
-		// Also create a new client for GCS cleanup
-		gcsClientForCleanup, err := storage.NewClient(cleanupCtx)
-		if err != nil {
-			t.Errorf("Failed to create GCS client for cleanup: %v", err)
-			return
-		}
-		defer gcsClientForCleanup.Close()
-
-		err = gcsClientForCleanup.Bucket(sourceBucketName).Object(sourceObject).Delete(cleanupCtx)
-		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
-			t.Errorf("Failed to delete GCS source object: %v", err)
-		}
 	})
 
-	// --- Act ---
-	logger.Info().Str("service", serviceName).Str("source", sourcePath).Msg("Deploying service...")
-	serviceURL, err := deployer.Deploy(ctx, serviceName, saEmail, spec)
-	require.NoError(t, err)
-	require.NotEmpty(t, serviceURL)
-	logger.Info().Str("url", serviceURL).Msg("Service deployed successfully.")
+	// --- Act & Assert ---
+	var serviceURL string
+	t.Run("Act - Deploy Service", func(t *testing.T) {
+		logger.Info().Str("service", serviceName).Str("source", sourcePath).Msg("Deploying service...")
+		var deployErr error
+		serviceURL, deployErr = deployer.Deploy(ctx, serviceName, saEmail, spec)
+		require.NoError(t, deployErr)
+		require.NotEmpty(t, serviceURL)
+		logger.Info().Str("url", serviceURL).Msg("Service deployed successfully.")
+	})
 
-	//
-	// --- Assert ---
-	logger.Info().Str("service", serviceName).Msg("Verifying service is ready by polling the latest revision...")
+	t.Run("Assert - Verify Service Ready", func(t *testing.T) {
+		logger.Info().Str("service", serviceName).Msg("Verifying service is ready by polling the latest revision...")
 
-	regionalEndpoint := fmt.Sprintf("%s-run.googleapis.com:443", region)
-	runService, err := run.NewService(ctx, option.WithEndpoint(regionalEndpoint))
-	require.NoError(t, err)
+		regionalEndpoint := fmt.Sprintf("%s-run.googleapis.com:443", region)
+		runService, err := run.NewService(ctx, option.WithEndpoint(regionalEndpoint))
+		require.NoError(t, err)
 
-	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
+		fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
 
-	// This is the final, corrected health check logic.
-	require.Eventually(t, func() bool {
-		// 1. Get the parent Service to find the name of the latest revision.
-		svc, err := runService.Projects.Locations.Services.Get(fullServiceName).Do()
-		if err != nil {
-			logger.Error().Err(err).Str("service", serviceName).Msg("Failed to get service")
-			return false
-		}
-		// The latest created revision is the one we want to check.
-		latestRevisionName := svc.LatestCreatedRevision
-
-		latestReadyRevision := svc.LatestReadyRevision
-
-		logger.Info().Str("service", serviceName).Str("latest ready", latestReadyRevision).Str("latest create", latestRevisionName).Msg("Service is ready by polling the latest revision...")
-
-		//fullRevisionName := fmt.Sprintf("projects/%s/locations/%s/services/%s/revisions/%s", projectID, region, serviceName, latestReadyRevision)
-		// 2. Get the Revision object directly.
-		rev, err := runService.Projects.Locations.Services.Revisions.Get(latestReadyRevision).Do()
-		if err != nil {
-			return false
-		}
-
-		// 3. Check the 'Ready' condition on the Revision itself.
-		for _, cond := range rev.Conditions {
-			if cond.Type == "Ready" {
-				if cond.State == "CONDITION_SUCCEEDED" {
-					return true // Success!
-				}
-				// Log the reason if it's not ready yet, which is helpful for debugging.
-				logger.Info().Str("revision", rev.Name).Str("reason", cond.Reason).Str("message", cond.Message).Msg("Revision not ready yet...")
+		require.Eventually(t, func() bool {
+			svc, err := runService.Projects.Locations.Services.Get(fullServiceName).Do()
+			if err != nil {
+				logger.Error().Err(err).Str("service", serviceName).Msg("Failed to get service")
+				return false
 			}
-		}
-		return false
-	}, 3*time.Minute, 10*time.Second, "Cloud Run Revision never reported a 'Ready' status of 'True'.")
+			if svc.LatestReadyRevision == "" {
+				return false
+			}
 
-	logger.Info().Msg("✅ Revision is Ready. Deployment successful.")
+			rev, err := runService.Projects.Locations.Services.Revisions.Get(svc.LatestReadyRevision).Do()
+			if err != nil {
+				return false
+			}
+
+			for _, cond := range rev.Conditions {
+				if cond.Type == "Ready" {
+					if cond.State == "CONDITION_SUCCEEDED" {
+						return true // Success!
+					}
+					logger.Info().Str("revision", rev.Name).Str("reason", cond.Reason).Str("message", cond.Message).Msg("Revision not ready yet...")
+				}
+			}
+			return false
+		}, 3*time.Minute, 10*time.Second, "Cloud Run Revision never reported a 'Ready' status of 'True'.")
+
+		logger.Info().Msg("✅ Revision is Ready. Deployment successful.")
+	})
 }

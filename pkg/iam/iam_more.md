@@ -90,10 +90,10 @@ pubsub.viewer role added as well as our existing publisher and subscriber roles
 we started to refactor but realize there are several shortcomings to our current approach
 
 #### The Correct Solution (Least Privilege)
-To follow the principle of least privilege, we should not use the admin role. Instead, grant the service account two roles at the topic level:
+To follow the principle of least privilege, we should not use the admin role. 
+Instead, grant the service account two roles at the topic level:
 
 roles/pubsub.publisher: Allows the service account to publish messages.
-
 roles/pubsub.viewer: Allows the service account to perform the GetTopic check.
 
 * the reliance on the service ENV variables is too brittle

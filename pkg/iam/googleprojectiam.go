@@ -11,6 +11,8 @@ import (
 )
 
 // IAMProjectManager is a dedicated client for managing project-level IAM policies.
+// It provides a focused interface for granting roles that apply across the entire GCP project,
+// such as the administrative roles required by the ServiceDirector.
 type IAMProjectManager struct {
 	projectID string
 	client    *resourcemanager.ProjectsClient
@@ -29,7 +31,8 @@ func NewIAMProjectManager(ctx context.Context, projectID string, opts ...option.
 }
 
 // AddProjectIAMBinding grants a role to a member at the project level.
-// This implementation now correctly adapts your proven "get-modify-set" pattern.
+// It uses the standard "get-modify-set" pattern to ensure that existing bindings are preserved.
+// This operation is idempotent; if the member already has the role, no changes are made.
 func (m *IAMProjectManager) AddProjectIAMBinding(ctx context.Context, member, role string) error {
 	// 1. Get the current IAM policy for the project.
 	req := &iampb.GetIamPolicyRequest{
@@ -50,9 +53,11 @@ func (m *IAMProjectManager) AddProjectIAMBinding(ctx context.Context, member, ro
 	}
 
 	if bindingToModify == nil {
+		// If no binding for this role exists, create a new one.
 		bindingToModify = &iampb.Binding{Role: role, Members: []string{member}}
 		policy.Bindings = append(policy.Bindings, bindingToModify)
 	} else {
+		// If the binding exists, check if the member is already present.
 		memberExists := false
 		for _, m := range bindingToModify.Members {
 			if m == member {
@@ -69,10 +74,11 @@ func (m *IAMProjectManager) AddProjectIAMBinding(ctx context.Context, member, ro
 	}
 
 	// 3. Set the updated policy back on the project.
-	_, err = m.client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
+	setReq := &iampb.SetIamPolicyRequest{
 		Resource: fmt.Sprintf("projects/%s", m.projectID),
 		Policy:   policy,
-	})
+	}
+	_, err = m.client.SetIamPolicy(ctx, setReq)
 	if err != nil {
 		return fmt.Errorf("failed to set project IAM policy: %w", err)
 	}

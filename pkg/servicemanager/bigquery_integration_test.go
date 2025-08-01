@@ -16,18 +16,19 @@ import (
 	"time"
 )
 
-// TestBigQueryManager_Integration tests the manager against a BigQuery emulator.
+// TestBigQueryManager_Integration tests the manager's full lifecycle (Create, Verify, Teardown)
+// against a live BigQuery emulator.
 func TestBigQueryManager_Integration(t *testing.T) {
+	// --- ARRANGE: Set up context, configuration, and clients ---
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	projectID := "bq-it-project"
 	runID := uuid.New().String()[:8]
-
-	// --- 1. Define Resource Names and Configuration ---
 	datasetName := fmt.Sprintf("it_dataset_%s", runID)
 	tableName := fmt.Sprintf("it_table_%s", runID)
 
+	// Define the resources to be managed.
 	resources := servicemanager.CloudResourcesSpec{
 		BigQueryDatasets: []servicemanager.BigQueryDataset{
 			{CloudResource: servicemanager.CloudResource{Name: datasetName}},
@@ -36,73 +37,72 @@ func TestBigQueryManager_Integration(t *testing.T) {
 			{
 				CloudResource: servicemanager.CloudResource{Name: tableName},
 				Dataset:       datasetName,
-				SchemaType:    "BQTestSchema",
+				SchemaType:    "BQTestSchema", // This schema must be registered.
 			},
 		},
 	}
 
-	// --- 2. Setup Emulator and a SINGLE Real BigQuery Client ---
+	// Set up the BigQuery emulator.
 	t.Log("Setting up BigQuery emulator...")
 	bqConnection := emulators.SetupBigQueryEmulator(t, ctx, emulators.GetDefaultBigQueryConfig(projectID, nil, nil))
 
-	// CORRECTED: Create only ONE client for the entire test.
+	// Create a single BigQuery client instance configured to connect to the emulator.
 	bqClient, err := bigquery.NewClient(ctx, projectID, bqConnection.ClientOptions...)
 	require.NoError(t, err)
-	// This cleanup now correctly closes the single client instance.
 	t.Cleanup(func() {
-		err = bqClient.Close()
-		if err != nil {
-			t.Logf("Failed to close BigQuery client: %v", err)
+		closeErr := bqClient.Close()
+		if closeErr != nil {
+			t.Logf("Failed to close BigQuery client: %v", closeErr)
 		}
 	})
 
-	// --- 3. Create the BigQueryManager ---
-	logger := zerolog.New(zerolog.NewConsoleWriter())
+	// Register the schema type used in the test resources.
 	servicemanager.RegisterSchema("BQTestSchema", MonitorReadings{})
+
+	// Create the BigQueryManager instance, wrapping the emulator client in our adapter.
+	logger := zerolog.New(zerolog.NewConsoleWriter())
 	environment := servicemanager.Environment{ProjectID: projectID, Location: "US"}
-
-	// CORRECTED: Use the new adapter to wrap the single client for the manager.
-	// Do NOT create a second client.
 	bqAdapter := servicemanager.NewAdapter(bqClient)
-
 	manager, err := servicemanager.NewBigQueryManager(bqAdapter, logger, environment)
 	require.NoError(t, err)
 
-	// =========================================================================
-	// --- Phase 1: CREATE Resources ---
-	// =========================================================================
-	t.Log("--- Starting CreateResources ---")
-	provTables, provDatasets, err := manager.CreateResources(ctx, resources)
-	require.NoError(t, err)
-	assert.Len(t, provDatasets, 1, "Should provision one dataset")
-	assert.Len(t, provTables, 1, "Should provision one table")
-	t.Log("--- CreateResources finished successfully ---")
+	// --- ACT & ASSERT: Execute and verify each lifecycle phase ---
 
-	// =========================================================================
-	// --- Phase 2: VERIFY Resources Exist ---
-	// =========================================================================
-	t.Log("--- Verifying resources exist in emulator ---")
-	// The test's own verification uses the real bqClient directly.
-	_, err = bqClient.Dataset(datasetName).Metadata(ctx)
-	assert.NoError(t, err, "BigQuery dataset should exist after creation")
+	// Phase 1: CREATE Resources
+	t.Run("CreateResources", func(t *testing.T) {
+		t.Log("--- Starting CreateResources ---")
+		provTables, provDatasets, createErr := manager.CreateResources(ctx, resources)
+		require.NoError(t, createErr)
+		assert.Len(t, provDatasets, 1, "Should provision one dataset")
+		assert.Len(t, provTables, 1, "Should provision one table")
+		t.Log("--- CreateResources finished successfully ---")
+	})
 
-	_, err = bqClient.Dataset(datasetName).Table(tableName).Metadata(ctx)
-	assert.NoError(t, err, "BigQuery table should exist after creation")
-	t.Log("--- Verification successful, all resources exist ---")
+	// Phase 2: VERIFY Resources Exist
+	t.Run("VerifyResourcesExist", func(t *testing.T) {
+		t.Log("--- Verifying resources exist in emulator ---")
+		// Verify directly using the real client to ensure resources were actually created.
+		_, metadataErr := bqClient.Dataset(datasetName).Metadata(ctx)
+		assert.NoError(t, metadataErr, "BigQuery dataset should exist after creation")
 
-	// =========================================================================
-	// --- Phase 3: TEARDOWN Resources ---
-	// =========================================================================
-	t.Log("--- Starting Teardown ---")
-	err = manager.Teardown(ctx, resources)
-	require.NoError(t, err, "Teardown should not fail")
-	t.Log("--- Teardown finished successfully ---")
+		_, tableMetadataErr := bqClient.Dataset(datasetName).Table(tableName).Metadata(ctx)
+		assert.NoError(t, tableMetadataErr, "BigQuery table should exist after creation")
+		t.Log("--- Verification successful, all resources exist ---")
+	})
 
-	// =========================================================================
-	// --- Phase 4: VERIFY Resources are Deleted ---
-	// =========================================================================
-	t.Log("--- Verifying resources are deleted from emulator ---")
-	_, err = bqClient.Dataset(datasetName).Metadata(ctx)
-	assert.Error(t, err, "BigQuery dataset should NOT exist after teardown")
-	t.Log("--- Deletion verification successful ---")
+	// Phase 3: TEARDOWN Resources
+	t.Run("TeardownResources", func(t *testing.T) {
+		t.Log("--- Starting Teardown ---")
+		teardownErr := manager.Teardown(ctx, resources)
+		require.NoError(t, teardownErr, "Teardown should not fail")
+		t.Log("--- Teardown finished successfully ---")
+	})
+
+	// Phase 4: VERIFY Resources are Deleted
+	t.Run("VerifyResourcesDeleted", func(t *testing.T) {
+		t.Log("--- Verifying resources are deleted from emulator ---")
+		_, metadataErr := bqClient.Dataset(datasetName).Metadata(ctx)
+		assert.Error(t, metadataErr, "BigQuery dataset should NOT exist after teardown")
+		t.Log("--- Deletion verification successful ---")
+	})
 }

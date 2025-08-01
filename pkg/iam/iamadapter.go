@@ -7,8 +7,6 @@ import "context"
 type IAMClient interface {
 	EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error)
 
-	// UPDATED: These methods now accept an IAMBinding struct to provide more context,
-	// including the resource's location, which is crucial for regional services like Cloud Run.
 	AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error
 	RemoveResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error
 

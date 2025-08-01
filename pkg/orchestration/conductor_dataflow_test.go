@@ -22,26 +22,10 @@ import (
 var expectedCMessages = flag.Int("expected-messages", 2, "Number of messages the verifier should expect to receive.")
 var useCPool = flag.Bool("use-pool", false, "Use a pool of service accounts for testing to avoid quota issues.")
 
-// Test helper functions (createVerificationResources, startVerificationListener) are assumed to be in a separate _test.go file
-// and are not shown here for brevity, as they are not part of the core test logic being updated.
+// buildTestArchitecture is a helper to construct the complex architecture needed for the E2E tests.
+func buildTestArchitecture(t *testing.T, projectID, region, imageRepo, runID string) *servicemanager.MicroserviceArchitecture {
+	t.Helper()
 
-func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
-	projectID := auth.CheckGCPAuth(t)
-	require.NotEmpty(t, projectID, "GCP_PROJECT_ID environment variable must be set")
-
-	region := "us-central1"
-	imageRepo := "test-images"
-	logger := log.With().Str("test", "TestOrchestrator_DataflowE2E_WithConductor").Logger()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
-	if *useCPool {
-		t.Setenv("TEST_SA_POOL_MODE", "true")
-		t.Setenv("TEST_SA_POOL_PREFIX", "it-")
-	}
-
-	// --- 1. Arrange: Define the full architecture for the test ---
-	runID := uuid.New().String()[:8]
 	sdSourcePath, _ := filepath.Abs("./testdata/toy-servicedirector")
 	pubSourcePath, _ := filepath.Abs("./testdata/tracer-publisher")
 	subSourcePath, _ := filepath.Abs("./testdata/tracer-subscriber")
@@ -65,12 +49,9 @@ func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
 				SourcePath:          sdSourcePath,
 				BuildableModulePath: ".",
 				EnvironmentVars: map[string]string{
-					"PROJECT_ID":              projectID,
 					"SD_COMMAND_TOPIC":        commandTopicID,
 					"SD_COMMAND_SUBSCRIPTION": commandSubID,
 					"SD_COMPLETION_TOPIC":     completionTopicID,
-					"TRACER_TOPIC_ID":         tracerTopicName,
-					"TRACER_SUB_ID":           tracerSubName,
 				},
 			},
 		},
@@ -113,20 +94,37 @@ func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, servicemanager.HydrateArchitecture(arch, imageRepo, runID))
+	require.NoError(t, servicemanager.HydrateArchitecture(arch, imageRepo, runID, log.Logger))
+	return arch
+}
 
-	// --- 2. Setup Verification Listener ---
+// TestConductor_DataflowE2E_FullRun tests the Conductor's ability to execute a full,
+// end-to-end deployment workflow from start to finish.
+func TestConductor_DataflowE2E_FullRun(t *testing.T) {
+	projectID := auth.CheckGCPAuth(t)
+	logger := log.With().Str("test", "TestConductor_DataflowE2E_FullRun").Logger()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	if *useCPool {
+		t.Setenv("TEST_SA_POOL_MODE", "true")
+		t.Setenv("TEST_SA_POOL_PREFIX", "it-")
+	}
+
+	// --- Arrange ---
+	runID := uuid.New().String()[:8]
+	arch := buildTestArchitecture(t, projectID, "us-central1", "test-images", runID)
+	verificationTopicName := fmt.Sprintf("verify-topic-%s", runID)
+
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = psClient.Close()
-	})
+	t.Cleanup(func() { _ = psClient.Close() })
 
 	_, verifySub := createVerificationResources(t, ctx, psClient, verificationTopicName)
 	validationChan := startVerificationListener(t, ctx, verifySub, *expectedCMessages)
 
-	// --- 3. Create and Run the Conductor ---
-	// Define the options for the conductor to run the full, end-to-end workflow.
+	// --- Act ---
+	// Define options for a full run.
 	conductorOptions := orchestration.ConductorOptions{
 		SetupServiceDirectorIAM: true,
 		DeployServiceDirector:   true,
@@ -134,8 +132,6 @@ func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
 		ApplyDataflowIAM:        true,
 		DeployDataflowServices:  true,
 	}
-
-	// The Conductor now encapsulates the entire setup and deployment flow.
 	conductor, err := orchestration.NewConductor(ctx, arch, logger, conductorOptions)
 	require.NoError(t, err)
 
@@ -146,20 +142,88 @@ func TestOrchestrator_DataflowE2E_WithConductor(t *testing.T) {
 		if err := conductor.Teardown(cCtx); err != nil {
 			logger.Error().Err(err).Msg("Conductor teardown failed")
 		}
-		logger.Info().Msg("--- Conductor Teardown Complete ---")
 	})
 
-	// The entire multi-step deployment process is now a single, clean call.
 	err = conductor.Run(ctx)
 	require.NoError(t, err, "Conductor.Run() should complete without errors")
 
-	// --- 4. Verify the Live Dataflow ---
+	// --- Assert ---
 	t.Logf("Waiting to receive %d verification message(s)...", *expectedCMessages)
 	select {
 	case err := <-validationChan:
 		require.NoError(t, err, "Verification failed while receiving messages")
 		t.Logf("✅ Verification successful! Received %d message(s).", *expectedCMessages)
-	case <-time.After(5 * time.Minute):
-		t.Fatalf("Timeout: Did not complete verification for %d messages in time.", *expectedCMessages)
+	case <-ctx.Done():
+		t.Fatal("Test context timed out before verification completed.")
+	}
+}
+
+// TestConductor_DataflowE2E_WithSkippedDirector validates the Conductor's flexibility.
+// It first runs a full deployment, then runs a second time skipping the director deployment
+// and providing its URL as an override, ensuring the dataflow services can still be deployed.
+func TestConductor_DataflowE2E_WithSkippedDirector(t *testing.T) {
+	projectID := auth.CheckGCPAuth(t)
+	logger := log.With().Str("test", "TestConductor_DataflowE2E_WithSkippedDirector").Logger()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	// --- Arrange: First full run to get a deployed director ---
+	runID1 := uuid.New().String()[:8]
+	arch1 := buildTestArchitecture(t, projectID, "us-central1", "test-images", runID1)
+
+	fullRunOptions := orchestration.ConductorOptions{
+		SetupServiceDirectorIAM: true,
+		DeployServiceDirector:   true,
+		SetupDataflowResources:  true,
+		ApplyDataflowIAM:        true,
+		DeployDataflowServices:  true,
+	}
+	conductor1, err := orchestration.NewConductor(ctx, arch1, logger, fullRunOptions)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conductor1.Teardown(context.Background()) })
+
+	err = conductor1.Run(ctx)
+	require.NoError(t, err)
+
+	// The URL of the now-deployed director is in the hydrated architecture spec.
+	directorURL := arch1.ServiceManagerSpec.Deployment.ServiceURL
+	require.NotEmpty(t, directorURL, "Director URL should not be empty after first run")
+	t.Logf("First run complete. Deployed director URL: %s", directorURL)
+
+	// --- Act: Second run, skipping director deployment ---
+	runID2 := uuid.New().String()[:8]
+	arch2 := buildTestArchitecture(t, projectID, "us-central1", "test-images", runID2)
+	verificationTopicName2 := fmt.Sprintf("verify-topic-%s", runID2)
+
+	psClient, err := pubsub.NewClient(ctx, projectID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = psClient.Close() })
+	_, verifySub2 := createVerificationResources(t, ctx, psClient, verificationTopicName2)
+	validationChan2 := startVerificationListener(t, ctx, verifySub2, *expectedCMessages)
+
+	// These options skip the first two phases and provide the override.
+	partialRunOptions := orchestration.ConductorOptions{
+		SetupServiceDirectorIAM: false,
+		DeployServiceDirector:   false,
+		DirectorURLOverride:     directorURL,
+		SetupDataflowResources:  true,
+		ApplyDataflowIAM:        true,
+		DeployDataflowServices:  true,
+	}
+	conductor2, err := orchestration.NewConductor(ctx, arch2, logger, partialRunOptions)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conductor2.Teardown(context.Background()) })
+
+	err = conductor2.Run(ctx)
+	require.NoError(t, err)
+
+	// --- Assert ---
+	t.Logf("Waiting for verification messages on second run...")
+	select {
+	case err := <-validationChan2:
+		require.NoError(t, err, "Verification failed on second run")
+		t.Logf("✅ Verification successful on second run!")
+	case <-ctx.Done():
+		t.Fatal("Test context timed out before verification completed on second run.")
 	}
 }

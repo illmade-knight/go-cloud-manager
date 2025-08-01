@@ -18,56 +18,9 @@ import (
 	"google.golang.org/api/run/v2"
 )
 
-// (eventWaiter and other type definitions remain the same)
-// eventWaiter is a simple, thread-safe mechanism to allow multiple goroutines
-// to wait for different, specific events originating
-type eventWaiter struct {
-	mu      sync.Mutex
-	waiters map[CompletionStatus]chan struct{}
-}
+// --- Types for Orchestration State and Communication ---
 
-func newEventWaiter() *eventWaiter {
-	return &eventWaiter{
-		waiters: make(map[CompletionStatus]chan struct{}),
-	}
-}
-
-// await returns a channel that a caller can wait on for a specific event key.
-func (ew *eventWaiter) await(key CompletionStatus) <-chan struct{} {
-	ew.mu.Lock()
-	defer ew.mu.Unlock()
-	ch, exists := ew.waiters[key]
-	if !exists {
-		ch = make(chan struct{})
-		ew.waiters[key] = ch
-	}
-	return ch
-}
-
-// signal finds the channel for a given event and closes it. If a waiter isn't
-// ready yet, it creates a closed channel to act as a signal for when the waiter arrives.
-func (ew *eventWaiter) signal(key CompletionStatus) {
-	ew.mu.Lock()
-	defer ew.mu.Unlock()
-
-	if ch, exists := ew.waiters[key]; exists {
-		// A waiter is already here. Close the channel to unblock it.
-		// Avoid panicking by closing a channel that might already be closed.
-		select {
-		case <-ch:
-			// Channel is already closed, do nothing.
-		default:
-			close(ch)
-		}
-	} else {
-		// No one is waiting yet. Create a CLOSED channel.
-		// When await() runs, it will find this channel in the map and not block.
-		closedCh := make(chan struct{})
-		close(closedCh)
-		ew.waiters[key] = closedCh
-	}
-}
-
+// OrchestratorState represents the various states the orchestrator can be in.
 type OrchestratorState string
 
 const (
@@ -82,11 +35,13 @@ const (
 	StateError                    OrchestratorState = "ERROR"
 )
 
+// Command is the message sent from the orchestrator to the ServiceDirector.
 type Command struct {
 	Instruction CommandInstruction `json:"instruction"`
 	Value       string             `json:"value"`
 }
 
+// CommandInstruction defines the action the ServiceDirector should take.
 type CommandInstruction string
 
 const (
@@ -94,12 +49,14 @@ const (
 	Teardown CommandInstruction = "teardown"
 )
 
+// CompletionEvent is the message sent from the ServiceDirector back to the orchestrator.
 type CompletionEvent struct {
 	Status       CompletionStatus `json:"status"` // "success" or "failure"
 	Value        string           `json:"value"`
 	ErrorMessage string           `json:"error_message,omitempty"`
 }
 
+// CompletionStatus is used as a key to signal the completion of specific, long-running tasks.
 type CompletionStatus string
 
 const (
@@ -107,13 +64,59 @@ const (
 	DataflowComplete     CompletionStatus = "dataflow_complete"
 )
 
+// OrchestratorResources holds the Pub/Sub resources managed by the orchestrator.
 type OrchestratorResources struct {
 	commandTopic           *pubsub.Topic
 	completionTopic        *pubsub.Topic
 	completionSubscription *pubsub.Subscription
 }
 
-// Orchestrator manages the deployment and verification of entire dataflows.
+// eventWaiter is a thread-safe mechanism to allow multiple goroutines
+// to wait for different, specific events.
+type eventWaiter struct {
+	mu      sync.Mutex
+	waiters map[CompletionStatus]chan struct{}
+}
+
+func newEventWaiter() *eventWaiter {
+	return &eventWaiter{
+		waiters: make(map[CompletionStatus]chan struct{}),
+	}
+}
+
+// await returns a channel that a caller can block on for a specific event.
+func (ew *eventWaiter) await(key CompletionStatus) <-chan struct{} {
+	ew.mu.Lock()
+	defer ew.mu.Unlock()
+	ch, exists := ew.waiters[key]
+	if !exists {
+		ch = make(chan struct{})
+		ew.waiters[key] = ch
+	}
+	return ch
+}
+
+// signal finds the channel for a given event and closes it to unblock waiters.
+func (ew *eventWaiter) signal(key CompletionStatus) {
+	ew.mu.Lock()
+	defer ew.mu.Unlock()
+	if ch, exists := ew.waiters[key]; exists {
+		select {
+		case <-ch: // Already closed.
+		default:
+			close(ch)
+		}
+	} else {
+		// No one is waiting yet. Create a pre-closed channel.
+		closedCh := make(chan struct{})
+		close(closedCh)
+		ew.waiters[key] = closedCh
+	}
+}
+
+// Orchestrator manages the deployment and verification of entire dataflows. It acts as the
+// "worker" for the Conductor, communicating with the deployed ServiceDirector via Pub/Sub
+// to trigger resource creation and listening for completion events.
 type Orchestrator struct {
 	archMutex   sync.Mutex
 	arch        *servicemanager.MicroserviceArchitecture
@@ -147,14 +150,40 @@ func NewOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceArchi
 		return nil, fmt.Errorf("failed to create deployer: %w", err)
 	}
 
-	// Create a cancellable context for the orchestrator's internal goroutines.
+	// Create a cancellable context for the orchestrator's internal background tasks.
+	internalCtx, cancel := context.WithCancel(ctx)
+
+	orch := &Orchestrator{
+		arch:                  arch,
+		logger:                logger.With().Str("component", "Orchestrator").Logger(),
+		deployer:              deployer,
+		psClient:              psClient,
+		eventWaiter:           newEventWaiter(),
+		stateChan:             make(chan OrchestratorState, 10),
+		OrchestratorResources: &OrchestratorResources{},
+		cancelFunc:            cancel,
+	}
+
+	// Start the initialization process in the background.
+	go orch.initialize(internalCtx)
+
+	return orch, nil
+}
+
+// NewOrchestratorWithClients creates a new Orchestrator with pre-existing clients,
+// which is useful for unit testing with mocks.
+func NewOrchestratorWithClients(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, psClient *pubsub.Client, deployer *deployment.CloudBuildDeployer, logger zerolog.Logger) (*Orchestrator, error) {
+	if arch.ProjectID == "" {
+		return nil, errors.New("ProjectID cannot be empty in the architecture definition")
+	}
+
 	internalCtx, cancel := context.WithCancel(ctx)
 
 	orch := &Orchestrator{
 		arch:                  arch,
 		logger:                logger,
-		deployer:              deployer,
 		psClient:              psClient,
+		deployer:              deployer,
 		eventWaiter:           newEventWaiter(),
 		stateChan:             make(chan OrchestratorState, 10),
 		OrchestratorResources: &OrchestratorResources{},
@@ -166,7 +195,7 @@ func NewOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceArchi
 	return orch, nil
 }
 
-// DeployServiceDirector now takes the map of service accounts.
+// DeployServiceDirector deploys the main ServiceDirector service.
 func (o *Orchestrator) DeployServiceDirector(ctx context.Context, saEmails map[string]string) (string, error) {
 	o.stateChan <- StateDeployingServiceDirector
 	o.logger.Info().Msg("Starting ServiceDirector deployment...")
@@ -193,12 +222,7 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, saEmails map[s
 	return serviceURL, nil
 }
 
-// Define a struct to hold the result of a single deployment.
-type deploymentResult struct {
-	serviceName string
-	serviceURL  string
-}
-
+// DeployDataflowServices deploys all application services within a given dataflow in parallel.
 func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName string, saEmails map[string]string, directorURL string) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Beginning parallel deployment of all application services...")
 
@@ -214,12 +238,9 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 
 	var wg sync.WaitGroup
 	errs := make(chan error, len(dataflow.Services))
-
-	// 1. Create a channel to receive successful deployment results.
 	results := make(chan deploymentResult, len(dataflow.Services))
 
 	for sName, sSpec := range dataflow.Services {
-		// Shadow variables for the goroutine.
 		serviceName := sName
 		serviceSpec := sSpec
 
@@ -237,10 +258,9 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-
 			o.logger.Info().Str("service", serviceName).Msg("Starting deployment...")
 
-			// Create a safe local copy of the spec for this deployment.
+			// Create a safe local copy of the spec and inject the director URL.
 			localSpec := *deploymentSpec
 			localSpec.EnvironmentVars = make(map[string]string)
 			for k, v := range deploymentSpec.EnvironmentVars {
@@ -254,10 +274,7 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 				errs <- fmt.Errorf("failed to deploy service '%s': %w", serviceName, err)
 				return
 			}
-
-			// 2. On success, send the result back to the main thread via the channel.
 			results <- deploymentResult{serviceName: serviceName, serviceURL: serviceURL}
-
 			o.logger.Info().Str("service", serviceName).Str("url", serviceURL).Msg("Deployment successful.")
 		}()
 	}
@@ -265,25 +282,25 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 	o.logger.Info().Msg("Waiting for all service deployments to complete...")
 	wg.Wait()
 	close(errs)
-	// 3. Close the results channel after all goroutines are done.
 	close(results)
 	o.logger.Info().Msg("All service deployments have completed.")
 
-	// 4. Safely process the results to update the main architecture spec.
+	// Safely process the results to update the main architecture spec.
 	for result := range results {
 		o.archMutex.Lock()
 		if svc, ok := o.arch.Dataflows[dataflowName].Services[result.serviceName]; ok {
-			svc.Deployment.ServiceURL = result.serviceURL
+			if svc.Deployment != nil {
+				svc.Deployment.ServiceURL = result.serviceURL
+				o.arch.Dataflows[dataflowName].Services[result.serviceName] = svc
+			}
 		}
 		o.archMutex.Unlock()
 	}
 
-	// Collect and aggregate any errors.
 	var deploymentErrors []string
 	for err := range errs {
 		deploymentErrors = append(deploymentErrors, err.Error())
 	}
-
 	if len(deploymentErrors) > 0 {
 		return fmt.Errorf("encountered %d error(s) during deployment: %s", len(deploymentErrors), strings.Join(deploymentErrors, "; "))
 	}
@@ -291,18 +308,17 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 	return nil
 }
 
-func (o *Orchestrator) StateChan() <-chan OrchestratorState {
-	return o.stateChan
-}
-
+// Teardown cleans up all long-lived resources created by the Orchestrator itself.
 func (o *Orchestrator) Teardown(ctx context.Context) error {
 	o.logger.Info().Msg("Starting Orchestrator cleanup...")
 	var errs []error
+
 	if o.cancelFunc != nil {
 		o.cancelFunc()
 		o.logger.Info().Msg("Orchestrator internal context cancelled.")
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
+
 	if o.commandTopic != nil {
 		o.logger.Info().Str("topic", o.commandTopic.ID()).Msg("Deleting command topic...")
 		if err := o.commandTopic.Delete(ctx); err != nil {
@@ -318,15 +334,17 @@ func (o *Orchestrator) Teardown(ctx context.Context) error {
 	if o.completionSubscription != nil {
 		o.logger.Info().Str("subscription", o.completionSubscription.ID()).Msg("Deleting completion subscription...")
 		if err := o.completionSubscription.Delete(ctx); err != nil {
-			o.logger.Warn().Err(err).Str("subscription", o.completionSubscription.ID()).Msg("Failed to delete completion subscription")
+			errs = append(errs, fmt.Errorf("failed to delete completion subscription %s: %w", o.completionSubscription.ID(), err))
 		}
 	}
+
 	o.closeOnce.Do(func() {
 		close(o.stateChan)
 		if o.psClient != nil {
-			o.psClient.Close()
+			_ = o.psClient.Close()
 		}
 	})
+
 	if len(errs) > 0 {
 		return fmt.Errorf("orchestrator cleanup encountered %d errors: %v", len(errs), errs)
 	}
@@ -334,31 +352,76 @@ func (o *Orchestrator) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) listenForEvents(ctx context.Context) {
-	err := o.completionSubscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
-		msg.Ack()
-		o.logger.Info().Str("data", string(msg.Data)).Msg("Orchestrator received event")
-		event := CompletionEvent{}
-		if json.Unmarshal(msg.Data, &event) != nil {
-			return
-		}
-		o.logger.Info().Str("status", string(event.Status)).Msg("got completion event")
-		switch event.Status {
-		case ServiceDirectorReady:
-			o.eventWaiter.signal(ServiceDirectorReady)
-		case DataflowComplete:
-			o.eventWaiter.signal(DataflowComplete)
-		default:
-			o.stateChan <- StateError
-		}
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		o.logger.Error().Err(err).Msg("Orchestrator event listener shut down with error")
-	}
+// TeardownCloudRunService deletes a specific Cloud Run service.
+func (o *Orchestrator) TeardownCloudRunService(ctx context.Context, serviceName string) error {
+	o.logger.Info().Str("service_name", serviceName).Msg("Tearing down Cloud Run service...")
+	return o.deployer.Teardown(ctx, serviceName)
 }
 
+// TeardownDataflowServices tears down all services associated with a specific dataflow in parallel.
+func (o *Orchestrator) TeardownDataflowServices(ctx context.Context, dataflowName string) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Beginning parallel teardown of all application services...")
+
+	o.archMutex.Lock()
+	dataflow, ok := o.arch.Dataflows[dataflowName]
+	o.archMutex.Unlock()
+
+	if !ok {
+		return fmt.Errorf("dataflow '%s' not found in architecture definition", dataflowName)
+	}
+	if len(dataflow.Services) == 0 {
+		o.logger.Info().Str("dataflow", dataflowName).Msg("No application services defined, skipping teardown.")
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(dataflow.Services))
+
+	for serviceName := range dataflow.Services {
+		serviceNameToDelete := serviceName
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := o.TeardownCloudRunService(ctx, serviceNameToDelete); err != nil {
+				errs <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	var teardownErrors []string
+	for err := range errs {
+		teardownErrors = append(teardownErrors, err.Error())
+	}
+	if len(teardownErrors) > 0 {
+		return fmt.Errorf("encountered %d error(s) during dataflow teardown: %s", len(teardownErrors), strings.Join(teardownErrors, "; "))
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully tore down all dataflow services.")
+	return nil
+}
+
+// TriggerDataflowSetup sends a command to the ServiceDirector to begin resource creation for a dataflow.
+func (o *Orchestrator) TriggerDataflowSetup(ctx context.Context, dataflowName string) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Publishing dataflow setup command...")
+	cmdPayload := Command{
+		Instruction: Setup,
+		Value:       dataflowName,
+	}
+	cmdMsg, err := json.Marshal(cmdPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal setup command: %w", err)
+	}
+	result := o.commandTopic.Publish(ctx, &pubsub.Message{Data: cmdMsg})
+	_, err = result.Get(ctx)
+	return err
+}
+
+// AwaitServiceReady blocks until the orchestrator receives a "setup_complete" event from the ServiceDirector.
 func (o *Orchestrator) AwaitServiceReady(ctx context.Context, serviceName string) error {
-	o.logger.Info().Str("service", serviceName).Str("status", string(ServiceDirectorReady)).Msg("Waiting for event...")
+	o.logger.Info().Str("service", serviceName).Str("event", string(ServiceDirectorReady)).Msg("Waiting for event...")
 	o.stateChan <- StateAwaitingCompletion
 	select {
 	case <-o.eventWaiter.await(ServiceDirectorReady):
@@ -371,8 +434,9 @@ func (o *Orchestrator) AwaitServiceReady(ctx context.Context, serviceName string
 	}
 }
 
+// AwaitDataflowReady blocks until the orchestrator receives a "dataflow_complete" event.
 func (o *Orchestrator) AwaitDataflowReady(ctx context.Context, dataflowName string) error {
-	o.logger.Info().Str("dataflow", dataflowName).Str("status", string(DataflowComplete)).Msg("Waiting for event...")
+	o.logger.Info().Str("dataflow", dataflowName).Str("event", string(DataflowComplete)).Msg("Waiting for event...")
 	o.stateChan <- StateAwaitingCompletion
 	select {
 	case <-o.eventWaiter.await(DataflowComplete):
@@ -386,66 +450,7 @@ func (o *Orchestrator) AwaitDataflowReady(ctx context.Context, dataflowName stri
 	}
 }
 
-func (o *Orchestrator) initialize(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			o.stateChan <- StateError
-			close(o.stateChan)
-		}
-	}()
-	o.stateChan <- StateInitializing
-	if err := o.ensureCommandInfra(ctx); err != nil {
-		o.logger.Error().Err(err).Msg("Failed to set up command infrastructure")
-		o.stateChan <- StateError
-		return
-	}
-	o.logger.Info().Msg("start listening for service director events")
-	go o.listenForEvents(ctx)
-	o.stateChan <- StateCommandInfraReady
-}
-
-func (o *Orchestrator) ensureCommandInfra(ctx context.Context) error {
-	commandTopicID := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
-	commandTopic, err := ensureTopicExists(ctx, o.psClient, commandTopicID)
-	if err != nil {
-		return err
-	}
-	o.commandTopic = commandTopic
-	completionTopicID := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
-	completionTopic, err := ensureTopicExists(ctx, o.psClient, completionTopicID)
-	if err != nil {
-		return err
-	}
-	o.completionTopic = completionTopic
-	subID := fmt.Sprintf("orchestrator-listener-%s", uuid.New().String()[:8])
-	sub, err := o.psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-		Topic:       completionTopic,
-		AckDeadline: 10 * time.Second,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create completion subscription: %w", err)
-	}
-	o.completionSubscription = sub
-	return nil
-}
-
-func (o *Orchestrator) TeardownServiceDirector(ctx context.Context, serviceName string) error {
-	o.logger.Info().Str("service_name", serviceName).Msg("Tearing down ServiceDirector...")
-	return o.deployer.Teardown(ctx, serviceName)
-}
-
-func (o *Orchestrator) TriggerDataflowSetup(ctx context.Context, dataflowName string) error {
-	o.logger.Info().Str("dataflow", dataflowName).Msg("dataflow setup")
-	cmdPayload := Command{
-		Instruction: Setup,
-		Value:       dataflowName,
-	}
-	cmdMsg, _ := json.Marshal(cmdPayload)
-	result := o.commandTopic.Publish(ctx, &pubsub.Message{Data: cmdMsg})
-	_, err := result.Get(ctx)
-	return err
-}
-
+// AwaitRevisionReady polls a Cloud Run service until its latest created revision reports a healthy status.
 func (o *Orchestrator) AwaitRevisionReady(ctx context.Context, spec servicemanager.ServiceSpec) error {
 	o.logger.Info().Str("service", spec.Name).Msg("Verifying service is ready by polling the latest revision...")
 	regionalEndpoint := fmt.Sprintf("%s-run.googleapis.com:443", spec.Deployment.Region)
@@ -454,15 +459,14 @@ func (o *Orchestrator) AwaitRevisionReady(ctx context.Context, spec servicemanag
 		return fmt.Errorf("failed to create regional Run client for health check: %w", err)
 	}
 	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", o.arch.ProjectID, spec.Deployment.Region, spec.Name)
-	timeout := time.After(3 * time.Minute)
+
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timeout:
-			return fmt.Errorf("timeout: service %s never became ready", spec.Name)
 		case <-ticker.C:
 			svc, err := runService.Projects.Locations.Services.Get(fullServiceName).Do()
 			if err != nil {
@@ -485,86 +489,76 @@ func (o *Orchestrator) AwaitRevisionReady(ctx context.Context, spec servicemanag
 	}
 }
 
-// TeardownCloudRunService deletes a specific Cloud Run service.
-// This is a more accurately named replacement for TeardownServiceDirector.
-func (o *Orchestrator) TeardownCloudRunService(ctx context.Context, serviceName string) error {
-	o.logger.Info().Str("service_name", serviceName).Msg("Tearing down Cloud Run service...")
-	return o.deployer.Teardown(ctx, serviceName)
+// StateChan returns a read-only channel for monitoring the orchestrator's state.
+func (o *Orchestrator) StateChan() <-chan OrchestratorState {
+	return o.stateChan
 }
 
-// TeardownDataflowServices tears down all services associated with a specific dataflow in parallel.
-func (o *Orchestrator) TeardownDataflowServices(ctx context.Context, dataflowName string) error {
-	o.logger.Info().Str("dataflow", dataflowName).Msg("Beginning parallel teardown of all application services...")
-
-	o.archMutex.Lock()
-	dataflow, ok := o.arch.Dataflows[dataflowName]
-	o.archMutex.Unlock()
-
-	if !ok {
-		return fmt.Errorf("dataflow '%s' not found in architecture definition", dataflowName)
+// initialize sets up the command-and-control Pub/Sub infrastructure and starts the event listener.
+func (o *Orchestrator) initialize(ctx context.Context) {
+	o.stateChan <- StateInitializing
+	err := o.ensureCommandInfra(ctx)
+	if err != nil {
+		o.logger.Error().Err(err).Msg("Failed to set up command infrastructure")
+		o.stateChan <- StateError
+		return
 	}
+	o.logger.Info().Msg("Starting to listen for ServiceDirector events...")
+	go o.listenForEvents(ctx)
+	o.stateChan <- StateCommandInfraReady
+}
 
-	if len(dataflow.Services) == 0 {
-		o.logger.Info().Str("dataflow", dataflowName).Msg("No application services defined, skipping teardown.")
-		return nil
+// listenForEvents is a background goroutine that receives completion events from the ServiceDirector.
+func (o *Orchestrator) listenForEvents(ctx context.Context) {
+	err := o.completionSubscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		msg.Ack()
+		o.logger.Info().Str("data", string(msg.Data)).Msg("Orchestrator received event")
+		var event CompletionEvent
+		err := json.Unmarshal(msg.Data, &event)
+		if err != nil {
+			o.logger.Error().Err(err).Msg("Failed to unmarshal completion event")
+			return
+		}
+
+		o.logger.Info().Str("status", string(event.Status)).Msg("Signaling completion event")
+		o.eventWaiter.signal(event.Status)
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		o.logger.Error().Err(err).Msg("Orchestrator event listener shut down with error")
+		o.stateChan <- StateError
 	}
+}
 
-	var wg sync.WaitGroup
-	errs := make(chan error, len(dataflow.Services))
-
-	for serviceName := range dataflow.Services {
-		// Shadow variable for the goroutine
-		serviceNameToDelete := serviceName
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := o.TeardownCloudRunService(ctx, serviceNameToDelete); err != nil {
-				// Send any errors to the channel instead of returning.
-				errs <- err
-			}
-		}()
+// ensureCommandInfra creates the Pub/Sub topics and subscription needed for the orchestrator to work.
+func (o *Orchestrator) ensureCommandInfra(ctx context.Context) error {
+	commandTopicID := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]
+	commandTopic, err := ensureTopicExists(ctx, o.psClient, commandTopicID)
+	if err != nil {
+		return err
 	}
+	o.commandTopic = commandTopic
 
-	// Wait for all teardowns to finish.
-	wg.Wait()
-	close(errs)
-
-	// Collect and aggregate any errors.
-	var teardownErrors []string
-	for err := range errs {
-		teardownErrors = append(teardownErrors, err.Error())
+	completionTopicID := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"]
+	completionTopic, err := ensureTopicExists(ctx, o.psClient, completionTopicID)
+	if err != nil {
+		return err
 	}
+	o.completionTopic = completionTopic
 
-	if len(teardownErrors) > 0 {
-		return fmt.Errorf("encountered %d error(s) during dataflow teardown: %s", len(teardownErrors), strings.Join(teardownErrors, "; "))
+	subID := fmt.Sprintf("orchestrator-listener-%s", uuid.New().String()[:8])
+	sub, err := o.psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
+		Topic:       completionTopic,
+		AckDeadline: 10 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create completion subscription: %w", err)
 	}
-
-	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully tore down all dataflow services.")
+	o.completionSubscription = sub
 	return nil
 }
 
-// NewOrchestratorWithClients creates a new Orchestrator with pre-existing clients,
-// which is useful for unit testing with mocks.
-func NewOrchestratorWithClients(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, psClient *pubsub.Client, deployer *deployment.CloudBuildDeployer, logger zerolog.Logger) (*Orchestrator, error) {
-	if arch.ProjectID == "" {
-		return nil, errors.New("ProjectID cannot be empty in the architecture definition")
-	}
-
-	internalCtx, cancel := context.WithCancel(ctx)
-
-	orch := &Orchestrator{
-		arch:                  arch,
-		logger:                logger,
-		psClient:              psClient,
-		deployer:              deployer,
-		eventWaiter:           newEventWaiter(),
-		stateChan:             make(chan OrchestratorState, 10),
-		OrchestratorResources: &OrchestratorResources{},
-		cancelFunc:            cancel,
-	}
-
-	go orch.initialize(internalCtx)
-
-	return orch, nil
+// deploymentResult is a simple struct to pass deployment outcomes from goroutines back to the main thread.
+type deploymentResult struct {
+	serviceName string
+	serviceURL  string
 }

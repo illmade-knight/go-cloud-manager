@@ -1,7 +1,9 @@
 package iam_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -11,7 +13,7 @@ import (
 )
 
 func TestPlanRolesForApplicationServices(t *testing.T) {
-	// ARRANGE: Create a comprehensive test architecture.
+	// ARRANGE: Create a comprehensive test architecture with various IAM requirements.
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{
 			ProjectID: "test-project",
@@ -27,7 +29,7 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 						Name:           "publisher-service",
 						ServiceAccount: "publisher-sa",
 						Deployment: &servicemanager.DeploymentSpec{
-							Region: "europe-west1",
+							Region: "europe-west1", // Specific region for this service.
 						},
 					},
 					"subscriber-service": {
@@ -46,21 +48,35 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 					"invoker-service": {
 						Name:           "invoker-service",
 						ServiceAccount: "invoker-sa",
-						Dependencies:   []string{"publisher-service"},
+						Dependencies:   []string{"publisher-service"}, // Depends on another service.
+					},
+					"explicit-policy-service": {
+						Name:           "explicit-policy-service",
+						ServiceAccount: "explicit-sa",
 					},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{
 							CloudResource:   servicemanager.CloudResource{Name: "data-topic"},
-							ProducerService: "publisher-service",
+							ProducerService: "publisher-service", // Implicit publisher role.
 						},
 					},
 					Subscriptions: []servicemanager.SubscriptionConfig{
 						{
 							CloudResource:   servicemanager.CloudResource{Name: "data-sub"},
 							Topic:           "data-topic",
-							ConsumerService: "subscriber-service",
+							ConsumerService: "subscriber-service", // Implicit subscriber role.
+						},
+					},
+					GCSBuckets: []servicemanager.GCSBucket{
+						{
+							CloudResource: servicemanager.CloudResource{
+								Name: "explicit-policy-bucket",
+								IAMPolicy: []servicemanager.IAM{ // Explicit policy grant.
+									{Name: "explicit-policy-service", Role: "roles/storage.objectViewer"},
+								},
+							},
 						},
 					},
 				},
@@ -71,6 +87,10 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 	planner := iam.NewRolePlanner(zerolog.Nop())
 
 	// ACT: Run the planner.
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+	_ = ctx // Avoid unused variable warning.
+
 	plan, err := planner.PlanRolesForApplicationServices(arch)
 	require.NoError(t, err)
 	require.NotNil(t, plan)
@@ -92,7 +112,6 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 		require.Len(t, bindings, 2)
 
 		expectedSubscriber := iam.IAMBinding{ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.subscriber"}
-		// Crucially, the viewer role should be on the TOPIC, not the subscription.
 		expectedViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
 
 		assert.Contains(t, bindings, expectedSubscriber)
@@ -118,5 +137,13 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 			ResourceLocation: "europe-west1",
 		}
 		assert.Contains(t, bindings, expectedInvoker)
+	})
+
+	t.Run("Service gets explicit role from iam_access_policy", func(t *testing.T) {
+		bindings := plan["explicit-sa"]
+		require.Len(t, bindings, 1)
+
+		expectedViewer := iam.IAMBinding{ResourceType: "gcs_bucket", ResourceID: "explicit-policy-bucket", Role: "roles/storage.objectViewer"}
+		assert.Contains(t, bindings, expectedViewer)
 	})
 }

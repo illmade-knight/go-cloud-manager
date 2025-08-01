@@ -28,6 +28,7 @@ type BQDataset interface {
 	Update(ctx context.Context, metaToUpdate bigquery.DatasetMetadataToUpdate, etag string) (*bigquery.DatasetMetadata, error)
 	Delete(ctx context.Context) error
 	Table(tableID string) BQTable
+	// DeleteWithContents recursively deletes all tables in the dataset, then the dataset itself.
 	DeleteWithContents(ctx context.Context) error
 }
 
@@ -108,19 +109,20 @@ func isNotFound(err error) bool {
 
 // --- BigQuery Manager ---
 
-// BigQueryManager handles the creation and deletion of BigQuery datasets and tables.
+// BigQueryManager handles the creation, verification, and deletion of BigQuery datasets and tables.
 type BigQueryManager struct {
 	client      BQClient
 	logger      zerolog.Logger
 	environment Environment
 }
 
+// NewAdapter creates a new BQClient adapter from a concrete *bigquery.Client.
+// This is useful for testing or wrapping an existing client.
 func NewAdapter(client *bigquery.Client) BQClient {
 	return &bqClientAdapter{client: client}
 }
 
-// NewBigQueryManager creates a new BigQueryManager.
-// It no longer requires the schemaRegistry at construction time.
+// NewBigQueryManager creates a new manager for orchestrating BigQuery resources.
 func NewBigQueryManager(client BQClient, logger zerolog.Logger, environment Environment) (*BigQueryManager, error) {
 	if client == nil {
 		return nil, errors.New("BigQuery client (BQClient interface) cannot be nil")
@@ -132,11 +134,13 @@ func NewBigQueryManager(client BQClient, logger zerolog.Logger, environment Envi
 	}, nil
 }
 
-// CreateResources creates all configured BigQuery datasets and tables concurrently.
+// CreateResources creates all configured BigQuery datasets and tables concurrently based on the provided spec.
+// It is idempotent; if a resource already exists, it will be skipped.
 func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedBigQueryTable, []ProvisionedBigQueryDataset, error) {
 	m.logger.Info().Msg("Starting BigQuery setup...")
-	if err := m.Validate(resources); err != nil {
-		return nil, nil, fmt.Errorf("BigQuery configuration validation failed: %w", err)
+	validationErr := m.Validate(resources)
+	if validationErr != nil {
+		return nil, nil, fmt.Errorf("BigQuery configuration validation failed: %w", validationErr)
 	}
 
 	var allErrors []error
@@ -147,16 +151,18 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 	provisionedDatasetChan := make(chan ProvisionedBigQueryDataset, len(resources.BigQueryDatasets))
 	provisionedTableChan := make(chan ProvisionedBigQueryTable, len(resources.BigQueryTables))
 
-	// Create Datasets concurrently
+	// Create Datasets concurrently.
 	for _, dsCfg := range resources.BigQueryDatasets {
 		wg.Add(1)
 		go func(dsCfg BigQueryDataset) {
 			defer wg.Done()
-			m.logger.Info().Str("dataset", dsCfg.Name).Msg("Processing dataset...")
+			log := m.logger.With().Str("dataset", dsCfg.Name).Logger()
+			log.Info().Msg("Processing dataset...")
+
 			dataset := m.client.Dataset(dsCfg.Name)
 			_, err := dataset.Metadata(ctx)
 			if err == nil {
-				m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset already exists, skipping creation.")
+				log.Info().Msg("Dataset already exists, skipping creation.")
 				provisionedDatasetChan <- ProvisionedBigQueryDataset{Name: dsCfg.Name}
 				return
 			}
@@ -165,14 +171,15 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				return
 			}
 
-			m.logger.Info().Str("dataset", dsCfg.Name).Msg("Creating dataset...")
-			if err := dataset.Create(ctx, &bigquery.DatasetMetadata{
+			log.Info().Msg("Creating dataset...")
+			createErr := dataset.Create(ctx, &bigquery.DatasetMetadata{
 				Labels:   dsCfg.Labels,
 				Location: dsCfg.Location,
-			}); err != nil {
-				errChan <- fmt.Errorf("failed to create dataset '%s': %w", dsCfg.Name, err)
+			})
+			if createErr != nil {
+				errChan <- fmt.Errorf("failed to create dataset '%s': %w", dsCfg.Name, createErr)
 			} else {
-				m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset created successfully.")
+				log.Info().Msg("Dataset created successfully.")
 				provisionedDatasetChan <- ProvisionedBigQueryDataset{Name: dsCfg.Name}
 			}
 		}(dsCfg)
@@ -183,16 +190,17 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 		provisionedDatasets = append(provisionedDatasets, pd)
 	}
 
-	// Create Tables concurrently
+	// Create Tables concurrently, now that datasets are likely to exist.
 	for _, tableCfg := range resources.BigQueryTables {
 		wg.Add(1)
 		go func(tableCfg BigQueryTable) {
 			defer wg.Done()
-			m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Processing table...")
+			log := m.logger.With().Str("dataset", tableCfg.Dataset).Str("table", tableCfg.Name).Logger()
+			log.Info().Msg("Processing table...")
 			table := m.client.Dataset(tableCfg.Dataset).Table(tableCfg.Name)
 			_, err := table.Metadata(ctx)
 			if err == nil {
-				m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table already exists, skipping creation.")
+				log.Info().Msg("Table already exists, skipping creation.")
 				provisionedTableChan <- ProvisionedBigQueryTable{Dataset: tableCfg.Dataset, Name: tableCfg.Name}
 				return
 			}
@@ -200,11 +208,10 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				errChan <- fmt.Errorf("failed to check existence of table '%s' in dataset '%s': %w", tableCfg.Name, tableCfg.Dataset, err)
 				return
 			}
-			// Use the schemaRegistry passed in at runtime.
-			schema, _ := registeredSchemas[tableCfg.SchemaType]
-			bqSchema, err := bigquery.InferSchema(schema)
-			if err != nil {
-				errChan <- fmt.Errorf("failed to infer BigQuery schema for '%s': %w", tableCfg.SchemaType, err)
+			schemaStruct, _ := registeredSchemas[tableCfg.SchemaType]
+			bqSchema, inferErr := bigquery.InferSchema(schemaStruct)
+			if inferErr != nil {
+				errChan <- fmt.Errorf("failed to infer BigQuery schema for type '%s': %w", tableCfg.SchemaType, inferErr)
 				return
 			}
 
@@ -222,11 +229,12 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				}
 			}
 
-			m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Creating table...")
-			if err := table.Create(ctx, meta); err != nil {
-				errChan <- fmt.Errorf("failed to create table '%s' in dataset '%s': %w", tableCfg.Name, tableCfg.Dataset, err)
+			log.Info().Msg("Creating table...")
+			createErr := table.Create(ctx, meta)
+			if createErr != nil {
+				errChan <- fmt.Errorf("failed to create table '%s' in dataset '%s': %w", tableCfg.Name, tableCfg.Dataset, createErr)
 			} else {
-				m.logger.Info().Str("table", tableCfg.Name).Str("dataset", tableCfg.Dataset).Msg("Table created successfully.")
+				log.Info().Msg("Table created successfully.")
 				provisionedTableChan <- ProvisionedBigQueryTable{Dataset: tableCfg.Dataset, Name: tableCfg.Name}
 			}
 		}(tableCfg)
@@ -251,7 +259,8 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 	return provisionedTables, provisionedDatasets, nil
 }
 
-// Validate performs pre-flight checks on the resource configuration.
+// Validate performs pre-flight checks on the BigQuery resource configuration.
+// It ensures that all specified schema types have been registered with the manager.
 func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
 	m.logger.Info().Msg("Validating BigQuery resource configuration...")
 	var allErrors []error
@@ -264,10 +273,9 @@ func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
 
 	for _, tableCfg := range resources.BigQueryTables {
 		if tableCfg.Name == "" || tableCfg.Dataset == "" {
-			allErrors = append(allErrors, fmt.Errorf("table '%s' has an empty name or dataset", tableCfg.Name))
+			allErrors = append(allErrors, fmt.Errorf("table configuration for '%s' has an empty name or dataset", tableCfg.Name))
 		}
 
-		// This now correctly uses the package-level registry from servicemanager.go
 		registryMu.RLock()
 		_, ok := registeredSchemas[tableCfg.SchemaType]
 		registryMu.RUnlock()
@@ -285,16 +293,19 @@ func (m *BigQueryManager) Validate(resources CloudResourcesSpec) error {
 	return nil
 }
 
-// Verify checks if the specified BigQuery resources exist.
+// Verify checks if all specified BigQuery datasets and tables exist.
 func (m *BigQueryManager) Verify(ctx context.Context, resources CloudResourcesSpec) error {
 	m.logger.Info().Msg("Verifying BigQuery resources...")
 	var allErrors []error
 
-	if err := m.VerifyDatasets(ctx, resources.BigQueryDatasets); err != nil {
-		allErrors = append(allErrors, err)
+	datasetErr := m.VerifyDatasets(ctx, resources.BigQueryDatasets)
+	if datasetErr != nil {
+		allErrors = append(allErrors, datasetErr)
 	}
-	if err := m.VerifyTables(ctx, resources.BigQueryTables); err != nil {
-		allErrors = append(allErrors, err)
+
+	tableErr := m.VerifyTables(ctx, resources.BigQueryTables)
+	if tableErr != nil {
+		allErrors = append(allErrors, tableErr)
 	}
 
 	if len(allErrors) > 0 {
@@ -349,36 +360,37 @@ func (m *BigQueryManager) VerifyTables(ctx context.Context, tablesToVerify []Big
 	return errors.Join(allErrors...)
 }
 
-// Teardown deletes all configured BigQuery resources by deleting the parent datasets.
+// Teardown deletes all configured BigQuery resources by deleting the parent datasets with their contents.
+// This is more efficient than deleting each table individually.
 func (m *BigQueryManager) Teardown(ctx context.Context, resources CloudResourcesSpec) error {
 	m.logger.Info().Msg("Starting BigQuery teardown...")
 	var allErrors []error
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(resources.BigQueryDatasets))
 
-	// CORRECTED: The explicit table deletion loop has been removed.
-	// We only need to delete the parent datasets with their contents.
 	m.logger.Info().Int("count", len(resources.BigQueryDatasets)).Msg("Tearing down BigQuery datasets...")
 	for _, dsCfg := range resources.BigQueryDatasets {
 		wg.Add(1)
 		go func(dsCfg BigQueryDataset) {
 			defer wg.Done()
+			log := m.logger.With().Str("dataset", dsCfg.Name).Logger()
 			if dsCfg.TeardownProtection {
-				m.logger.Warn().Str("dataset", dsCfg.Name).Msg("Teardown protection enabled, skipping deletion.")
+				log.Warn().Msg("Teardown protection enabled, skipping deletion.")
 				return
 			}
 			dataset := m.client.Dataset(dsCfg.Name)
-			m.logger.Info().Str("dataset", dsCfg.Name).Msg("Attempting to delete dataset with its contents...")
+			log.Info().Msg("Attempting to delete dataset with its contents...")
 
-			// This single call is sufficient to delete the dataset and all tables within it.
-			if err := dataset.DeleteWithContents(ctx); err != nil {
+			// This single call deletes the dataset and all tables within it.
+			err := dataset.DeleteWithContents(ctx)
+			if err != nil {
 				if isNotFound(err) {
-					m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset not found, skipping.")
+					log.Info().Msg("Dataset not found, skipping deletion.")
 				} else {
 					errChan <- fmt.Errorf("failed to delete dataset %s: %w", dsCfg.Name, err)
 				}
 			} else {
-				m.logger.Info().Str("dataset", dsCfg.Name).Msg("Dataset deleted successfully.")
+				log.Info().Msg("Dataset and its contents deleted successfully.")
 			}
 		}(dsCfg)
 	}

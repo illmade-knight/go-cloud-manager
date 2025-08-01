@@ -12,112 +12,111 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
+	"time"
 )
 
-// TestStorageManager_Integration tests the manager against a live GCS emulator.
+// TestStorageManager_Integration tests the manager against a live GCS emulator,
+// covering the full Create, Update, and Teardown lifecycle.
 func TestStorageManager_Integration(t *testing.T) {
-	ctx := context.Background()
+	// --- ARRANGE: Set up context, configuration, and clients ---
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
 	projectID := "gcs-it-project"
 	runID := uuid.New().String()[:8]
-
-	// --- 1. Define Resource Names and Configuration ---
-	// Use the helper to generate a valid and unique bucket name.
 	bucketName := servicemanager.GenerateTestBucketName("it-bucket-" + runID)
 
-	// Initial configuration for the bucket
-	initialResources := servicemanager.CloudResourcesSpec{
-		GCSBuckets: []servicemanager.GCSBucket{
-			{
-				CloudResource: servicemanager.CloudResource{
-					Name:   bucketName,
-					Labels: map[string]string{"env": "test", "phase": "initial"},
-				},
-				Location:          "US",
-				StorageClass:      "STANDARD",
-				VersioningEnabled: false,
-			},
-		},
-	}
-
-	// --- 2. Setup Emulator and Real GCS Client ---
+	// Set up the GCS emulator and a client connected to it.
 	t.Log("Setting up GCS emulator...")
 	gcsConfig := emulators.GetDefaultGCSConfig(projectID, "")
 	gcsConnection := emulators.SetupGCSEmulator(t, ctx, gcsConfig)
 	gcsClient := emulators.GetStorageClient(t, ctx, gcsConfig, gcsConnection.ClientOptions)
-	defer gcsClient.Close()
+	t.Cleanup(func() {
+		err := gcsClient.Close()
+		if err != nil {
+			t.Logf("Error closing GCS client: %v", err)
+		}
+	})
 
-	// --- 3. Create the StorageManager ---
+	// Create the StorageManager instance.
 	logger := zerolog.New(zerolog.NewConsoleWriter())
 	environment := servicemanager.Environment{ProjectID: projectID}
 	storageAdapter := servicemanager.NewGCSClientAdapter(gcsClient)
 	manager, err := servicemanager.NewStorageManager(storageAdapter, logger, environment)
 	require.NoError(t, err)
 
-	// =========================================================================
-	// --- Phase 1: CREATE Resource ---
-	// =========================================================================
-	t.Log("--- Starting CreateResources (Initial) ---")
-	provisioned, err := manager.CreateResources(ctx, initialResources)
-	require.NoError(t, err)
-	assert.Len(t, provisioned, 1, "Should provision one bucket")
-	t.Log("--- CreateResources finished successfully ---")
+	// --- ACT & ASSERT: Execute and verify each lifecycle phase ---
 
-	// =========================================================================
-	// --- Phase 2: VERIFY Resource Exists with Correct Attributes ---
-	// =========================================================================
-	t.Log("--- Verifying resource existence and initial attributes ---")
-	attrs, err := gcsClient.Bucket(bucketName).Attrs(ctx)
-	require.NoError(t, err, "GCS bucket should exist after creation")
-	assert.Equal(t, "STANDARD", attrs.StorageClass, "StorageClass should be STANDARD")
-	assert.Equal(t, "initial", attrs.Labels["phase"], "Label 'phase' should be 'initial'")
-	t.Log("--- Verification successful ---")
-
-	// =========================================================================
-	// --- Phase 3: UPDATE Resource ---
-	// =========================================================================
-	t.Log("--- Starting CreateResources (Update) ---")
-	// Define an updated configuration for the same bucket
-	updatedResources := servicemanager.CloudResourcesSpec{
-		GCSBuckets: []servicemanager.GCSBucket{
-			{
-				CloudResource: servicemanager.CloudResource{
-					Name:   bucketName,
-					Labels: map[string]string{"env": "test", "phase": "updated"}, // Change a label
+	// Phase 1: CREATE Resource
+	t.Run("CreateResource", func(t *testing.T) {
+		t.Log("--- Starting CreateResources (Initial) ---")
+		initialResources := servicemanager.CloudResourcesSpec{
+			GCSBuckets: []servicemanager.GCSBucket{
+				{
+					CloudResource: servicemanager.CloudResource{
+						Name:   bucketName,
+						Labels: map[string]string{"env": "test", "phase": "initial"},
+					},
+					Location:          "US",
+					StorageClass:      "STANDARD",
+					VersioningEnabled: false,
 				},
-				StorageClass:      "NEARLINE", // Change storage class
-				VersioningEnabled: true,       // Enable versioning
 			},
-		},
-	}
-	// Calling CreateResources again on an existing resource should trigger an update.
-	_, err = manager.CreateResources(ctx, updatedResources)
-	require.NoError(t, err)
-	t.Log("--- Update finished successfully ---")
+		}
 
-	// =========================================================================
-	// --- Phase 4: VERIFY Updated Attributes ---
-	// =========================================================================
-	t.Log("--- Verifying updated attributes ---")
-	updatedAttrs, err := gcsClient.Bucket(bucketName).Attrs(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, "NEARLINE", updatedAttrs.StorageClass, "StorageClass should be updated to NEARLINE")
-	assert.True(t, updatedAttrs.VersioningEnabled, "Versioning should be enabled after update")
-	assert.Equal(t, "updated", updatedAttrs.Labels["phase"], "Label 'phase' should be 'updated'")
-	t.Log("--- Verification of update successful ---")
+		provisioned, createErr := manager.CreateResources(ctx, initialResources)
+		require.NoError(t, createErr)
+		assert.Len(t, provisioned, 1, "Should provision one bucket")
+		t.Log("--- CreateResources finished successfully ---")
 
-	// =========================================================================
-	// --- Phase 5: TEARDOWN Resource ---
-	// =========================================================================
-	t.Log("--- Starting Teardown ---")
-	err = manager.Teardown(ctx, initialResources) // Use any spec that contains the bucket name
-	require.NoError(t, err, "Teardown should not fail")
-	t.Log("--- Teardown finished successfully ---")
+		// Verify initial attributes immediately after creation.
+		attrs, attrsErr := gcsClient.Bucket(bucketName).Attrs(ctx)
+		require.NoError(t, attrsErr, "GCS bucket should exist after creation")
+		assert.Equal(t, "STANDARD", attrs.StorageClass)
+		assert.Equal(t, "initial", attrs.Labels["phase"])
+	})
 
-	// =========================================================================
-	// --- Phase 6: VERIFY Resource is Deleted ---
-	// =========================================================================
-	t.Log("--- Verifying resource is deleted from emulator ---")
-	_, err = gcsClient.Bucket(bucketName).Attrs(ctx)
-	assert.ErrorIs(t, err, storage.ErrBucketNotExist, "GCS bucket should NOT exist after teardown")
-	t.Log("--- Deletion verification successful ---")
+	// Phase 2: UPDATE Resource
+	t.Run("UpdateResource", func(t *testing.T) {
+		t.Log("--- Starting CreateResources (Update) ---")
+		updatedResources := servicemanager.CloudResourcesSpec{
+			GCSBuckets: []servicemanager.GCSBucket{
+				{
+					CloudResource: servicemanager.CloudResource{
+						Name:   bucketName,
+						Labels: map[string]string{"env": "test", "phase": "updated"},
+					},
+					StorageClass:      "NEARLINE",
+					VersioningEnabled: true,
+				},
+			},
+		}
+		// Calling CreateResources again on an existing resource triggers an update.
+		_, updateErr := manager.CreateResources(ctx, updatedResources)
+		require.NoError(t, updateErr)
+		t.Log("--- Update finished successfully ---")
+
+		// Verify updated attributes.
+		updatedAttrs, attrsErr := gcsClient.Bucket(bucketName).Attrs(ctx)
+		require.NoError(t, attrsErr)
+		assert.Equal(t, "NEARLINE", updatedAttrs.StorageClass)
+		assert.True(t, updatedAttrs.VersioningEnabled)
+		assert.Equal(t, "updated", updatedAttrs.Labels["phase"])
+	})
+
+	// Phase 3: TEARDOWN Resource
+	t.Run("TeardownResource", func(t *testing.T) {
+		t.Log("--- Starting Teardown ---")
+		// Teardown spec only needs the resource name.
+		resourcesForTeardown := servicemanager.CloudResourcesSpec{
+			GCSBuckets: []servicemanager.GCSBucket{{CloudResource: servicemanager.CloudResource{Name: bucketName}}},
+		}
+		teardownErr := manager.Teardown(ctx, resourcesForTeardown)
+		require.NoError(t, teardownErr)
+		t.Log("--- Teardown finished successfully ---")
+
+		// Verify resource is deleted.
+		_, attrsErr := gcsClient.Bucket(bucketName).Attrs(ctx)
+		assert.ErrorIs(t, attrsErr, storage.ErrBucketNotExist, "GCS bucket should NOT exist after teardown")
+	})
 }

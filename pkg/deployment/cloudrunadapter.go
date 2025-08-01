@@ -12,36 +12,39 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// CloudRunAPI defines the contract for a adminClient that deploys services to Cloud Run.
+// CloudRunAPI defines the contract for a client that deploys services to Cloud Run.
 type CloudRunAPI interface {
 	CreateOrUpdateService(ctx context.Context, parent, serviceID string, serviceConfig *run.GoogleCloudRunV2Service) error
 }
 
-// googleCloudRunAPIAdapter implements the CloudRunAPI interface using the real Google adminClient.
+// googleCloudRunAPIAdapter implements the CloudRunAPI interface using the real Google client.
 type googleCloudRunAPIAdapter struct {
 	runService *run.Service
 	logger     zerolog.Logger
 }
 
 // NewGoogleCloudRunAPIAdapter creates the concrete adapter for the Cloud Run API.
+// It must be initialized with a specific region, as the Cloud Run Admin API is regional.
 func NewGoogleCloudRunAPIAdapter(ctx context.Context, region string, logger zerolog.Logger, opts ...option.ClientOption) (CloudRunAPI, error) {
 	endpoint := fmt.Sprintf("%s-run.googleapis.com:443", region)
 	runOpts := append(opts, option.WithEndpoint(endpoint))
 	runService, err := run.NewService(ctx, runOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Run service adminClient: %w", err)
+		return nil, fmt.Errorf("failed to create Cloud Run service client: %w", err)
 	}
 	return &googleCloudRunAPIAdapter{runService: runService, logger: logger}, nil
 }
 
-// CreateOrUpdateService checks if a service exists and then creates or patches it.
+// CreateOrUpdateService checks if a service exists and then either creates a new one
+// or patches the existing one with the new configuration.
 func (a *googleCloudRunAPIAdapter) CreateOrUpdateService(ctx context.Context, parent, serviceID string, serviceConfig *run.GoogleCloudRunV2Service) error {
 	fullServiceName := fmt.Sprintf("%s/services/%s", parent, serviceID)
 	_, err := a.runService.Projects.Locations.Services.Get(fullServiceName).Context(ctx).Do()
 
 	var op *run.GoogleLongrunningOperation
 	if err != nil {
-		if e, ok := status.FromError(err); ok && e.Code() == codes.NotFound {
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
 			a.logger.Info().Str("service", serviceID).Msg("Service not found. Creating new Cloud Run service...")
 			op, err = a.runService.Projects.Locations.Services.Create(parent, serviceConfig).ServiceId(serviceID).Context(ctx).Do()
 		} else {
@@ -65,11 +68,16 @@ func (a *googleCloudRunAPIAdapter) CreateOrUpdateService(ctx context.Context, pa
 		}
 		if getOp.Done {
 			if getOp.Error != nil {
-				return fmt.Errorf("Cloud Run operation failed with status: %s", getOp.Error.Message)
+				return fmt.Errorf("cloud Run operation failed with status: %s", getOp.Error.Message)
 			}
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-time.After(2 * time.Second):
+			// Continue polling.
+		case <-ctx.Done():
+			return ctx.Err() // Exit if the context is canceled.
+		}
 	}
 
 	return nil

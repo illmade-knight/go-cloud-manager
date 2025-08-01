@@ -6,13 +6,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/illmade-knight/go-test/auth"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
@@ -34,73 +34,73 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 		logger.Info().Msg("✅ Test running in POOLED mode.")
 		t.Setenv("TEST_SA_POOL_MODE", "true")
 		t.Setenv("TEST_SA_POOL_PREFIX", "it-")
-		t.Setenv("TEST_SA_POOL_NO_CREATE", "true")
-	} else {
-		logger.Info().Msg("Running in STANDARD mode.")
 	}
 
-	// --- 1. Arrange ---
-	sourcePath, cleanupSource := createTestSourceDir(t, toyAppSource)
-	defer cleanupSource()
+	// --- Arrange ---
+	var arch *servicemanager.MicroserviceArchitecture
+	var iamOrch *orchestration.IAMOrchestrator
+	var orch *orchestration.Orchestrator
 
-	runID := uuid.New().String()[:8]
-	serviceName := fmt.Sprintf("toy-app-%s", runID)
+	t.Run("Arrange - Build Architecture and Orchestrators", func(t *testing.T) {
+		sourcePath, cleanupSource := createTestSourceDir(t, toyAppSource)
+		t.Cleanup(cleanupSource)
 
-	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			ProjectID: projectID,
-			Region:    "us-central1",
-		},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name:           serviceName,
-			ServiceAccount: fmt.Sprintf("toy-sa-%s", runID),
-			Deployment: &servicemanager.DeploymentSpec{
-				SourcePath:          sourcePath,
-				BuildableModulePath: ".",
+		runID := uuid.New().String()[:8]
+		serviceName := fmt.Sprintf("toy-app-%s", runID)
+
+		arch = &servicemanager.MicroserviceArchitecture{
+			Environment: servicemanager.Environment{
+				ProjectID: projectID,
+				Region:    "us-central1",
 			},
-		},
-	}
-
-	// The hydration function will now validate the architecture and fill in defaults.
-	err := servicemanager.HydrateArchitecture(arch, "test-images", "")
-	require.NoError(t, err)
-
-	// --- 2. Create the Orchestrators ---
-	iamOrch, err := orchestration.NewIAMOrchestrator(ctx, arch, logger)
-	require.NoError(t, err)
-	orch, err := orchestration.NewOrchestrator(ctx, arch, logger)
-	require.NoError(t, err)
-
-	// --- 3. Setup Unified Teardown ---
-	t.Cleanup(func() {
-		t.Logf("--- Starting Full Cleanup for %s ---", arch.ServiceManagerSpec.Name)
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cleanupCancel()
-
-		// The orchestrator's teardown will handle the service deletion.
-		if err := orch.Teardown(cleanupCtx); err != nil {
-			t.Errorf("Orchestrator teardown failed: %v", err)
+			ServiceManagerSpec: servicemanager.ServiceSpec{
+				Name:           serviceName,
+				ServiceAccount: fmt.Sprintf("toy-sa-%s", runID),
+				Deployment: &servicemanager.DeploymentSpec{
+					SourcePath:          sourcePath,
+					BuildableModulePath: ".",
+				},
+			},
 		}
-		// The IAM orchestrator's teardown will handle SA cleanup (real or fake).
-		if err := iamOrch.Teardown(cleanupCtx); err != nil {
-			t.Errorf("IAM teardown failed: %v", err)
-		}
+
+		err := servicemanager.HydrateArchitecture(arch, "test-images", "", logger)
+		require.NoError(t, err)
+
+		iamOrch, err = orchestration.NewIAMOrchestrator(ctx, arch, logger)
+		require.NoError(t, err)
+		orch, err = orchestration.NewOrchestrator(ctx, arch, logger)
+		require.NoError(t, err)
+
+		// Setup Unified Teardown
+		t.Cleanup(func() {
+			t.Logf("--- Starting Full Cleanup for %s ---", arch.ServiceManagerSpec.Name)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cleanupCancel()
+
+			if err := orch.Teardown(cleanupCtx); err != nil {
+				t.Errorf("Orchestrator teardown failed: %v", err)
+			}
+			if err := iamOrch.Teardown(cleanupCtx); err != nil {
+				t.Errorf("IAM teardown failed: %v", err)
+			}
+		})
 	})
 
-	// --- 4. Act ---
-	// Step 4a: Setup IAM for the service.
-	saEmails, err := iamOrch.SetupServiceDirectorIAM(ctx)
-	require.NoError(t, err)
+	// --- Act & Assert ---
+	t.Run("Act and Assert Deployment", func(t *testing.T) {
+		// Step 1: Setup IAM for the service.
+		saEmails, err := iamOrch.SetupServiceDirectorIAM(ctx)
+		require.NoError(t, err)
 
-	// Step 4b: Deploy the service.
-	serviceURL, err := orch.DeployServiceDirector(ctx, saEmails)
-	require.NoError(t, err)
-	require.NotEmpty(t, serviceURL)
+		// Step 2: Deploy the service.
+		serviceURL, err := orch.DeployServiceDirector(ctx, saEmails)
+		require.NoError(t, err)
+		require.NotEmpty(t, serviceURL)
 
-	// Step 4c: Await for the service to become healthy.
-	err = orch.AwaitRevisionReady(ctx, arch.ServiceManagerSpec)
-	require.NoError(t, err)
+		// Step 3: Await for the service to become healthy.
+		err = orch.AwaitRevisionReady(ctx, arch.ServiceManagerSpec)
+		require.NoError(t, err)
 
-	// --- 5. Assert ---
-	logger.Info().Str("url", serviceURL).Msg("✅ Deployment successful. Service is healthy and reachable.")
+		logger.Info().Str("url", serviceURL).Msg("✅ Deployment successful. Service is healthy and reachable.")
+	})
 }

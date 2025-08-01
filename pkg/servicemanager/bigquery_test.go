@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/bigquery"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -93,16 +94,16 @@ type TestSchema struct {
 }
 
 // TestMain is run once for the entire package before any other tests are run.
+// It handles global setup, like registering schemas for the tests.
 func TestMain(m *testing.M) {
-	// --- One-time setup ---
-	// Register the schema so it's available globally for all tests.
+	// One-time setup: Register the schema so it's available for all tests.
 	servicemanager.RegisterSchema("testSchemaV1", TestSchema{})
 	log.Println("Test schema registered globally for all tests in the servicemanager_test package.")
 
-	// --- Run all tests ---
+	// Run all tests in the package.
 	exitCode := m.Run()
 
-	// --- One-time teardown (if needed) ---
+	// One-time teardown (if needed).
 	os.Exit(exitCode)
 }
 
@@ -118,7 +119,7 @@ func setupBigQueryManagerTest(t *testing.T) (*servicemanager.BigQueryManager, *M
 	return manager, mockClient
 }
 
-// getTestBigQueryResources correctly initializes the embedded CloudResource struct.
+// getTestBigQueryResources provides a consistent set of test resources.
 func getTestBigQueryResources() servicemanager.CloudResourcesSpec {
 	return servicemanager.CloudResourcesSpec{
 		BigQueryDatasets: []servicemanager.BigQueryDataset{
@@ -177,7 +178,8 @@ func TestBigQueryManager_Validate(t *testing.T) {
 }
 
 func TestBigQueryManager_CreateResources(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 	notFoundErr := &googleapi.Error{Code: http.StatusNotFound, Message: "not found"}
 
 	t.Run("Success - Create All", func(t *testing.T) {
@@ -237,53 +239,50 @@ func TestBigQueryManager_CreateResources(t *testing.T) {
 }
 
 func TestBigQueryManager_Teardown(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	t.Run("Success - Delete All", func(t *testing.T) {
 		manager, mockClient := setupBigQueryManagerTest(t)
 		resources := getTestBigQueryResources()
 
 		mockDs1, mockDs2 := new(MockBQDataset), new(MockBQDataset)
-		mockClient.On("Dataset", "test_dataset_1").Return(mockDs1)
-		mockClient.On("Dataset", "test_dataset_2").Return(mockDs2)
+		mockClient.On("Dataset", "test_dataset_1").Return(mockDs1).Once()
+		mockClient.On("Dataset", "test_dataset_2").Return(mockDs2).Once()
+
+		// The implementation ONLY deletes the dataset with contents.
+		// It does not and should not delete tables individually.
 		mockDs1.On("DeleteWithContents", ctx).Return(nil).Once()
 		mockDs2.On("DeleteWithContents", ctx).Return(nil).Once()
 
-		mockTbl1, mockTbl2 := new(MockBQTable), new(MockBQTable)
-		mockDs1.On("Table", "test_table_1").Return(mockTbl1).Once()
-		mockTbl1.On("Delete", ctx).Return(nil).Once()
-		mockDs2.On("Table", "test_table_2").Return(mockTbl2).Once()
-		mockTbl2.On("Delete", ctx).Return(nil).Once()
-
 		err := manager.Teardown(ctx, resources)
 		assert.NoError(t, err)
+
+		// Assert that the mocks were called as expected.
 		mockClient.AssertExpectations(t)
+		mockDs1.AssertExpectations(t)
+		mockDs2.AssertExpectations(t)
 	})
 
 	t.Run("Teardown Protection Enabled", func(t *testing.T) {
 		manager, mockClient := setupBigQueryManagerTest(t)
 		resources := getTestBigQueryResources()
-		// Correctly set the teardown protection on the embedded struct
+		// Protect the first dataset. The tables within it are implicitly protected.
 		resources.BigQueryDatasets[0].CloudResource.TeardownProtection = true
-		resources.BigQueryTables[1].CloudResource.TeardownProtection = true
 
-		mockDs1, mockDs2 := new(MockBQDataset), new(MockBQDataset)
-		mockClient.On("Dataset", "test_dataset_1").Return(mockDs1)
-		mockClient.On("Dataset", "test_dataset_2").Return(mockDs2)
-
-		mockTbl1, mockTbl2 := new(MockBQTable), new(MockBQTable)
-		mockDs1.On("Table", "test_table_1").Return(mockTbl1).Once()
-		mockDs2.On("Table", "test_table_2").Return(mockTbl2).Once()
-
-		// Expect deletion ONLY on unprotected resources
-		//mockDs2.On("DeleteWithContents", ctx).Return(nil).Once() // ds2 is not protected
+		mockDs2 := new(MockBQDataset)
+		// Expect client call only for the unprotected dataset.
+		mockClient.On("Dataset", "test_dataset_2").Return(mockDs2).Once()
+		// Expect DeleteWithContents to be called only on the unprotected dataset.
+		mockDs2.On("DeleteWithContents", ctx).Return(nil).Once()
 
 		err := manager.Teardown(ctx, resources)
-
 		assert.NoError(t, err)
+
+		// Verify that the client was never asked for the protected dataset and that no
+		// deletion was attempted on it.
+		mockClient.AssertNotCalled(t, "Dataset", "test_dataset_1")
 		mockClient.AssertExpectations(t)
-		// Assert that deletion was NOT called on protected resources
-		mockDs1.AssertNotCalled(t, "DeleteWithContents", ctx)
-		mockTbl2.AssertNotCalled(t, "Delete", ctx)
+		mockDs2.AssertExpectations(t)
 	})
 }

@@ -5,11 +5,9 @@ package deployment_test
 import (
 	"archive/tar"
 	"bytes"
-	"cloud.google.com/go/storage"
 	"compress/gzip"
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +16,8 @@ import (
 
 	"cloud.google.com/go/cloudbuild/apiv1/v2"
 	"cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
+	"cloud.google.com/go/storage"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +38,7 @@ func TestStandardBuilderPull(t *testing.T) {
 
 	buildClient, err := cloudbuild.NewClient(ctx)
 	require.NoError(t, err, "Failed to create Cloud Build client")
-	defer buildClient.Close()
+	t.Cleanup(func() { _ = buildClient.Close() })
 
 	// --- Define a Minimal Build Request ---
 	// This build has no source code. It only tries to pull a standard
@@ -76,99 +76,8 @@ func TestStandardBuilderPull(t *testing.T) {
 	t.Log("✅ Diagnostic build SUCCEEDED. The environment can pull standard builder images.")
 }
 
-// TestFullBuildCycleWithCorrectSteps validates the entire build process using the
+// TestFinalBuildRecipe validates the entire build process using the
 // known-good, two-step build configuration discovered from 'gcloud run deploy'.
-func TestFullBuildCycleWithCorrectSteps(t *testing.T) {
-	// --- Setup ---
-	projectID := CheckGCPAuth(t)
-	region := "us-central1"
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	buildClient, err := cloudbuild.NewClient(ctx)
-	require.NoError(t, err)
-	defer buildClient.Close()
-	storageClient, err := storage.NewClient(ctx)
-	require.NoError(t, err)
-	defer storageClient.Close()
-
-	// --- 1. Prepare and Upload Source Code ---
-	t.Log("Preparing and uploading source code...")
-	sourceDir, cleanupSourceDir := createTestSourceDir(t, helloWorldSource)
-	defer cleanupSourceDir()
-
-	sourceBucketName := fmt.Sprintf("%s_cloudbuild", projectID)
-	sourceObject := fmt.Sprintf("source/diagnostic-test-%d.tar.gz", time.Now().Unix())
-
-	err = uploadDirToGCS(ctx, storageClient, sourceDir, sourceBucketName, sourceObject)
-	require.NoError(t, err)
-	t.Logf("Source uploaded to gs://%s/%s", sourceBucketName, sourceObject)
-
-	t.Cleanup(func() {
-		t.Logf("Cleaning up GCS object: %s", sourceObject)
-		err := storageClient.Bucket(sourceBucketName).Object(sourceObject).Delete(context.Background())
-		if err != nil && err != storage.ErrObjectNotExist {
-			t.Errorf("Failed to delete GCS source object: %v", err)
-		}
-	})
-
-	// --- 2. Define and Trigger the Build ---
-	outputImageTag := fmt.Sprintf("%s-docker.pkg.dev/%s/test-images/diagnostic-test:%d", region, projectID, time.Now().Unix())
-
-	mainBuildCommand := fmt.Sprintf(
-		`trap "[ -f /workspace/.google-builder-output/output ] && mv /workspace/.google-builder-output/output $$BUILDER_OUTPUT" EXIT ; pack build %s --network cloudbuild --volume /workspace:/builder-output/:rw`,
-		outputImageTag,
-	)
-
-	req := &cloudbuildpb.CreateBuildRequest{
-		ProjectId: projectID,
-		Build: &cloudbuildpb.Build{
-			Source: &cloudbuildpb.Source{
-				Source: &cloudbuildpb.Source_StorageSource{
-					StorageSource: &cloudbuildpb.StorageSource{
-						Bucket: sourceBucketName,
-						Object: sourceObject,
-					},
-				},
-			},
-			Steps: []*cloudbuildpb.BuildStep{
-				{
-					Name:       "gcr.io/k8s-skaffold/pack",
-					Id:         "pre-buildpack",
-					Entrypoint: "/bin/sh",
-					Args:       []string{"-c", "chmod a+w /workspace && pack config default-builder gcr.io/buildpacks/builder:latest && pack config trusted-builders add gcr.io/buildpacks/builder:latest"},
-				},
-				{
-					Name:       "gcr.io/k8s-skaffold/pack",
-					Id:         "build",
-					Entrypoint: "/bin/sh",
-					// CORRECTED: Removed the 'BUILDER_OUTPUT' environment variable.
-					// The Cloud Build service provides this automatically.
-					Env: []string{
-						"GOOGLE_LABEL_RUN_IMAGE=gcr.io/buildpacks/google-22/run",
-					},
-					Args: []string{"-c", mainBuildCommand},
-				},
-			},
-			Images: []string{outputImageTag},
-		},
-	}
-
-	// --- 3. Act & Assert ---
-	t.Logf("Triggering two-step build for image: %s", outputImageTag)
-	op, err := buildClient.CreateBuild(ctx, req)
-	require.NoError(t, err, "Failed to create the diagnostic build")
-
-	resp, err := op.Wait(ctx)
-	require.NoError(t, err, "The diagnostic build operation failed while waiting")
-
-	finalStatus := resp.GetStatus()
-	t.Logf("Diagnostic build completed with final status: %s", finalStatus)
-	require.Equal(t, cloudbuildpb.Build_SUCCESS, finalStatus, "The two-step diagnostic build did not succeed.")
-
-	t.Log("✅ Diagnostic build SUCCEEDED. The two-step process is correct.")
-}
-
 func TestFinalBuildRecipe(t *testing.T) {
 	// --- Setup ---
 	projectID := CheckGCPAuth(t)
@@ -178,15 +87,15 @@ func TestFinalBuildRecipe(t *testing.T) {
 
 	buildClient, err := cloudbuild.NewClient(ctx)
 	require.NoError(t, err)
-	defer buildClient.Close()
+	t.Cleanup(func() { _ = buildClient.Close() })
 	storageClient, err := storage.NewClient(ctx)
 	require.NoError(t, err)
-	defer storageClient.Close()
+	t.Cleanup(func() { _ = storageClient.Close() })
 
 	// --- 1. Prepare and Upload Source Code ---
 	t.Log("Preparing and uploading source code...")
 	sourceDir, cleanupSourceDir := createTestSourceDir(t, helloWorldSource)
-	defer cleanupSourceDir()
+	t.Cleanup(cleanupSourceDir)
 
 	sourceBucketName := fmt.Sprintf("%s_cloudbuild", projectID)
 	sourceObject := fmt.Sprintf("source/final-diagnostic-test-%d.tar.gz", time.Now().Unix())
@@ -293,7 +202,9 @@ func uploadDirToGCS(ctx context.Context, client *storage.Client, sourceDir, buck
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		defer func() {
+			_ = file.Close()
+		}()
 		_, err = io.Copy(tarWriter, file)
 		return err
 	})
@@ -301,12 +212,13 @@ func uploadDirToGCS(ctx context.Context, client *storage.Client, sourceDir, buck
 	if err != nil {
 		return fmt.Errorf("failed to walk source directory '%s': %w", sourceDir, err)
 	}
-	tarWriter.Close()
-	gzipWriter.Close()
+	_ = tarWriter.Close()
+
+	_ = gzipWriter.Close()
 
 	w := client.Bucket(bucket).Object(objectName).NewWriter(ctx)
 	if _, err = io.Copy(w, buf); err != nil {
-		w.Close() // Teardown writer on error
+		_ = w.Close() // Teardown writer on error
 		return fmt.Errorf("failed to copy source to GCS: %w", err)
 	}
 	return w.Close()

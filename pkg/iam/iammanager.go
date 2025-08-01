@@ -10,9 +10,12 @@ import (
 
 // IAMManager defines the high-level orchestration logic for applying IAM policies.
 type IAMManager interface {
+	// ApplyIAMForService plans and applies all necessary IAM roles for a single service
+	// within a given dataflow.
 	ApplyIAMForService(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, dataflowName string, serviceName string) error
 }
 
+// simpleIAMManager is the concrete implementation of the IAMManager interface.
 type simpleIAMManager struct {
 	client  IAMClient
 	logger  zerolog.Logger
@@ -20,7 +23,7 @@ type simpleIAMManager struct {
 }
 
 // NewIAMManager creates a new IAMManager.
-// It is now simpler and no longer creates a full IAM plan upon initialization.
+// It is a lightweight constructor that initializes the manager with its dependencies.
 func NewIAMManager(client IAMClient, logger zerolog.Logger) (IAMManager, error) {
 	return &simpleIAMManager{
 		client:  client,
@@ -30,9 +33,14 @@ func NewIAMManager(client IAMClient, logger zerolog.Logger) (IAMManager, error) 
 }
 
 // ApplyIAMForService plans and applies all necessary IAM roles for a single service.
-// It now looks up the dataflow by name and runs the planner just-in-time.
+// This is the core orchestration method of the manager. It performs the following steps:
+// 1. Looks up the specified dataflow and service from the architecture.
+// 2. Invokes the RolePlanner to generate a complete IAM plan for all application services.
+// 3. Filters the plan to get the specific bindings required for the target service's service account.
+// 4. Ensures the service account exists, creating it if necessary.
+// 5. Iterates through the planned bindings and applies each one using the IAMClient.
 func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, dataflowName string, serviceName string) error {
-	// Lookup the dataflow object from the architecture using the name.
+	// Look up the dataflow object from the architecture using the provided name.
 	dataflow, ok := arch.Dataflows[dataflowName]
 	if !ok {
 		return fmt.Errorf("dataflow '%s' not found in architecture", dataflowName)
@@ -40,7 +48,7 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servic
 
 	im.logger.Info().Str("service", serviceName).Str("dataflow", dataflow.Name).Msg("Planning and applying IAM policies...")
 
-	// 1. Plan roles for all services now that resources are expected to exist.
+	// 1. Plan roles for all services just-in-time, ensuring the plan is based on the latest architecture state.
 	iamPlan, err := im.planner.PlanRolesForApplicationServices(arch)
 	if err != nil {
 		return fmt.Errorf("failed to generate IAM plan for service '%s': %w", serviceName, err)
@@ -52,13 +60,14 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servic
 	}
 	serviceAccountName := serviceSpec.ServiceAccount
 
-	// 2. Look up the bindings from the plan we just created.
+	// 2. Look up the specific bindings for this service's service account from the generated plan.
 	bindings, ok := iamPlan[serviceAccountName]
 	if !ok {
 		im.logger.Info().Str("service_account", serviceAccountName).Msg("No IAM bindings were planned for this service. Nothing to apply.")
 		return nil
 	}
 
+	// 3. Ensure the service account exists before trying to grant it permissions.
 	saEmail, err := im.client.EnsureServiceAccountExists(ctx, serviceAccountName)
 	if err != nil {
 		return fmt.Errorf("failed to ensure service account '%s' exists: %w", serviceAccountName, err)
@@ -66,15 +75,18 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servic
 
 	member := "serviceAccount:" + saEmail
 
-	// 3. Execute the plan.
+	// 4. Execute the plan by applying each binding.
 	for _, binding := range bindings {
 		im.logger.Info().
-			Str("resource", binding.ResourceID).
+			Str("member", member).
 			Str("role", binding.Role).
+			Str("resource_type", binding.ResourceType).
+			Str("resource_id", binding.ResourceID).
 			Msgf("Applying binding for service '%s'", serviceName)
 
-		if err := im.client.AddResourceIAMBinding(ctx, binding, member); err != nil {
-			return fmt.Errorf("failed to apply binding for resource '%s' with role '%s': %w", binding.ResourceID, binding.Role, err)
+		err = im.client.AddResourceIAMBinding(ctx, binding, member)
+		if err != nil {
+			return fmt.Errorf("failed to apply binding for resource '%s' with role '%s' to member '%s': %w", binding.ResourceID, binding.Role, member, err)
 		}
 	}
 

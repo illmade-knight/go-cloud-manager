@@ -13,7 +13,7 @@ import (
 // --- Toy Application Source Code Definitions ---
 
 // toyAppSource defines a minimal, dependency-free "hello world" application.
-// It's perfect for basic deployment verification.
+// It's used for basic deployment verification tests.
 var toyAppSource = map[string]string{
 	"go.mod": `
 module toy-app-for-testing
@@ -42,10 +42,8 @@ func main() {
 }
 
 // serviceDirectorAppSource defines a more realistic, but still self-contained,
-// version of your ServiceDirector application for testing.
-// serviceDirectorAppSource defines a more realistic, but still self-contained,
-// version of your ServiceDirector application for testing. It listens for a command
-// on one Pub/Sub topic and publishes a reply on another.
+// version of the ServiceDirector application for testing purposes. It listens for a command
+// on one Pub/Sub topic and publishes a reply on another, simulating the real application's behavior.
 var serviceDirectorAppSource = map[string]string{
 	"go.mod": `
 module toy-servicedirector
@@ -73,40 +71,36 @@ import (
 
 // Command represents the structure of a message from the orchestrator.
 type Command struct {
-	Name         string 
-	DataflowName string 
+	Instruction  string 
+	Value        string 
 }
 
 // CompletionEvent is the message published back to the orchestrator.
 type CompletionEvent struct {
 	Status       string 
-	DataflowName string 
+	Value        string 
 	ErrorMessage string
 }
 
 func main() {
-	// Use zerolog to mimic the real application's logging.
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	ctx := context.Background()
 
-	// 1. Get configuration from environment variables, just like a real service.
 	projectID := os.Getenv("PROJECT_ID")
 	commandTopicID := os.Getenv("SD_COMMAND_TOPIC")
-	commandSubID := os.Getenv("SD_COMMAND_SUBSCRIPTION") // This app creates its own sub
+	commandSubID := os.Getenv("SD_COMMAND_SUBSCRIPTION")
 	completionTopicID := os.Getenv("SD_COMPLETION_TOPIC")
 
 	if projectID == "" || commandTopicID == "" || commandSubID == "" || completionTopicID == "" {
 		logger.Fatal().Msg("Missing required environment variables (PROJECT_ID, SD_COMMAND_TOPIC, etc.)")
 	}
 
-	// 2. Create a real Pub/Sub client.
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create Pub/Sub client")
 	}
-	defer psClient.Teardown()
+	defer psClient.Close()
 
-	// 3. Ensure the command subscription exists.
 	commandTopic := psClient.Topic(commandTopicID)
 	sub := psClient.Subscription(commandSubID)
 	exists, err := sub.Exists(ctx)
@@ -124,7 +118,6 @@ func main() {
 		}
 	}
 
-	// 4. Start a simple web server for Cloud Run health checks.
 	go func() {
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "OK") })
 		port := os.Getenv("PORT"); if port == "" { port = "8080" }
@@ -133,7 +126,6 @@ func main() {
 		}
 	}()
 
-	// 5. Listen for commands and publish replies.
 	logger.Info().Str("subscription", commandSubID).Msg("Toy ServiceDirector starting to listen for commands...")
 	err = sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 		msg.Ack()
@@ -145,12 +137,10 @@ func main() {
 			return
 		}
 
-		// Fake doing some work...
 		time.Sleep(2 * time.Second)
 
-		// Publish the completion event.
 		completionTopic := psClient.Topic(completionTopicID)
-		event := CompletionEvent{Status: "success", DataflowName: cmd.DataflowName}
+		event := CompletionEvent{Status: "setup_complete", Value: cmd.Value}
 		eventData, _ := json.Marshal(event)
 
 		result := completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
@@ -186,5 +176,7 @@ func createTestSourceDir(t *testing.T, files map[string]string) (string, func())
 		require.NoError(t, err, "Failed to write source file")
 	}
 
-	return tmpDir, func() { os.RemoveAll(tmpDir) }
+	return tmpDir, func() {
+		_ = os.RemoveAll(tmpDir)
+	}
 }

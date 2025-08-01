@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/iam"
 	"cloud.google.com/go/storage"
@@ -25,33 +26,32 @@ type mockGCSBucketHandle struct {
 }
 
 // The following methods implement the gcsBucketHandle interface for the mock.
-
 func (m *mockGCSBucketHandle) Attrs(ctx context.Context) (*storage.BucketAttrs, error) {
 	if m.attrsFn != nil {
 		return m.attrsFn(ctx)
 	}
-	return nil, errors.New("Attrs not implemented in mock")
+	return nil, errors.New("attrs not implemented in mock")
 }
 
 func (m *mockGCSBucketHandle) Create(ctx context.Context, projectID string, attrs *storage.BucketAttrs) error {
 	if m.createFn != nil {
 		return m.createFn(ctx, projectID, attrs)
 	}
-	return errors.New("Create not implemented in mock")
+	return errors.New("create not implemented in mock")
 }
 
 func (m *mockGCSBucketHandle) Update(ctx context.Context, attrs storage.BucketAttrsToUpdate) (*storage.BucketAttrs, error) {
 	if m.updateFn != nil {
 		return m.updateFn(ctx, attrs)
 	}
-	return nil, errors.New("Update not implemented in mock")
+	return nil, errors.New("update not implemented in mock")
 }
 
 func (m *mockGCSBucketHandle) Delete(ctx context.Context) error {
 	if m.deleteFn != nil {
 		return m.deleteFn(ctx)
 	}
-	return errors.New("Delete not implemented in mock")
+	return errors.New("delete not implemented in mock")
 }
 
 func (m *mockGCSBucketHandle) IAM() *iam.Handle {
@@ -152,7 +152,9 @@ func TestToGCSBucketAttrs(t *testing.T) {
 
 // TestGCSBucketHandleAdapter_Update verifies the adapter's update logic.
 func TestGCSBucketHandleAdapter_Update(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+
 	var capturedUpdateAttrs storage.BucketAttrsToUpdate
 	updateCalled := false
 
@@ -171,7 +173,7 @@ func TestGCSBucketHandleAdapter_Update(t *testing.T) {
 		},
 	}
 
-	// Create the adapter with the mocked handle. This is now valid.
+	// Create the adapter with the mocked handle.
 	adapter := &gcsBucketHandleAdapter{bucket: mockHandle}
 
 	// Define the generic update request

@@ -11,17 +11,18 @@ import (
 	"google.golang.org/api/googleapi"
 )
 
-// StorageManager handles the creation and deletion of storage buckets.
+// StorageManager handles the creation, update, verification, and deletion of storage buckets.
+// It orchestrates these operations through a generic StorageClient interface.
 type StorageManager struct {
 	client      StorageClient
 	logger      zerolog.Logger
 	environment Environment
 }
 
-// NewStorageManager creates a new StorageManager.
+// NewStorageManager creates a new manager for orchestrating storage bucket resources.
 func NewStorageManager(client StorageClient, logger zerolog.Logger, environment Environment) (*StorageManager, error) {
 	if client == nil {
-		return nil, fmt.Errorf("storage client (StorageClient interface) cannot be nil")
+		return nil, errors.New("storage client (StorageClient interface) cannot be nil")
 	}
 	return &StorageManager{
 		client:      client,
@@ -30,22 +31,29 @@ func NewStorageManager(client StorageClient, logger zerolog.Logger, environment 
 	}, nil
 }
 
-// isBucketNotExist checks if an error signifies that a bucket does not exist.
+// isBucketNotExist checks for various forms of "not found" errors from the storage client.
+// This is necessary because different operations can return different error types for the same logical condition.
 func isBucketNotExist(err error) bool {
+	// iterator.Done is the standard error when a resource is not found via an iterator.
 	if errors.Is(err, Done) {
 		return true
 	}
+	// The Google Cloud API often returns a specific error type with an HTTP 404 status code.
 	var gapiErr *googleapi.Error
-	if errors.As(err, &gapiErr) && gapiErr.Code == 404 {
-		return true
+	if errors.As(err, &gapiErr) {
+		if gapiErr.Code == 404 {
+			return true
+		}
 	}
+	// As a fallback, check for the common error string from the GCS client.
 	if err != nil && strings.Contains(err.Error(), "storage: bucket doesn't exist") {
 		return true
 	}
 	return false
 }
 
-// CreateResources creates or updates storage buckets concurrently.
+// CreateResources creates new buckets or updates existing ones based on the provided spec.
+// This operation is idempotent and can be run multiple times safely.
 func (sm *StorageManager) CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedGCSBucket, error) {
 	sm.logger.Info().Str("project_id", sm.environment.ProjectID).Msg("Starting Storage Bucket setup")
 
@@ -62,34 +70,37 @@ func (sm *StorageManager) CreateResources(ctx context.Context, resources CloudRe
 		wg.Add(1)
 		go func(cfg GCSBucket) {
 			defer wg.Done()
+			log := sm.logger.With().Str("bucket", cfg.Name).Logger()
 			bucketHandle := sm.client.Bucket(cfg.Name)
 			_, err := bucketHandle.Attrs(ctx)
 
+			// If err is nil, the bucket exists, so we update it.
 			if err == nil {
-				// Bucket exists, so update it.
-				sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Bucket already exists, attempting to update.")
+				log.Info().Msg("Bucket already exists, attempting to update.")
 				updateAttrs := BucketAttributesToUpdate{
 					StorageClass:      &cfg.StorageClass,
 					VersioningEnabled: cfg.VersioningEnabled,
 					Labels:            cfg.Labels,
 					LifecycleRules:    &cfg.LifecycleRules,
 				}
-				if _, err := bucketHandle.Update(ctx, updateAttrs); err != nil {
-					errChan <- fmt.Errorf("failed to update bucket '%s': %w", cfg.Name, err)
+				_, updateErr := bucketHandle.Update(ctx, updateAttrs)
+				if updateErr != nil {
+					errChan <- fmt.Errorf("failed to update bucket '%s': %w", cfg.Name, updateErr)
 				} else {
-					sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Bucket updated successfully.")
+					log.Info().Msg("Bucket updated successfully.")
 					provisionedChan <- ProvisionedGCSBucket{Name: cfg.Name}
 				}
 				return
 			}
 
+			// If the error is anything other than "not found," it's an unexpected issue.
 			if !isBucketNotExist(err) {
 				errChan <- fmt.Errorf("failed to check existence of bucket '%s': %w", cfg.Name, err)
 				return
 			}
 
-			// Bucket does not exist, so create it.
-			sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Bucket does not exist, creating.")
+			// Bucket does not exist, so we create it.
+			log.Info().Msg("Bucket does not exist, creating.")
 			createAttrs := &BucketAttributes{
 				Name:              cfg.Name,
 				Location:          cfg.Location,
@@ -98,10 +109,11 @@ func (sm *StorageManager) CreateResources(ctx context.Context, resources CloudRe
 				Labels:            cfg.Labels,
 				LifecycleRules:    cfg.LifecycleRules,
 			}
-			if err := bucketHandle.Create(ctx, sm.environment.ProjectID, createAttrs); err != nil {
-				errChan <- fmt.Errorf("failed to create bucket '%s': %w", cfg.Name, err)
+			createErr := bucketHandle.Create(ctx, sm.environment.ProjectID, createAttrs)
+			if createErr != nil {
+				errChan <- fmt.Errorf("failed to create bucket '%s': %w", cfg.Name, createErr)
 			} else {
-				sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Bucket created successfully.")
+				log.Info().Msg("Bucket created successfully.")
 				provisionedChan <- ProvisionedGCSBucket{Name: cfg.Name}
 			}
 		}(bucketCfg)
@@ -129,7 +141,8 @@ func (sm *StorageManager) CreateResources(ctx context.Context, resources CloudRe
 	return provisionedBuckets, nil
 }
 
-// Teardown deletes storage buckets concurrently.
+// Teardown deletes all specified storage buckets concurrently.
+// It will skip buckets that have teardown protection enabled.
 func (sm *StorageManager) Teardown(ctx context.Context, resources CloudResourcesSpec) error {
 	sm.logger.Info().Msg("Starting Storage Bucket teardown")
 
@@ -137,35 +150,38 @@ func (sm *StorageManager) Teardown(ctx context.Context, resources CloudResources
 	errChan := make(chan error, len(resources.GCSBuckets))
 
 	for _, bucketCfg := range resources.GCSBuckets {
-		if bucketCfg.TeardownProtection {
-			sm.logger.Warn().Str("name", bucketCfg.Name).Msg("teardown protection in place, skipping")
-			continue
-		}
-		if bucketCfg.Name == "" {
-			sm.logger.Warn().Msg("Skipping bucket with empty name during teardown")
-			continue
-		}
-
 		wg.Add(1)
 		go func(cfg GCSBucket) {
 			defer wg.Done()
-			bucketHandle := sm.client.Bucket(cfg.Name)
+			log := sm.logger.With().Str("bucket", cfg.Name).Logger()
 
-			if _, err := bucketHandle.Attrs(ctx); isBucketNotExist(err) {
-				sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Bucket does not exist, skipping deletion.")
+			if cfg.TeardownProtection {
+				log.Warn().Msg("Teardown protection enabled, skipping deletion.")
+				return
+			}
+			if cfg.Name == "" {
+				sm.logger.Warn().Msg("Skipping bucket with empty name during teardown")
 				return
 			}
 
-			sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Attempting to delete bucket...")
-			if err := bucketHandle.Delete(ctx); err != nil {
+			bucketHandle := sm.client.Bucket(cfg.Name)
+			_, err := bucketHandle.Attrs(ctx)
+			if isBucketNotExist(err) {
+				log.Info().Msg("Bucket does not exist, skipping deletion.")
+				return
+			}
+
+			log.Info().Msg("Attempting to delete bucket...")
+			deleteErr := bucketHandle.Delete(ctx)
+			if deleteErr != nil {
 				// Provide a more specific error for the common "bucket not empty" case.
-				if strings.Contains(strings.ToLower(err.Error()), "not empty") {
+				if strings.Contains(strings.ToLower(deleteErr.Error()), "not empty") {
 					errChan <- fmt.Errorf("failed to delete bucket '%s' because it is not empty", cfg.Name)
 				} else {
-					errChan <- fmt.Errorf("failed to delete bucket '%s': %w", cfg.Name, err)
+					errChan <- fmt.Errorf("failed to delete bucket '%s': %w", cfg.Name, deleteErr)
 				}
 			} else {
-				sm.logger.Info().Str("bucket_name", cfg.Name).Msg("Bucket deleted successfully.")
+				log.Info().Msg("Bucket deleted successfully.")
 			}
 		}(bucketCfg)
 	}
@@ -179,14 +195,14 @@ func (sm *StorageManager) Teardown(ctx context.Context, resources CloudResources
 	}
 
 	if len(allErrors) > 0 {
-		return fmt.Errorf("Storage Bucket teardown completed with errors: %w", errors.Join(allErrors...))
+		return fmt.Errorf("storage Bucket teardown completed with errors: %w", errors.Join(allErrors...))
 	}
 
-	sm.logger.Info().Msg("Storage Bucket teardown completed successfully.")
+	sm.logger.Info().Msg("storage Bucket teardown completed successfully.")
 	return nil
 }
 
-// Verify checks if the specified GCS buckets exist concurrently.
+// Verify checks if all specified GCS buckets exist concurrently.
 func (sm *StorageManager) Verify(ctx context.Context, resources CloudResourcesSpec) error {
 	sm.logger.Info().Msg("Verifying Storage Buckets...")
 
@@ -194,14 +210,14 @@ func (sm *StorageManager) Verify(ctx context.Context, resources CloudResourcesSp
 	errChan := make(chan error, len(resources.GCSBuckets))
 
 	for _, bucketCfg := range resources.GCSBuckets {
-		if bucketCfg.Name == "" {
-			sm.logger.Warn().Msg("Skipping verification for bucket with empty name")
-			continue
-		}
-
 		wg.Add(1)
 		go func(cfg GCSBucket) {
 			defer wg.Done()
+			if cfg.Name == "" {
+				sm.logger.Warn().Msg("Skipping verification for bucket with empty name")
+				return
+			}
+
 			bucketHandle := sm.client.Bucket(cfg.Name)
 			_, err := bucketHandle.Attrs(ctx)
 
@@ -222,7 +238,7 @@ func (sm *StorageManager) Verify(ctx context.Context, resources CloudResourcesSp
 	}
 
 	if len(allErrors) > 0 {
-		return fmt.Errorf("Storage Bucket verification completed with errors: %w", errors.Join(allErrors...))
+		return fmt.Errorf("storage Bucket verification completed with errors: %w", errors.Join(allErrors...))
 	}
 
 	sm.logger.Info().Msg("Storage Bucket verification completed successfully.")

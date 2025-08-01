@@ -40,14 +40,16 @@ func main() {
 	ctx := context.Background()
 
 	// --- Create the IAM manager from your project ---
-	saManager, err := iam.NewServiceAccountManager(ctx, *projectID)
+	saManager, err := iam.NewServiceAccountManager(ctx, *projectID, log.Logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create ServiceAccountManager")
 	}
-	defer saManager.Close()
+	defer func() {
+		_ = saManager.Close()
+	}()
 
 	// --- Find and clean the accounts ---
-	allAccounts, err := saManager.ListServiceAccounts()
+	allAccounts, err := saManager.ListServiceAccounts(ctx)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to list service accounts")
 	}
@@ -62,7 +64,7 @@ func main() {
 		log.Info().Str("email", sa.Email).Msg("Checking account...")
 
 		// Get the current policy for the service account.
-		policy, err := saManager.GetServiceAccountIAMPolicy(sa.Email)
+		policy, err := saManager.GetServiceAccountIAMPolicy(ctx, sa.Email)
 		if err != nil {
 			log.Error().Err(err).Str("email", sa.Email).Msg("Could not get policy, skipping.")
 			continue
@@ -83,7 +85,7 @@ func main() {
 		}
 
 		// Set the new empty policy, effectively stripping all roles.
-		err = saManager.SetServiceAccountIAMPolicy(sa.Email, newPolicy)
+		err = saManager.SetServiceAccountIAMPolicy(ctx, sa.Email, newPolicy)
 		if err != nil {
 			log.Error().Err(err).Str("email", sa.Email).Msg("Failed to set clean policy.")
 		} else {

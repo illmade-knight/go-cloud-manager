@@ -8,19 +8,18 @@ import (
 	"sync"
 )
 
-// --- PubSub Manager ---
-
-// MessagingManager handles the creation and deletion of Pub/Sub topics and subscriptions.
+// MessagingManager handles the creation, validation, and deletion of Pub/Sub topics and subscriptions.
+// It orchestrates these operations through a generic MessagingClient interface.
 type MessagingManager struct {
 	client      MessagingClient
 	logger      zerolog.Logger
 	environment Environment
 }
 
-// NewMessagingManager creates a new MessagingManager.
+// NewMessagingManager creates a new manager for orchestrating Pub/Sub resources.
 func NewMessagingManager(client MessagingClient, logger zerolog.Logger, environment Environment) (*MessagingManager, error) {
 	if client == nil {
-		return nil, fmt.Errorf("PubSub client (MessagingClient interface) cannot be nil")
+		return nil, errors.New("messaging client (MessagingClient interface) cannot be nil")
 	}
 	return &MessagingManager{
 		client:      client,
@@ -30,12 +29,15 @@ func NewMessagingManager(client MessagingClient, logger zerolog.Logger, environm
 }
 
 // CreateResources creates all configured Pub/Sub topics and subscriptions concurrently.
+// It is idempotent; if a resource already exists, it will be skipped or updated as appropriate.
+// It creates all topics first, then creates subscriptions that depend on them.
 func (m *MessagingManager) CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedTopic, []ProvisionedSubscription, error) {
 	m.logger.Info().Msg("Starting Pub/Sub setup...")
 
-	if err := m.client.Validate(resources); err != nil {
-		m.logger.Error().Err(err).Msg("Resource configuration failed validation")
-		return nil, nil, err
+	validationErr := m.client.Validate(resources)
+	if validationErr != nil {
+		m.logger.Error().Err(validationErr).Msg("Resource configuration failed validation")
+		return nil, nil, validationErr
 	}
 	m.logger.Info().Msg("Resource configuration is valid")
 
@@ -52,8 +54,9 @@ func (m *MessagingManager) CreateResources(ctx context.Context, resources CloudR
 		wg.Add(1)
 		go func(spec TopicConfig) {
 			defer wg.Done()
+			log := m.logger.With().Str("topic", spec.Name).Logger()
 			if spec.Name == "" {
-				m.logger.Warn().Msg("Skipping creation for topic with empty name")
+				log.Warn().Msg("Skipping creation for topic with empty name")
 				return
 			}
 			topic := m.client.Topic(spec.Name)
@@ -63,15 +66,16 @@ func (m *MessagingManager) CreateResources(ctx context.Context, resources CloudR
 				return
 			}
 			if exists {
-				m.logger.Info().Str("topic_id", spec.Name).Msg("Topic already exists, skipping creation.")
+				log.Info().Msg("Topic already exists, skipping creation.")
 				provTopicChan <- ProvisionedTopic{Name: spec.Name}
 				return
 			}
-			m.logger.Info().Str("topic_id", spec.Name).Msg("Creating topic...")
-			if _, err := m.client.CreateTopicWithConfig(ctx, spec); err != nil {
-				errChan <- fmt.Errorf("failed to create topic '%s': %w", spec.Name, err)
+			log.Info().Msg("Creating topic...")
+			_, createErr := m.client.CreateTopicWithConfig(ctx, spec)
+			if createErr != nil {
+				errChan <- fmt.Errorf("failed to create topic '%s': %w", spec.Name, createErr)
 			} else {
-				m.logger.Info().Str("topic_id", spec.Name).Msg("Topic created successfully.")
+				log.Info().Msg("Topic created successfully.")
 				provTopicChan <- ProvisionedTopic{Name: spec.Name}
 			}
 		}(topicSpec)
@@ -89,11 +93,13 @@ func (m *MessagingManager) CreateResources(ctx context.Context, resources CloudR
 		wg.Add(1)
 		go func(spec SubscriptionConfig) {
 			defer wg.Done()
+			log := m.logger.With().Str("subscription", spec.Name).Str("topic", spec.Topic).Logger()
 			if spec.Name == "" || spec.Topic == "" {
+				log.Warn().Msg("Skipping creation for subscription with empty name or topic")
 				return
 			}
 
-			// This check is crucial and must remain in the manager
+			// This check is crucial: ensure the topic for the subscription exists before proceeding.
 			topic := m.client.Topic(spec.Topic)
 			topicExists, err := topic.Exists(ctx)
 			if err != nil {
@@ -113,19 +119,21 @@ func (m *MessagingManager) CreateResources(ctx context.Context, resources CloudR
 			}
 
 			if subExists {
-				m.logger.Info().Str("sub_name", spec.Name).Msg("Subscription already exists, attempting to update.")
-				if _, err := sub.Update(ctx, spec); err != nil {
-					errChan <- fmt.Errorf("failed to update subscription '%s': %w", spec.Name, err)
+				log.Info().Msg("Subscription already exists, attempting to update.")
+				_, updateErr := sub.Update(ctx, spec)
+				if updateErr != nil {
+					errChan <- fmt.Errorf("failed to update subscription '%s': %w", spec.Name, updateErr)
 				} else {
-					m.logger.Info().Str("sub_name", spec.Name).Msg("Subscription updated successfully.")
+					log.Info().Msg("Subscription updated successfully.")
 					provSubChan <- ProvisionedSubscription{Name: spec.Name, Topic: spec.Topic}
 				}
 			} else {
-				m.logger.Info().Str("sub_name", spec.Name).Msg("Creating subscription...")
-				if _, err := m.client.CreateSubscription(ctx, spec); err != nil {
-					errChan <- fmt.Errorf("failed to create subscription '%s': %w", spec.Name, err)
+				log.Info().Msg("Creating subscription...")
+				_, createErr := m.client.CreateSubscription(ctx, spec)
+				if createErr != nil {
+					errChan <- fmt.Errorf("failed to create subscription '%s': %w", spec.Name, createErr)
 				} else {
-					m.logger.Info().Str("sub_name", spec.Name).Msg("Subscription created successfully.")
+					log.Info().Msg("Subscription created successfully.")
 					provSubChan <- ProvisionedSubscription{Name: spec.Name, Topic: spec.Topic}
 				}
 			}
@@ -150,19 +158,22 @@ func (m *MessagingManager) CreateResources(ctx context.Context, resources CloudR
 	return provisionedTopics, provisionedSubscriptions, nil
 }
 
-// Teardown deletes Pub/Sub resources concurrently in proper dependency order.
+// Teardown deletes all specified Pub/Sub resources concurrently. It deletes subscriptions
+// first, then topics, to respect dependencies.
 func (m *MessagingManager) Teardown(ctx context.Context, resources CloudResourcesSpec) error {
 	m.logger.Info().Msg("Starting Pub/Sub teardown...")
 	var allErrors []error
 
-	// Teardown subscriptions first
-	if err := m.teardownSubscriptions(ctx, resources.Subscriptions); err != nil {
-		allErrors = append(allErrors, err)
+	// Teardown subscriptions first, as they depend on topics.
+	subErr := m.teardownSubscriptions(ctx, resources.Subscriptions)
+	if subErr != nil {
+		allErrors = append(allErrors, subErr)
 	}
 
-	// Then teardown topics
-	if err := m.teardownTopics(ctx, resources.Topics); err != nil {
-		allErrors = append(allErrors, err)
+	// Then teardown topics.
+	topicErr := m.teardownTopics(ctx, resources.Topics)
+	if topicErr != nil {
+		allErrors = append(allErrors, topicErr)
 	}
 
 	if len(allErrors) > 0 {
@@ -173,6 +184,7 @@ func (m *MessagingManager) Teardown(ctx context.Context, resources CloudResource
 	return nil
 }
 
+// teardownTopics handles the concurrent deletion of topics.
 func (m *MessagingManager) teardownTopics(ctx context.Context, topicsToTeardown []TopicConfig) error {
 	m.logger.Info().Int("count", len(topicsToTeardown)).Msg("Tearing down Pub/Sub topics...")
 	var wg sync.WaitGroup
@@ -182,15 +194,18 @@ func (m *MessagingManager) teardownTopics(ctx context.Context, topicsToTeardown 
 		wg.Add(1)
 		go func(spec TopicConfig) {
 			defer wg.Done()
+			log := m.logger.With().Str("topic", spec.Name).Logger()
 			if spec.TeardownProtection {
-				m.logger.Warn().Str("name", spec.Name).Msg("teardown protection in place for topic")
+				log.Warn().Msg("Teardown protection enabled, skipping deletion.")
 				return
 			}
 			if spec.Name == "" {
 				return
 			}
-			m.logger.Info().Str("topic_id", spec.Name).Msg("Attempting to delete topic...")
-			if err := m.client.Topic(spec.Name).Delete(ctx); err != nil && !isNotFound(err) {
+			log.Info().Msg("Attempting to delete topic...")
+			err := m.client.Topic(spec.Name).Delete(ctx)
+			// It's not an error if the resource is already gone.
+			if err != nil && !isNotFound(err) {
 				errChan <- fmt.Errorf("failed to delete topic %s: %w", spec.Name, err)
 			}
 		}(topicSpec)
@@ -205,6 +220,7 @@ func (m *MessagingManager) teardownTopics(ctx context.Context, topicsToTeardown 
 	return errors.Join(allErrors...)
 }
 
+// teardownSubscriptions handles the concurrent deletion of subscriptions.
 func (m *MessagingManager) teardownSubscriptions(ctx context.Context, subsToTeardown []SubscriptionConfig) error {
 	m.logger.Info().Int("count", len(subsToTeardown)).Msg("Tearing down Pub/Sub subscriptions...")
 	var wg sync.WaitGroup
@@ -214,15 +230,18 @@ func (m *MessagingManager) teardownSubscriptions(ctx context.Context, subsToTear
 		wg.Add(1)
 		go func(spec SubscriptionConfig) {
 			defer wg.Done()
+			log := m.logger.With().Str("subscription", spec.Name).Logger()
 			if spec.TeardownProtection {
-				m.logger.Warn().Str("name", spec.Name).Msg("teardown protection in place for subscription")
+				log.Warn().Msg("Teardown protection enabled, skipping deletion.")
 				return
 			}
 			if spec.Name == "" {
 				return
 			}
-			m.logger.Info().Str("sub_name", spec.Name).Msg("Attempting to delete subscription...")
-			if err := m.client.Subscription(spec.Name).Delete(ctx); err != nil && !isNotFound(err) {
+			log.Info().Msg("Attempting to delete subscription...")
+			err := m.client.Subscription(spec.Name).Delete(ctx)
+			// It's not an error if the resource is already gone.
+			if err != nil && !isNotFound(err) {
 				errChan <- fmt.Errorf("failed to delete subscription %s: %w", spec.Name, err)
 			}
 		}(subSpec)
@@ -237,7 +256,7 @@ func (m *MessagingManager) teardownSubscriptions(ctx context.Context, subsToTear
 	return errors.Join(allErrors...)
 }
 
-// Verify checks all Pub/Sub resources concurrently.
+// Verify checks if all specified Pub/Sub topics and subscriptions exist.
 func (m *MessagingManager) Verify(ctx context.Context, resources CloudResourcesSpec) error {
 	m.logger.Info().Msg("Verifying Pub/Sub resources...")
 	var allErrors []error

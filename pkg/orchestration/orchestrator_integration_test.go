@@ -17,13 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestOrchestratorCommandFlow verifies the full async command-and-reply loop using emulators.
+// TestOrchestratorCommandFlow verifies the full asynchronous command-and-reply loop
+// between the Orchestrator and an in-memory ServiceDirector using Pub/Sub emulators.
+// This test ensures that the core event-driven communication mechanism is working correctly.
 func TestOrchestratorCommandFlow(t *testing.T) {
+	// --- Arrange: Setup Emulators and Config ---
 	logger := log.With().Str("test", "TestOrchestratorCommandFlow").Logger()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// --- 1. Arrange: Setup Emulators and Config ---
 	projectID := "test-harness-project"
 	commandTopicID := "director-commands-harness"
 	commandSubID := "director-command-sub-harness"
@@ -34,14 +36,14 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		psClient.Close()
+		_ = psClient.Close()
 	})
 
 	// --- 2. Define Architecture and Create Orchestrator ---
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "in-memory-director", // A name for the service spec
+			Name: "in-memory-director",
 			Deployment: &servicemanager.DeploymentSpec{
 				EnvironmentVars: map[string]string{
 					"SD_COMMAND_TOPIC":        commandTopicID,
@@ -74,18 +76,16 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	t.Log("Starting in-memory ServiceDirector...")
 	directorCfg := &servicedirector.Config{
 		BaseConfig: microservice.BaseConfig{ProjectID: projectID},
+		Commands: &servicedirector.PubsubConfig{
+			CommandTopicID:    commandTopicID,
+			CommandSubID:      commandSubID,
+			CompletionTopicID: completionTopicID,
+		},
 	}
 
-	// For this test, the ServiceManager just needs a messaging client.
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
-
-	directorCfg.Commands = &servicedirector.PubsubConfig{
-		CommandTopicID:    commandTopicID,
-		CommandSubID:      commandSubID,
-		CompletionTopicID: completionTopicID,
-	}
 
 	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, psClient, logger)
 	require.NoError(t, err)
@@ -95,26 +95,28 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	})
 
 	// --- 4. Act and Assert in Sequence ---
+	t.Run("Act and Assert Event Flow", func(t *testing.T) {
+		// Step 4a: Await the "ready" signal from the ServiceDirector.
+		err = orch.AwaitServiceReady(ctx, arch.ServiceManagerSpec.Name)
+		require.NoError(t, err, "Did not receive 'service_ready' event from in-memory director")
+		t.Log("Orchestrator confirmed ServiceDirector is ready.")
 
-	// Step 4a: Await the "ready" signal from the ServiceDirector. This is the key pattern.
-	err = orch.AwaitServiceReady(ctx, arch.ServiceManagerSpec.Name)
-	require.NoError(t, err, "Did not receive 'service_ready' event from in-memory director")
-	t.Log("Orchestrator confirmed ServiceDirector is ready.")
+		// Step 4b: Now that the director is ready, trigger the dataflow setup.
+		err = orch.TriggerDataflowSetup(ctx, "test-flow")
+		require.NoError(t, err)
 
-	// Step 4b: Now that the director is ready, trigger the dataflow setup.
-	err = orch.TriggerDataflowSetup(ctx, "test-flow")
-	require.NoError(t, err)
-
-	// Step 4c: Await the "completion" signal for the dataflow setup.
-	err = orch.AwaitDataflowReady(ctx, "test-flow")
-	require.NoError(t, err, "Did not receive completion event in time")
+		// Step 4c: Await the "completion" signal for the dataflow setup.
+		err = orch.AwaitDataflowReady(ctx, "test-flow")
+		require.NoError(t, err, "Did not receive completion event in time")
+	})
 
 	// --- 5. Final Verification ---
-	t.Log("Verifying that the dataflow resource was created in the emulator...")
-	topic := psClient.Topic(dataflowTopicToCreate)
-	exists, err := topic.Exists(ctx)
-	require.NoError(t, err, "Failed to check for new topic existence")
-	require.True(t, exists, "The ServiceDirector should have created the dataflow topic in the emulator")
-
-	t.Log("✅ Resource creation verified. Test successful.")
+	t.Run("Verify Resource Creation", func(t *testing.T) {
+		t.Log("Verifying that the dataflow resource was created in the emulator...")
+		topic := psClient.Topic(dataflowTopicToCreate)
+		exists, err := topic.Exists(ctx)
+		require.NoError(t, err, "Failed to check for new topic existence")
+		require.True(t, exists, "The ServiceDirector should have created the dataflow topic in the emulator")
+		t.Log("✅ Resource creation verified. Test successful.")
+	})
 }

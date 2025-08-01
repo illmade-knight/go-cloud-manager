@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
@@ -22,7 +23,7 @@ func (m *MockMessagingTopic) Exists(ctx context.Context) (bool, error) {
 	args := m.Called(ctx)
 	return args.Bool(0), args.Error(1)
 }
-func (m *MockMessagingTopic) Update(ctx context.Context, cfg servicemanager.TopicConfig) (*servicemanager.TopicConfig, error) {
+func (m *MockMessagingTopic) Update(_ context.Context, _ servicemanager.TopicConfig) (*servicemanager.TopicConfig, error) {
 	panic("mock not implemented")
 }
 func (m *MockMessagingTopic) Delete(ctx context.Context) error { return m.Called(ctx).Error(0) }
@@ -36,6 +37,10 @@ func (m *MockMessagingSubscription) Exists(ctx context.Context) (bool, error) {
 }
 func (m *MockMessagingSubscription) Update(ctx context.Context, cfg servicemanager.SubscriptionConfig) (*servicemanager.SubscriptionConfig, error) {
 	args := m.Called(ctx, cfg)
+	// REFACTOR_NOTE: The first returned value can be nil if the mock setup doesn't need to return a specific object.
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*servicemanager.SubscriptionConfig), args.Error(1)
 }
 func (m *MockMessagingSubscription) Delete(ctx context.Context) error { return m.Called(ctx).Error(0) }
@@ -48,15 +53,21 @@ func (m *MockMessagingClient) Topic(id string) servicemanager.MessagingTopic {
 func (m *MockMessagingClient) Subscription(id string) servicemanager.MessagingSubscription {
 	return m.Called(id).Get(0).(servicemanager.MessagingSubscription)
 }
-func (m *MockMessagingClient) CreateTopic(ctx context.Context, topicID string) (servicemanager.MessagingTopic, error) {
+func (m *MockMessagingClient) CreateTopic(_ context.Context, _ string) (servicemanager.MessagingTopic, error) {
 	panic("mock not implemented")
 }
 func (m *MockMessagingClient) CreateTopicWithConfig(ctx context.Context, topicSpec servicemanager.TopicConfig) (servicemanager.MessagingTopic, error) {
 	args := m.Called(ctx, topicSpec)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(servicemanager.MessagingTopic), args.Error(1)
 }
 func (m *MockMessagingClient) CreateSubscription(ctx context.Context, subSpec servicemanager.SubscriptionConfig) (servicemanager.MessagingSubscription, error) {
 	args := m.Called(ctx, subSpec)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(servicemanager.MessagingSubscription), args.Error(1)
 }
 func (m *MockMessagingClient) Close() error { return m.Called().Error(0) }
@@ -97,20 +108,22 @@ var notFoundErr = &googleapi.Error{Code: http.StatusNotFound, Message: "not foun
 func TestMessagingManager_CreateResources_Success(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Mocks
 	mockClient.On("Validate", resources).Return(nil).Once()
 
 	mockTopic := new(MockMessagingTopic)
-	mockClient.On("Topic", "test-topic-1").Return(mockTopic) // Called twice: once for topic creation, once for sub dependency check
-	mockTopic.On("Exists", ctx).Return(false, nil).Once()
+	// The client will be asked for the topic twice: once for the topic creation, and once for the subscription dependency check.
+	mockClient.On("Topic", "test-topic-1").Return(mockTopic)
+	mockTopic.On("Exists", ctx).Return(false, nil).Once() // First check: topic doesn't exist
 	mockClient.On("CreateTopicWithConfig", ctx, resources.Topics[0]).Return(mockTopic, nil).Once()
 
 	mockSub := new(MockMessagingSubscription)
 	mockClient.On("Subscription", "test-sub-1").Return(mockSub).Once()
-	mockTopic.On("Exists", ctx).Return(true, nil).Once() // The second call, for the sub dependency check
-	mockSub.On("Exists", ctx).Return(false, nil).Once()
+	mockTopic.On("Exists", ctx).Return(true, nil).Once() // Second check: topic now exists for the subscription
+	mockSub.On("Exists", ctx).Return(false, nil).Once()  // Subscription doesn't exist
 	mockClient.On("CreateSubscription", ctx, resources.Subscriptions[0]).Return(mockSub, nil).Once()
 
 	// Action
@@ -129,21 +142,22 @@ func TestMessagingManager_CreateResources_Success(t *testing.T) {
 func TestMessagingManager_CreateResources_AlreadyExistsAndUpdate(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Mocks
 	mockClient.On("Validate", resources).Return(nil).Once()
 
-	// Topic already exists
+	// Topic already exists, so it will be checked twice but not created.
 	mockTopic := new(MockMessagingTopic)
 	mockClient.On("Topic", "test-topic-1").Return(mockTopic)
-	mockTopic.On("Exists", ctx).Return(true, nil).Times(2) // Called for topic check and sub check
+	mockTopic.On("Exists", ctx).Return(true, nil).Times(2)
 
-	// Subscription also exists, so it will be updated
+	// Subscription also exists, so it will be updated.
 	mockSub := new(MockMessagingSubscription)
 	mockClient.On("Subscription", "test-sub-1").Return(mockSub).Once()
 	mockSub.On("Exists", ctx).Return(true, nil).Once()
-	mockSub.On("Update", ctx, resources.Subscriptions[0]).Return(&servicemanager.SubscriptionConfig{}, nil).Once()
+	mockSub.On("Update", ctx, resources.Subscriptions[0]).Return(nil, nil).Once()
 
 	// Action
 	_, _, err := manager.CreateResources(ctx, resources)
@@ -160,15 +174,16 @@ func TestMessagingManager_CreateResources_AlreadyExistsAndUpdate(t *testing.T) {
 func TestMessagingManager_CreateResources_TopicForSubDoesNotExist(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Mocks
 	mockClient.On("Validate", resources).Return(nil).Once()
 	mockTopic := new(MockMessagingTopic)
 	mockClient.On("Topic", "test-topic-1").Return(mockTopic)
-	// Topic creation check returns it exists, but sub dependency check returns it does NOT exist.
-	mockTopic.On("Exists", ctx).Return(true, nil).Once()  // First call for topic creation passes
-	mockTopic.On("Exists", ctx).Return(false, nil).Once() // Second call for sub dependency fails
+	// First call for topic creation passes (or seems to), but the crucial dependency check for the sub fails.
+	mockTopic.On("Exists", ctx).Return(true, nil).Once()
+	mockTopic.On("Exists", ctx).Return(false, nil).Once()
 
 	// Action
 	_, _, err := manager.CreateResources(ctx, resources)
@@ -183,7 +198,8 @@ func TestMessagingManager_CreateResources_TopicForSubDoesNotExist(t *testing.T) 
 func TestMessagingManager_Teardown_Success(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Mocks
 	mockTopic := new(MockMessagingTopic)
@@ -205,7 +221,8 @@ func TestMessagingManager_Teardown_Success(t *testing.T) {
 func TestMessagingManager_Teardown_PartialFailure(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 	deleteErr := errors.New("permission denied")
 
 	// Mocks
@@ -230,7 +247,8 @@ func TestMessagingManager_Teardown_PartialFailure(t *testing.T) {
 func TestMessagingManager_Teardown_NotFoundIsIgnored(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Mocks
 	mockTopic := new(MockMessagingTopic)
@@ -252,7 +270,8 @@ func TestMessagingManager_Teardown_NotFoundIsIgnored(t *testing.T) {
 func TestMessagingManager_Teardown_Protection(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Enable teardown protection
 	resources.Topics[0].CloudResource.TeardownProtection = true
@@ -271,7 +290,8 @@ func TestMessagingManager_Teardown_Protection(t *testing.T) {
 func TestMessagingManager_Verify_Failure(t *testing.T) {
 	manager, mockClient := setupMessagingManagerTest(t)
 	resources := getTestMessagingResources()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
 
 	// Mocks
 	mockTopic := new(MockMessagingTopic)

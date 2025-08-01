@@ -72,6 +72,8 @@ func toGCSBucketAttrs(attrs *BucketAttributes) *storage.BucketAttrs {
 }
 
 // toGCSBucketAttrsToUpdate converts our generic update struct to a GCS-specific one.
+// This is more complex than a simple conversion because it needs to handle label updates
+// by explicitly deleting labels that are present in the old config but not the new one.
 func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *storage.BucketAttrs) storage.BucketAttrsToUpdate {
 	gcsUpdate := storage.BucketAttrsToUpdate{}
 
@@ -80,9 +82,11 @@ func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *
 	}
 
 	if attrs.Labels != nil {
+		// Set new or updated labels.
 		for k, v := range attrs.Labels {
 			gcsUpdate.SetLabel(k, v)
 		}
+		// If there was an existing config, check for labels that need to be removed.
 		if existingGCSAttrs != nil && existingGCSAttrs.Labels != nil {
 			for k := range existingGCSAttrs.Labels {
 				if _, existsInNewConfig := attrs.Labels[k]; !existsInNewConfig {
@@ -109,6 +113,7 @@ func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *
 
 // --- GCS Iterator Adapter ---
 
+// gcsBucketIteratorAdapter wraps a *storage.BucketIterator to conform to our BucketIterator interface.
 type gcsBucketIteratorAdapter struct {
 	it *storage.BucketIterator
 }
@@ -116,7 +121,7 @@ type gcsBucketIteratorAdapter struct {
 func (a *gcsBucketIteratorAdapter) Next() (*BucketAttributes, error) {
 	gcsAttrs, err := a.it.Next()
 	if err != nil {
-		return nil, err
+		return nil, err // Pass on the error, including iterator.Done
 	}
 	return fromGCSBucketAttrs(gcsAttrs), nil
 }
@@ -142,6 +147,7 @@ func (a *gcsBucketHandleAdapter) Create(ctx context.Context, projectID string, a
 }
 
 func (a *gcsBucketHandleAdapter) Update(ctx context.Context, attrs BucketAttributesToUpdate) (*BucketAttributes, error) {
+	// To correctly calculate the diff for labels, we need the current attributes.
 	existingGCSAttrs, err := a.bucket.Attrs(ctx)
 	if err != nil && err != storage.ErrBucketNotExist {
 		return nil, fmt.Errorf("failed to get existing attributes before update: %w", err)
@@ -163,6 +169,7 @@ func (a *gcsBucketHandleAdapter) IAM() *iam.Handle {
 	return a.bucket.IAM()
 }
 
+// gcsClientAdapter wraps a *storage.Client to conform to our StorageClient interface.
 type gcsClientAdapter struct {
 	client *storage.Client
 }
@@ -179,6 +186,7 @@ func (a *gcsClientAdapter) Close() error {
 	return a.client.Close()
 }
 
+// NewGCSClientAdapter creates a new StorageClient adapter from a concrete *storage.Client.
 func NewGCSClientAdapter(client *storage.Client) StorageClient {
 	if client == nil {
 		return nil
@@ -186,6 +194,7 @@ func NewGCSClientAdapter(client *storage.Client) StorageClient {
 	return &gcsClientAdapter{client: client}
 }
 
+// CreateGoogleGCSClient creates a real GCS client wrapped in the StorageClient interface.
 func CreateGoogleGCSClient(ctx context.Context, clientOpts ...option.ClientOption) (StorageClient, error) {
 	realClient, err := storage.NewClient(ctx, clientOpts...)
 	if err != nil {

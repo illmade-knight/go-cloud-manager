@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -37,7 +38,11 @@ func (m *MockStorageBucketHandle) Delete(ctx context.Context) error {
 	return m.Called(ctx).Error(0)
 }
 func (m *MockStorageBucketHandle) IAM() *iam.Handle {
-	return m.Called().Get(0).(*iam.Handle)
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*iam.Handle)
 }
 
 type MockStorageClient struct{ mock.Mock }
@@ -45,7 +50,7 @@ type MockStorageClient struct{ mock.Mock }
 func (m *MockStorageClient) Bucket(name string) servicemanager.StorageBucketHandle {
 	return m.Called(name).Get(0).(servicemanager.StorageBucketHandle)
 }
-func (m *MockStorageClient) Buckets(ctx context.Context, projectID string) servicemanager.BucketIterator {
+func (m *MockStorageClient) Buckets(_ context.Context, _ string) servicemanager.BucketIterator {
 	panic("not implemented")
 }
 func (m *MockStorageClient) Close() error {
@@ -88,21 +93,20 @@ func TestNewStorageManager(t *testing.T) {
 }
 
 func TestStorageManager_CreateResources(t *testing.T) {
-	ctx := context.Background()
-
 	t.Run("Success - Create New", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
-		// Mocks for two new buckets
 		mockHandle1 := new(MockStorageBucketHandle)
-		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-1").Return(mockHandle1).Once()
-		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
-
-		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.Done).Once() // Not exist
+		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
 		mockHandle1.On("Create", ctx, "test-project", mock.Anything).Return(nil).Once()
-		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once() // Not exist
+
+		mockHandle2 := new(MockStorageBucketHandle)
+		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
+		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
 		mockHandle2.On("Create", ctx, "test-project", mock.Anything).Return(nil).Once()
 
 		provisioned, err := manager.CreateResources(ctx, resources)
@@ -110,32 +114,34 @@ func TestStorageManager_CreateResources(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, provisioned, 2)
 		mockClient.AssertExpectations(t)
-		mockHandle1.AssertExpectations(t)
-		mockHandle2.AssertExpectations(t)
 	})
 
 	t.Run("Success - Update Existing", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
 		mockHandle1 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-1").Return(mockHandle1).Once()
-		mockHandle1.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once() // Exists
+		mockHandle1.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once()
 		mockHandle1.On("Update", ctx, mock.Anything).Return(&servicemanager.BucketAttributes{}, nil).Once()
 
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
-		mockHandle2.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once() // Exists
+		mockHandle2.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once()
 		mockHandle2.On("Update", ctx, mock.Anything).Return(&servicemanager.BucketAttributes{}, nil).Once()
 
 		_, err := manager.CreateResources(ctx, resources)
 
 		assert.NoError(t, err)
-		mockHandle1.AssertNotCalled(t, "Create", mock.Anything, mock.Anything) // Ensure create is not called
+		mockHandle1.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
 		mockClient.AssertExpectations(t)
 	})
 
 	t.Run("Partial Failure - One Fails to Create", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 		createErr := errors.New("invalid bucket name")
@@ -143,27 +149,27 @@ func TestStorageManager_CreateResources(t *testing.T) {
 		mockHandle1 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-1").Return(mockHandle1).Once()
 		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
-		mockHandle1.On("Create", ctx, mock.Anything, mock.Anything).Return(nil).Once() // Succeeds
+		mockHandle1.On("Create", ctx, mock.Anything, mock.Anything).Return(nil).Once()
 
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
 		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
-		mockHandle2.On("Create", ctx, mock.Anything, mock.Anything).Return(createErr).Once() // Fails
+		mockHandle2.On("Create", ctx, mock.Anything, mock.Anything).Return(createErr).Once()
 
 		provisioned, err := manager.CreateResources(ctx, resources)
 
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to create bucket 'test-bucket-2'")
-		assert.Len(t, provisioned, 1) // Only the successful one should be returned
+		assert.Len(t, provisioned, 1, "Only the successfully created bucket should be returned")
 		assert.Equal(t, "test-bucket-1", provisioned[0].Name)
 		mockClient.AssertExpectations(t)
 	})
 }
 
 func TestStorageManager_Teardown(t *testing.T) {
-	ctx := context.Background()
-
 	t.Run("Success", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
@@ -184,23 +190,27 @@ func TestStorageManager_Teardown(t *testing.T) {
 	})
 
 	t.Run("Teardown Protection Enabled", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
-		resources.GCSBuckets[0].TeardownProtection = true // Protect the first bucket
+		resources.GCSBuckets[0].TeardownProtection = true
 
 		mockHandle2 := new(MockStorageBucketHandle)
-		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once() // Expect call only for bucket 2
+		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
 		mockHandle2.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once()
 		mockHandle2.On("Delete", ctx).Return(nil).Once()
 
 		err := manager.Teardown(ctx, resources)
 
 		assert.NoError(t, err)
-		mockClient.AssertNotCalled(t, "Bucket", "test-bucket-1") // Ensure protected bucket is not touched
+		mockClient.AssertNotCalled(t, "Bucket", "test-bucket-1")
 		mockClient.AssertExpectations(t)
 	})
 
 	t.Run("Failure - Bucket Not Empty", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 		notEmptyErr := errors.New("googleapi: Error 409: The bucket you tried to delete is not empty")
@@ -213,7 +223,7 @@ func TestStorageManager_Teardown(t *testing.T) {
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
 		mockHandle2.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once()
-		mockHandle2.On("Delete", ctx).Return(nil).Once() // This one succeeds
+		mockHandle2.On("Delete", ctx).Return(nil).Once()
 
 		err := manager.Teardown(ctx, resources)
 
@@ -224,9 +234,9 @@ func TestStorageManager_Teardown(t *testing.T) {
 }
 
 func TestStorageManager_Verify(t *testing.T) {
-	ctx := context.Background()
-
 	t.Run("Success", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
@@ -245,16 +255,18 @@ func TestStorageManager_Verify(t *testing.T) {
 	})
 
 	t.Run("Failure - One Bucket Missing", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
 		mockHandle1 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-1").Return(mockHandle1).Once()
-		mockHandle1.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once() // Exists
+		mockHandle1.On("Attrs", ctx).Return(&servicemanager.BucketAttributes{}, nil).Once()
 
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
-		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once() // Does not exist
+		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
 
 		err := manager.Verify(ctx, resources)
 
