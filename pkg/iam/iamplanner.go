@@ -120,6 +120,9 @@ func (p *RolePlanner) planPubSubLinkRoles(dataflow servicemanager.ResourceGroup,
 				subBinding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: sub.Name, Role: "roles/pubsub.subscriber"}
 				addBindingToPlan(service.ServiceAccount, subBinding, plan, mu)
 				// A subscriber also typically needs to view the topic to which it is subscribed.
+				viewSubBinding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: sub.Name, Role: "roles/pubsub.viewer"}
+				addBindingToPlan(service.ServiceAccount, viewSubBinding, plan, mu)
+				// A subscriber also typically needs to view the topic to which it is subscribed.
 				viewTopicBinding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: sub.Topic, Role: "roles/pubsub.viewer"}
 				addBindingToPlan(service.ServiceAccount, viewTopicBinding, plan, mu)
 			}

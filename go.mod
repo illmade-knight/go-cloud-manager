@@ -5,7 +5,7 @@ go 1.23.0
 require (
 	cloud.google.com/go/artifactregistry v1.17.1
 	cloud.google.com/go/bigquery v1.69.0
-	cloud.google.com/go/cloudbuild v1.22.2
+	cloud.google.com/go/cloudbuild v1.22.3
 	cloud.google.com/go/iam v1.5.2
 	cloud.google.com/go/longrunning v0.6.7
 	cloud.google.com/go/monitoring v1.24.2
@@ -14,11 +14,11 @@ require (
 	cloud.google.com/go/secretmanager v1.15.0
 	cloud.google.com/go/storage v1.56.0
 	github.com/google/uuid v1.6.0
-	github.com/illmade-knight/go-dataflow v0.0.15-beta
+	github.com/illmade-knight/go-dataflow v0.1.10-beta
 	github.com/illmade-knight/go-test v0.0.2-beta
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
-	google.golang.org/api v0.243.0
+	google.golang.org/api v0.244.0
 	google.golang.org/grpc v1.74.2
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
@@ -120,6 +120,6 @@ require (
 	golang.org/x/tools v0.34.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20250721164621-a45f3dfb1074 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250721164621-a45f3dfb1074 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20250728155136-f173205681a0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250728155136-f173205681a0 // indirect
 )
