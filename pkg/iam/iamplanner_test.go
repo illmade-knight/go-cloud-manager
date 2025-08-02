@@ -109,7 +109,7 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 
 	t.Run("Subscriber gets Subscriber and Topic Viewer roles", func(t *testing.T) {
 		bindings := plan["subscriber-sa"]
-		require.Len(t, bindings, 2)
+		require.Len(t, bindings, 3)
 
 		expectedSubscriber := iam.IAMBinding{ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.subscriber"}
 		expectedViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}

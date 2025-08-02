@@ -104,6 +104,8 @@ func TestHydrateArchitecture_WithRunID(t *testing.T) {
 // Pub/Sub topics and subscriptions are correctly injected into the services
 // that are explicitly linked to them.
 func TestHydrateArchitecture_PubSubEnvInjection(t *testing.T) {
+	dataResource := "data-test"
+	expedtedResourcePrefix := "DATA_TEST"
 	// ARRANGE: Create a minimal architecture with explicit producer/consumer links.
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{
@@ -132,14 +134,14 @@ func TestHydrateArchitecture_PubSubEnvInjection(t *testing.T) {
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: "data-topic"},
+							CloudResource:   servicemanager.CloudResource{Name: dataResource},
 							ProducerService: "producer-service",
 						},
 					},
 					Subscriptions: []servicemanager.SubscriptionConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: "data-sub"},
-							Topic:           "data-topic",
+							CloudResource:   servicemanager.CloudResource{Name: dataResource},
+							Topic:           "data",
 							ConsumerService: "consumer-service",
 						},
 					},
@@ -161,16 +163,16 @@ func TestHydrateArchitecture_PubSubEnvInjection(t *testing.T) {
 	require.NotNil(t, consumerSvc.Deployment.EnvironmentVars)
 
 	// Check the producer service for the topic ID.
-	expectedTopicKey := "DATA-TOPIC_TOPIC_ID"
+	expectedTopicKey := fmt.Sprintf("%s_TOPIC_ID", expedtedResourcePrefix)
 	actualTopicID, ok := producerSvc.Deployment.EnvironmentVars[expectedTopicKey]
 	assert.True(t, ok, "Producer service should have the topic ID env var")
-	assert.Equal(t, "data-topic", actualTopicID)
+	assert.Equal(t, dataResource, actualTopicID)
 
 	// Check the consumer service for the subscription ID.
-	expectedSubKey := "DATA-SUB_SUBSCRIPTION_ID"
+	expectedSubKey := fmt.Sprintf("%s_SUB_ID", expedtedResourcePrefix)
 	actualSubID, ok := consumerSvc.Deployment.EnvironmentVars[expectedSubKey]
 	assert.True(t, ok, "Consumer service should have the subscription ID env var")
-	assert.Equal(t, "data-sub", actualSubID)
+	assert.Equal(t, dataResource, actualSubID)
 }
 
 // TestHydrateArchitecture_ValidationFailure asserts that hydration fails if the

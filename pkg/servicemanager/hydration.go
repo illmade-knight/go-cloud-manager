@@ -92,7 +92,7 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID
 				if service.Deployment.EnvironmentVars == nil {
 					service.Deployment.EnvironmentVars = make(map[string]string)
 				}
-				envKey := fmt.Sprintf("%s_TOPIC_ID", strings.ToUpper(topic.Name))
+				envKey := fmt.Sprintf("%s_TOPIC_ID", strings.Replace(strings.ToUpper(topic.Name), "-", "_", -1))
 				service.Deployment.EnvironmentVars[envKey] = topic.Name
 				dataflow.Services[topic.ProducerService] = service
 				log.Debug().Str("service", service.Name).Str("env_var", envKey).Str("value", topic.Name).Msg("Injected topic environment variable.")
@@ -108,7 +108,10 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID
 				if service.Deployment.EnvironmentVars == nil {
 					service.Deployment.EnvironmentVars = make(map[string]string)
 				}
-				envKey := fmt.Sprintf("%s_SUBSCRIPTION_ID", strings.ToUpper(sub.Name))
+				envKey := fmt.Sprintf("%s_SUB_ID", strings.Replace(strings.ToUpper(sub.Name), "-", "_", -1))
+				service.Deployment.EnvironmentVars[envKey] = sub.Name
+				dataflow.Services[sub.ConsumerService] = service
+				log.Debug().Str("service", service.Name).Str("env_var", envKey).Str("value", sub.Name).Msg("Injected subscription environment variable.")
 				service.Deployment.EnvironmentVars[envKey] = sub.Name
 				dataflow.Services[sub.ConsumerService] = service
 				log.Debug().Str("service", service.Name).Str("env_var", envKey).Str("value", sub.Name).Msg("Injected subscription environment variable.")
