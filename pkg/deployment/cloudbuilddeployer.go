@@ -31,26 +31,19 @@ import (
 )
 
 // --- Interfaces for Dependencies ---
-// REFACTOR_NOTE: By depending on these interfaces instead of concrete clients,
-// the CloudBuildDeployer becomes easy to unit test with mocks.
-
-// storageAPI defines the contract for storage operations needed by the deployer.
 type storageAPI interface {
 	EnsureBucketExists(ctx context.Context, bucketName string) error
 	Upload(ctx context.Context, sourceDir, bucket, objectName string) error
 }
 
-// artifactRegistryAPI defines the contract for Artifact Registry operations.
 type artifactRegistryAPI interface {
 	EnsureRepositoryExists(ctx context.Context, repoName, region string) error
 }
 
-// cloudBuildAPI defines the contract for Cloud Build operations.
 type cloudBuildAPI interface {
 	TriggerBuildAndWait(ctx context.Context, gcsSourceObject string, spec servicemanager.DeploymentSpec) error
 }
 
-// cloudRunAPI defines the contract for Cloud Run operations.
 type cloudRunAPI interface {
 	CreateOrUpdate(ctx context.Context, serviceName, saEmail string, spec servicemanager.DeploymentSpec) (*run.GoogleCloudRunV2Service, error)
 	Delete(ctx context.Context, serviceName string) error
@@ -58,7 +51,6 @@ type cloudRunAPI interface {
 
 // --- CloudBuildDeployer ---
 
-// CloudBuildDeployer implements the ContainerDeployer interface using Google Cloud services.
 type CloudBuildDeployer struct {
 	projectID        string
 	defaultRegion    string
@@ -70,8 +62,6 @@ type CloudBuildDeployer struct {
 	runner           cloudRunAPI
 }
 
-// NewCloudBuildDeployer creates a new, fully initialized deployer for production use.
-// It constructs the concrete adapters that wrap the real Google Cloud clients.
 func NewCloudBuildDeployer(ctx context.Context, projectID, defaultRegion, sourceBucket string, logger zerolog.Logger, opts ...option.ClientOption) (*CloudBuildDeployer, error) {
 	storageClient, err := storage.NewClient(ctx, opts...)
 	if err != nil {
@@ -116,7 +106,6 @@ func NewCloudBuildDeployer(ctx context.Context, projectID, defaultRegion, source
 	}, nil
 }
 
-// NewCloudBuildDeployerForTest creates a deployer with mocked dependencies for unit testing.
 func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerolog.Logger, storage storageAPI, ar artifactRegistryAPI, builder cloudBuildAPI, runner cloudRunAPI) *CloudBuildDeployer {
 	return &CloudBuildDeployer{
 		projectID:        projectID,
@@ -130,11 +119,9 @@ func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerol
 	}
 }
 
-// Deploy orchestrates the full upload, build, and deploy workflow.
 func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting native cloud build and deploy workflow...")
 
-	// 1. Ensure prerequisite infrastructure exists.
 	err := d.storage.EnsureBucketExists(ctx, d.sourceBucket)
 	if err != nil {
 		return "", fmt.Errorf("failed to ensure GCS source bucket exists for service '%s': %w", serviceName, err)
@@ -144,7 +131,6 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 		return "", fmt.Errorf("failed to ensure artifact registry repo exists for service '%s': %w", serviceName, err)
 	}
 
-	// 2. Archive and upload source code.
 	sourceObject := fmt.Sprintf("source/%s-%d.tar.gz", serviceName, time.Now().UnixNano())
 	err = d.storage.Upload(ctx, spec.SourcePath, d.sourceBucket, sourceObject)
 	if err != nil {
@@ -152,7 +138,6 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 	}
 	d.logger.Info().Str("gcs_path", fmt.Sprintf("gs://%s/%s", d.sourceBucket, sourceObject)).Msg("Source code uploaded.")
 
-	// 3. Trigger Cloud Build to create the container image.
 	if spec.Image == "" {
 		spec.Image = fmt.Sprintf("%s-docker.pkg.dev/%s/%s/%s:%s", spec.Region, d.projectID, spec.ImageRepo, serviceName, uuid.New().String()[:8])
 	}
@@ -162,7 +147,6 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 	}
 	d.logger.Info().Str("image", spec.Image).Msg("Cloud Build successful. Image is ready.")
 
-	// 4. Deploy the newly built image to Cloud Run.
 	deployedSvc, err := d.runner.CreateOrUpdate(ctx, serviceName, serviceAccountEmail, spec)
 	if err != nil {
 		return "", fmt.Errorf("cloud Run deployment failed for service '%s': %w", serviceName, err)
@@ -172,7 +156,6 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 	return deployedSvc.Uri, nil
 }
 
-// Teardown deletes the specified Cloud Run service.
 func (d *CloudBuildDeployer) Teardown(ctx context.Context, serviceName string) error {
 	d.logger.Info().Str("service", serviceName).Msg("Tearing down Cloud Run service...")
 	err := d.runner.Delete(ctx, serviceName)
@@ -185,7 +168,6 @@ func (d *CloudBuildDeployer) Teardown(ctx context.Context, serviceName string) e
 
 // --- Concrete Adapters for Google Cloud ---
 
-// googleStorageAdapter implements the storageAPI interface.
 type googleStorageAdapter struct {
 	client    *storage.Client
 	projectID string
@@ -269,7 +251,6 @@ func (a *googleStorageAdapter) Upload(ctx context.Context, sourceDir, bucket, ob
 	return w.Close()
 }
 
-// googleArtifactRegistryAdapter implements the artifactRegistryAPI interface.
 type googleArtifactRegistryAdapter struct {
 	client    *artifactregistry.Client
 	projectID string
@@ -324,7 +305,6 @@ func (a *googleArtifactRegistryAdapter) EnsureRepositoryExists(ctx context.Conte
 	return nil
 }
 
-// googleCloudBuildAdapter implements the cloudBuildAPI interface.
 type googleCloudBuildAdapter struct {
 	client    *cloudbuild.Client
 	projectID string
@@ -335,7 +315,21 @@ type googleCloudBuildAdapter struct {
 func (a *googleCloudBuildAdapter) TriggerBuildAndWait(ctx context.Context, gcsSourceObject string, spec servicemanager.DeploymentSpec) error {
 	a.logger.Info().Str("image", spec.Image).Msg("Triggering Cloud Build")
 
+	// =================================================================================
+	// --- CRITICAL MONOREPO BUILD LOGIC ---
+	// DO NOT "SIMPLIFY" THIS LOGIC. The `gcr.io/k8s-skaffold/pack` builder does NOT
+	// respect the `GOOGLE_BUILDABLE` environment variable. The correct way to build
+	// a service from a subdirectory in a monorepo with this specific builder is:
+	//
+	// 1. Use the `pack build --path <sub-directory>` argument.
+	// 2. Add a preliminary build step to COPY the root `go.mod` and `go.sum` files
+	//    into the subdirectory within the build environment.
+	//
+	// This ensures the Go compiler, when focused on the subdirectory, can still find
+	// the project's dependencies. Removing this two-step process will break the build.
+	// =================================================================================
 	mainBuildCommand := fmt.Sprintf("pack build %s --path %s", spec.Image, spec.BuildableModulePath)
+
 	buildSteps := []*cloudbuildpb.BuildStep{
 		{
 			Name:       "gcr.io/k8s-skaffold/pack",
@@ -349,6 +343,21 @@ func (a *googleCloudBuildAdapter) TriggerBuildAndWait(ctx context.Context, gcsSo
 			Entrypoint: "sh",
 			Args:       []string{"-c", mainBuildCommand},
 		},
+	}
+
+	// For monorepos, add the essential step to copy go.mod/go.sum files.
+	if spec.BuildableModulePath != "" && spec.BuildableModulePath != "." {
+		a.logger.Info().Str("module_path", spec.BuildableModulePath).Msg("Prepending 'copy-module-files' step for monorepo build")
+		copyStep := &cloudbuildpb.BuildStep{
+			Name:       "gcr.io/cloud-builders/gcloud",
+			Id:         "copy-module-files",
+			Entrypoint: "bash",
+			Args: []string{
+				"-c",
+				fmt.Sprintf("cp go.mod %s/ && ([ -f go.sum ] && cp go.sum %s/ || true)", spec.BuildableModulePath, spec.BuildableModulePath),
+			},
+		}
+		buildSteps = append([]*cloudbuildpb.BuildStep{copyStep}, buildSteps...)
 	}
 
 	req := &cloudbuildpb.CreateBuildRequest{
@@ -390,7 +399,6 @@ func (a *googleCloudBuildAdapter) TriggerBuildAndWait(ctx context.Context, gcsSo
 	return nil
 }
 
-// googleCloudRunAdapter implements the cloudRunAPI interface.
 type googleCloudRunAdapter struct {
 	projectID     string
 	defaultRegion string
@@ -480,17 +488,13 @@ func (a *googleCloudRunAdapter) pollRunOperation(ctx context.Context, opName str
 	}
 }
 
-// buildRunServiceConfig constructs the configuration for a Cloud Run service from a DeploymentSpec.
-// It correctly processes both plain-text and secret-backed environment variables.
 func buildRunServiceConfig(saEmail string, spec servicemanager.DeploymentSpec) *run.GoogleCloudRunV2Service {
 	var envVars []*run.GoogleCloudRunV2EnvVar
 
-	// Process plain-text environment variables.
 	for k, v := range spec.EnvironmentVars {
 		envVars = append(envVars, &run.GoogleCloudRunV2EnvVar{Name: k, Value: v})
 	}
 
-	// Process secret-backed environment variables.
 	for _, secretVar := range spec.SecretEnvironmentVars {
 		envVars = append(envVars, &run.GoogleCloudRunV2EnvVar{
 			Name: secretVar.Name,

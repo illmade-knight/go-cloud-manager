@@ -52,9 +52,7 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 		region := "us-central1"
 		imageRepo := "test-images"
 		runID := uuid.New().String()[:8]
-		sdSourcePath, _ := filepath.Abs("./testdata/toy-servicedirector")
-		pubSourcePath, _ := filepath.Abs("./testdata/tracer-publisher")
-		subSourcePath, _ := filepath.Abs("./testdata/tracer-subscriber")
+		sourcePath, _ := filepath.Abs("./testdata")
 
 		sdName = fmt.Sprintf("sd-%s", runID)
 		pubName := fmt.Sprintf("tracer-publisher-%s", runID)
@@ -72,12 +70,16 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 				Name:           sdName,
 				ServiceAccount: fmt.Sprintf("sd-sa-%s", runID),
 				Deployment: &servicemanager.DeploymentSpec{
-					SourcePath:          sdSourcePath,
-					BuildableModulePath: ".",
+					SourcePath:          sourcePath,
+					BuildableModulePath: "toy-servicedirector",
 					EnvironmentVars: map[string]string{
 						"SD_COMMAND_TOPIC":        commandTopicID,
 						"SD_COMMAND_SUBSCRIPTION": commandSubID,
 						"SD_COMPLETION_TOPIC":     completionTopicID,
+
+						// the service director would not usually need these but this is just a 'toy' version
+						"TRACER_TOPIC_ID": tracerTopicName,
+						"TRACER_SUB_ID":   tracerSubName,
 					},
 				},
 			},
@@ -88,8 +90,8 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 							Name:           subName,
 							ServiceAccount: fmt.Sprintf("sub-sa-%s", runID),
 							Deployment: &servicemanager.DeploymentSpec{
-								SourcePath:          subSourcePath,
-								BuildableModulePath: ".",
+								SourcePath:          sourcePath,
+								BuildableModulePath: "tracer-subscriber",
 								EnvironmentVars: map[string]string{
 									"SUBSCRIPTION_ID": tracerSubName,
 									"VERIFY_TOPIC_ID": verificationTopicName,
@@ -100,8 +102,8 @@ func TestOrchestrator_DataflowE2E(t *testing.T) {
 							Name:           pubName,
 							ServiceAccount: fmt.Sprintf("pub-sa-%s", runID),
 							Deployment: &servicemanager.DeploymentSpec{
-								SourcePath:          pubSourcePath,
-								BuildableModulePath: ".",
+								SourcePath:          sourcePath,
+								BuildableModulePath: "tracer-publisher",
 								EnvironmentVars:     map[string]string{"TOPIC_ID": tracerTopicName},
 							},
 						},

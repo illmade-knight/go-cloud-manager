@@ -4,6 +4,7 @@ go 1.23.0
 
 require (
 	cloud.google.com/go/pubsub v1.49.0
+	github.com/google/uuid v1.6.0
 	github.com/rs/zerolog v1.34.0
 )
 
@@ -17,7 +18,6 @@ require (
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.14.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
