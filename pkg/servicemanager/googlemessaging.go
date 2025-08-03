@@ -44,22 +44,23 @@ func fromGCPSubscriptionConfig(s *pubsub.SubscriptionConfig) *SubscriptionConfig
 	}
 
 	minimumBackoff := time.Second * 10
-	if s.RetryPolicy.MinimumBackoff != nil {
-		minimumBackoff = s.RetryPolicy.MinimumBackoff.(time.Duration)
-	}
 	maximumBackoff := time.Second * 600
-	if s.RetryPolicy.MaximumBackoff != nil {
-		maximumBackoff = s.RetryPolicy.MaximumBackoff.(time.Duration)
-	}
 
 	// REFACTOR_NOTE: Correctly handling the optional RetryPolicy.
 	// The s.RetryPolicy from the Google client is a pointer and can be nil.
 	// If it's not nil, we convert its fields to our Duration type for comparison.
 	if s.RetryPolicy != nil {
-		spec.RetryPolicy = &RetryPolicySpec{
-			MinimumBackoff: Duration(minimumBackoff),
-			MaximumBackoff: Duration(maximumBackoff),
+		if s.RetryPolicy.MinimumBackoff != nil {
+			minimumBackoff = s.RetryPolicy.MinimumBackoff.(time.Duration)
 		}
+		if s.RetryPolicy.MaximumBackoff != nil {
+			maximumBackoff = s.RetryPolicy.MaximumBackoff.(time.Duration)
+		}
+	}
+
+	spec.RetryPolicy = &RetryPolicySpec{
+		MinimumBackoff: Duration(minimumBackoff),
+		MaximumBackoff: Duration(maximumBackoff),
 	}
 
 	return spec
