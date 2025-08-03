@@ -94,7 +94,7 @@ func (y *YAMLArchitectureIO) LoadArchitecture(ctx context.Context) (*Microservic
 }
 
 // LoadResourceGroup reads a single resource group from a local file path.
-func (y *YAMLArchitectureIO) LoadResourceGroup(ctx context.Context, filePath string) (*ResourceGroup, error) {
+func (y *YAMLArchitectureIO) LoadResourceGroup(_ context.Context, filePath string) (*ResourceGroup, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read resource group file '%s': %w", filePath, err)
@@ -108,12 +108,14 @@ func (y *YAMLArchitectureIO) LoadResourceGroup(ctx context.Context, filePath str
 }
 
 // WriteProvisionedResources writes the provisioned state to a local file path.
-func (y *YAMLArchitectureIO) WriteProvisionedResources(ctx context.Context, resources *ProvisionedResources) error {
+func (y *YAMLArchitectureIO) WriteProvisionedResources(_ context.Context, resources *ProvisionedResources) error {
 	file, err := os.Create(y.outputFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file at '%s': %w", y.outputFilePath, err)
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	// We can enrich the data before writing
 	type templateData struct {

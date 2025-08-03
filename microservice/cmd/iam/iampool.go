@@ -37,7 +37,9 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create IAM admin client")
 	}
-	defer iamAdminClient.Close()
+	defer func() {
+		_ = iamAdminClient.Close()
+	}()
 
 	// Run the pool creation logic.
 	if err := createPool(ctx, iamAdminClient, *projectID, *prefix, *size, logger); err != nil {

@@ -2,6 +2,7 @@ package servicemanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"google.golang.org/api/option"
 
@@ -149,7 +150,7 @@ func (a *gcsBucketHandleAdapter) Create(ctx context.Context, projectID string, a
 func (a *gcsBucketHandleAdapter) Update(ctx context.Context, attrs BucketAttributesToUpdate) (*BucketAttributes, error) {
 	// To correctly calculate the diff for labels, we need the current attributes.
 	existingGCSAttrs, err := a.bucket.Attrs(ctx)
-	if err != nil && err != storage.ErrBucketNotExist {
+	if err != nil && !errors.Is(err, storage.ErrBucketNotExist) {
 		return nil, fmt.Errorf("failed to get existing attributes before update: %w", err)
 	}
 

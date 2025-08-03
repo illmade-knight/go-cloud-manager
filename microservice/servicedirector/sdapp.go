@@ -250,7 +250,7 @@ func (d *Director) Shutdown(ctx context.Context) {
 	}
 
 	if d.commands != nil {
-		d.commands.client.Close()
+		_ = d.commands.client.Close()
 	}
 }
 

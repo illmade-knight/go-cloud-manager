@@ -30,14 +30,14 @@ func NewManager(ctx context.Context, logger *log.Logger) (*Manager, error) {
 
 	metricClient, err := monitoring.NewMetricClient(ctx)
 	if err != nil {
-		alertClient.Close() // Clean up already created client
+		_ = alertClient.Close() // Clean up already created client
 		return nil, fmt.Errorf("failed to create metric client: %w", err)
 	}
 
 	channelClient, err := monitoring.NewNotificationChannelClient(ctx)
 	if err != nil {
-		alertClient.Close()
-		metricClient.Close()
+		_ = alertClient.Close()
+		_ = metricClient.Close()
 		return nil, fmt.Errorf("failed to create notification channel client: %w", err)
 	}
 
@@ -51,13 +51,23 @@ func NewManager(ctx context.Context, logger *log.Logger) (*Manager, error) {
 
 // Close gracefully closes all underlying client connections.
 func (m *Manager) Close() {
+	var err error
 	if m.AlertingClient != nil {
-		m.AlertingClient.Close()
+		err = m.AlertingClient.Close()
+		if err != nil {
+			m.Logger.Printf("Error closing alerting client: %v", err)
+		}
 	}
 	if m.MonitoringClient != nil {
-		m.MonitoringClient.Close()
+		err = m.MonitoringClient.Close()
+		if err != nil {
+			m.Logger.Printf("Error closing monitoring client: %v", err)
+		}
 	}
 	if m.NotificationChannelClient != nil {
-		m.NotificationChannelClient.Close()
+		err = m.NotificationChannelClient.Close()
+		if err != nil {
+			m.Logger.Printf("Error closing notification client: %v", err)
+		}
 	}
 }

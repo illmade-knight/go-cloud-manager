@@ -223,7 +223,7 @@ func (sd *ServiceDirector) Teardown(ctx context.Context) {
 func (sd *ServiceDirector) startWebServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "OK")
+		_, _ = fmt.Fprint(w, "OK")
 	})
 	return &http.Server{
 		Addr:    ":" + sd.cfg.Port,
@@ -261,7 +261,10 @@ func (sd *ServiceDirector) handleCommand(ctx context.Context, msg *pubsub.Messag
 	}
 
 	// Publish the result of the operation.
-	sd.publishCompletionEvent(ctx, event)
+	err := sd.publishCompletionEvent(ctx, event)
+	if err != nil {
+		sd.logger.Err(err).Msg("could not publish completion event")
+	}
 }
 
 // publishReadyEvent sends the initial "I'm alive and listening" message.

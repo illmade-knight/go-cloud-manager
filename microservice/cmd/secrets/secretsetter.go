@@ -24,7 +24,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create secretmanager client: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	var wg sync.WaitGroup
 

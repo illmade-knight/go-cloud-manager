@@ -28,14 +28,20 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create pubsub client")
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	verifyTopic := client.Topic(verifyTopicID)
 
 	// Start a simple health check server
 	go func() {
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "OK") })
-		http.ListenAndServe(":"+os.Getenv("PORT"), nil)
+		err = http.ListenAndServe(":"+os.Getenv("PORT"), nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("Health check server failed")
+			return
+		}
 	}()
 
 	// Start the subscription receiver

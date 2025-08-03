@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -107,7 +108,7 @@ func TestFinalBuildRecipe(t *testing.T) {
 	t.Cleanup(func() {
 		t.Logf("Cleaning up GCS object: %s", sourceObject)
 		err := storageClient.Bucket(sourceBucketName).Object(sourceObject).Delete(context.Background())
-		if err != nil && err != storage.ErrObjectNotExist {
+		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			t.Errorf("Failed to delete GCS source object: %v", err)
 		}
 	})

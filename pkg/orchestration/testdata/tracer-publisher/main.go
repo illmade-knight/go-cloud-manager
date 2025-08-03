@@ -79,7 +79,9 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create pubsub client")
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	topic := client.Topic(cfg.TopicID)
 
@@ -108,7 +110,7 @@ func main() {
 			return
 		}
 		logger.Info().Str("trace_id", traceID).Str("message_id", msgID).Msg("Successfully published tracer message via HTTP.")
-		fmt.Fprintf(w, "Message sent with trace ID: %s", traceID)
+		_, _ = fmt.Fprintf(w, "Message sent with trace ID: %s", traceID)
 	})
 
 	logger.Info().Str("port", cfg.Port).Msg("Starting HTTP server...")

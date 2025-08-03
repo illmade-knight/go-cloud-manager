@@ -7,6 +7,7 @@ package cloudmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -78,7 +79,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 			m.performCheck(ctx)
 		case <-ctx.Done():
 			m.logger.Println("Shutting down monitoring service.")
-			m.client.Close()
+			_ = m.client.Close()
 			return ctx.Err()
 		}
 	}
@@ -118,7 +119,7 @@ func (m *Monitor) checkSubscription(ctx context.Context, sub MonitoredSubscripti
 	it := m.client.ListTimeSeries(ctx, req)
 
 	result, err := it.Next()
-	if err == iterator.Done {
+	if errors.Is(err, iterator.Done) {
 		if sub.MinAckMessagesPerHour > 0 {
 			m.logger.Printf("ALERT: No messages acknowledged for subscription '%s' in the last hour (expected at least %d).", sub.SubscriptionID, sub.MinAckMessagesPerHour)
 		} else {
