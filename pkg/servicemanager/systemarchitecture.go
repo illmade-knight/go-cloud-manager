@@ -1,8 +1,9 @@
 package servicemanager
 
 import (
-	"gopkg.in/yaml.v3"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // This file defines the Go structs that map directly to the structure of the
@@ -183,7 +184,12 @@ type TopicConfig struct {
 	CloudResource `yaml:",inline"`
 	// ProducerService is the logical name of the service (defined in the same ResourceGroup) that publishes to this topic.
 	// This is used by the hydration step to inject the topic name as an environment variable into the service.
-	ProducerService string `yaml:"producer_service,omitempty"`
+	ProducerService *ServiceMapping `yaml:"producer_service,omitempty"`
+}
+
+type ServiceMapping struct {
+	Name string `yaml:"service"`
+	Env  string `yaml:"env"`
 }
 
 // SubscriptionConfig defines the configuration for a Pub/Sub subscription.
@@ -193,7 +199,7 @@ type SubscriptionConfig struct {
 	Topic string `yaml:"topic"`
 	// ConsumerService is the logical name of the service that consumes messages from this subscription.
 	// This is used by the hydration step to inject the subscription name as an environment variable.
-	ConsumerService string `yaml:"consumer_service,omitempty"`
+	ConsumerService *ServiceMapping `yaml:"consumer_service,omitempty"`
 	// AckDeadlineSeconds is the time a consumer has to acknowledge a message before it's redelivered.
 	AckDeadlineSeconds int `yaml:"ack_deadline_seconds,omitempty"`
 	// MessageRetention is how long Pub/Sub retains unacknowledged messages. (e.g., "7d", "24h").
@@ -220,6 +226,8 @@ type BigQueryDataset struct {
 // BigQueryTable defines the configuration for a BigQuery table.
 type BigQueryTable struct {
 	CloudResource `yaml:",inline"`
+	Consumers     []ServiceMapping `yaml:"consumers,omitempty"`
+	Producers     []ServiceMapping `yaml:"producers,omitempty"`
 	// Dataset is the name of the parent BigQuery dataset.
 	Dataset string `yaml:"dataset"`
 	// SchemaType is a key that maps to a Go struct registered with the ServiceManager.
@@ -240,6 +248,8 @@ type BigQueryTable struct {
 // GCSBucket defines the configuration for a Google Cloud Storage bucket.
 type GCSBucket struct {
 	CloudResource `yaml:",inline"`
+	Consumers     []ServiceMapping `yaml:"consumers,omitempty"`
+	Producers     []ServiceMapping `yaml:"consumers,omitempty"`
 	// Location is the geographic location of the bucket (e.g., "US-CENTRAL1").
 	Location string `yaml:"location,omitempty"`
 	// StorageClass is the default storage class for objects in the bucket (e.g., "STANDARD", "NEARLINE").

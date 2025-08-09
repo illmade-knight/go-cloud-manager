@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
+	"time"
 
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
@@ -96,6 +99,106 @@ func (o *IAMOrchestrator) ApplyIAMForDataflow(ctx context.Context, dataflowName 
 
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully applied IAM for all services in dataflow.")
 	return serviceEmails, nil
+}
+
+// VerifyIAMForDataflow polls the IAM policies for all services in a dataflow
+// until they reflect the planned state or a timeout is reached.
+// REFACTOR: This function has been updated to poll for all of a service's bindings concurrently.
+func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName string) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying IAM policy propagation for all services in dataflow.")
+
+	// Re-plan the roles to ensure we are verifying against the source of truth.
+	iamPlan, err := o.planner.PlanRolesForApplicationServices(o.arch)
+	if err != nil {
+		return fmt.Errorf("failed to generate IAM plan for verification: %w", err)
+	}
+
+	dataflow, _ := o.arch.Dataflows[dataflowName]
+	for serviceName, serviceSpec := range dataflow.Services {
+		bindings, ok := iamPlan[serviceSpec.ServiceAccount]
+		if !ok {
+			continue // No bindings planned for this service account.
+		}
+
+		saEmail, err := o.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
+		if err != nil {
+			return fmt.Errorf("failed to get service account email for '%s' during verification: %w", serviceName, err)
+		}
+		member := "serviceAccount:" + saEmail
+
+		o.logger.Info().Str("service", serviceName).Int("bindings", len(bindings)).Msg("Concurrently polling for all IAM bindings...")
+
+		// REFACTOR: Use a WaitGroup to poll for all bindings in parallel.
+		var wg sync.WaitGroup
+		// REFACTOR: Use a channel to collect errors from the concurrent polling operations.
+		errs := make(chan error, len(bindings))
+
+		for _, binding := range bindings {
+			wg.Add(1)
+			go func(b iam.IAMBinding) {
+				defer wg.Done()
+				if err := o.pollForBinding(ctx, b, member); err != nil {
+					errs <- err
+				}
+			}(binding)
+		}
+
+		// REFACTOR: Wait for all polls to complete, then close the error channel.
+		wg.Wait()
+		close(errs)
+
+		// REFACTOR: Collect any errors that occurred during polling.
+		var verificationErrors []string
+		for err := range errs {
+			verificationErrors = append(verificationErrors, err.Error())
+		}
+
+		if len(verificationErrors) > 0 {
+			return fmt.Errorf("verification failed for service '%s' with %d error(s): %s",
+				serviceName, len(verificationErrors), strings.Join(verificationErrors, "; "))
+		}
+		o.logger.Info().Str("service", serviceName).Msg("All bindings verified successfully.")
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("✅ Successfully verified all IAM policies for dataflow.")
+	return nil
+}
+
+// pollForBinding is a private helper to poll a single IAM binding.
+func (o *IAMOrchestrator) pollForBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+	// REFACTOR: The polling timeout is reduced as it's now per-binding, not for a whole service.
+	// The overall timeout is implicitly managed by the context passed into VerifyIAMForDataflow.
+	const pollTimeout = 2 * time.Minute
+	const pollInterval = 5 * time.Second
+
+	// Create a specific timeout context for this single polling operation.
+	timeoutCtx, cancel := context.WithTimeout(ctx, pollTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	o.logger.Debug().Str("member", member).Str("role", binding.Role).Str("resource", binding.ResourceID).Msg("Starting poll for binding...")
+
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			return fmt.Errorf("timed out waiting for binding to propagate: member '%s' on resource '%s' with role '%s'", member, binding.ResourceID, binding.Role)
+		case <-ticker.C:
+			found, err := o.iamClient.CheckResourceIAMBinding(timeoutCtx, binding, member)
+			if err != nil {
+				// Don't immediately fail; log and retry, as the API might be temporarily unavailable.
+				// The timeout will handle persistent errors.
+				o.logger.Warn().Err(err).Msg("Polling check failed with an error, will retry.")
+				continue
+			}
+			if found {
+				o.logger.Debug().Str("member", member).Str("role", binding.Role).Str("resource", binding.ResourceID).Msg("Binding found.")
+				return nil // Success!
+			}
+			o.logger.Debug().Str("member", member).Str("role", binding.Role).Str("resource", binding.ResourceID).Msg("Binding not yet propagated, still waiting...")
+		}
+	}
 }
 
 // SetupServiceDirectorIAM ensures the ServiceDirector's service account exists and grants it

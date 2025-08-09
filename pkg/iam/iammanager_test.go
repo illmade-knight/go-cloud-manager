@@ -47,6 +47,11 @@ func (m *MockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, servi
 	return args.Error(0)
 }
 
+func (m *MockIAMClient) CheckResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) (bool, error) {
+	args := m.Called(ctx, binding, member)
+	return true, args.Error(0)
+}
+
 func (m *MockIAMClient) Close() error {
 	args := m.Called()
 	return args.Error(0)

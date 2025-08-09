@@ -1,9 +1,7 @@
 package iam_test
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -50,32 +48,46 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 						ServiceAccount: "invoker-sa",
 						Dependencies:   []string{"publisher-service"}, // Depends on another service.
 					},
-					"explicit-policy-service": {
-						Name:           "explicit-policy-service",
-						ServiceAccount: "explicit-sa",
+					// MODIFIED: Add new services for GCS and BQ testing
+					"gcs-writer-service": {
+						Name:           "gcs-writer-service",
+						ServiceAccount: "gcs-writer-sa",
+					},
+					"bq-reader-service": {
+						Name:           "bq-reader-service",
+						ServiceAccount: "bq-reader-sa",
 					},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{
 							CloudResource:   servicemanager.CloudResource{Name: "data-topic"},
-							ProducerService: "publisher-service", // Implicit publisher role.
+							ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"}, // Implicit publisher role.
 						},
 					},
 					Subscriptions: []servicemanager.SubscriptionConfig{
 						{
 							CloudResource:   servicemanager.CloudResource{Name: "data-sub"},
 							Topic:           "data-topic",
-							ConsumerService: "subscriber-service", // Implicit subscriber role.
+							ConsumerService: &servicemanager.ServiceMapping{Name: "subscriber-service"}, // Implicit subscriber role.
 						},
 					},
 					GCSBuckets: []servicemanager.GCSBucket{
 						{
-							CloudResource: servicemanager.CloudResource{
-								Name: "explicit-policy-bucket",
-								IAMPolicy: []servicemanager.IAM{ // Explicit policy grant.
-									{Name: "explicit-policy-service", Role: "roles/storage.objectViewer"},
-								},
+							CloudResource: servicemanager.CloudResource{Name: "data-lake-bucket"},
+							// MODIFIED: Use producer/consumer links instead of explicit policy
+							Producers: []servicemanager.ServiceMapping{
+								{Name: "gcs-writer-service"},
+							},
+						},
+					},
+					BigQueryTables: []servicemanager.BigQueryTable{
+						{
+							CloudResource: servicemanager.CloudResource{Name: "events-table"},
+							Dataset:       "analytics-dataset",
+							// MODIFIED: Use producer/consumer links
+							Consumers: []servicemanager.ServiceMapping{
+								{Name: "bq-reader-service"},
 							},
 						},
 					},
@@ -86,11 +98,7 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 
 	planner := iam.NewRolePlanner(zerolog.Nop())
 
-	// ACT: Run the planner.
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
-	_ = ctx // Avoid unused variable warning.
-
+	// ACT
 	plan, err := planner.PlanRolesForApplicationServices(arch)
 	require.NoError(t, err)
 	require.NotNil(t, plan)
@@ -99,10 +107,8 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 	t.Run("Publisher gets Publisher and Viewer roles", func(t *testing.T) {
 		bindings := plan["publisher-sa"]
 		require.Len(t, bindings, 2)
-
 		expectedPublisher := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.publisher"}
 		expectedViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
-
 		assert.Contains(t, bindings, expectedPublisher)
 		assert.Contains(t, bindings, expectedViewer)
 	})
@@ -110,18 +116,17 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 	t.Run("Subscriber gets Subscriber and Topic Viewer roles", func(t *testing.T) {
 		bindings := plan["subscriber-sa"]
 		require.Len(t, bindings, 3)
-
 		expectedSubscriber := iam.IAMBinding{ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.subscriber"}
-		expectedViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
-
+		expectedSubViewer := iam.IAMBinding{ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.viewer"}
+		expectedTopicViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
 		assert.Contains(t, bindings, expectedSubscriber)
-		assert.Contains(t, bindings, expectedViewer)
+		assert.Contains(t, bindings, expectedSubViewer)
+		assert.Contains(t, bindings, expectedTopicViewer)
 	})
 
 	t.Run("Secret user gets Secret Accessor role", func(t *testing.T) {
 		bindings := plan["secret-sa"]
 		require.Len(t, bindings, 1)
-
 		expectedAccessor := iam.IAMBinding{ResourceType: "secret", ResourceID: "my-api-key", Role: "roles/secretmanager.secretAccessor"}
 		assert.Contains(t, bindings, expectedAccessor)
 	})
@@ -129,7 +134,6 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 	t.Run("Dependent service gets Invoker role", func(t *testing.T) {
 		bindings := plan["invoker-sa"]
 		require.Len(t, bindings, 1)
-
 		expectedInvoker := iam.IAMBinding{
 			ResourceType:     "cloudrun_service",
 			ResourceID:       "publisher-service",
@@ -139,11 +143,23 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 		assert.Contains(t, bindings, expectedInvoker)
 	})
 
-	t.Run("Service gets explicit role from iam_access_policy", func(t *testing.T) {
-		bindings := plan["explicit-sa"]
+	// MODIFIED: New test cases for the updated logic
+	t.Run("GCS writer service gets ObjectAdmin role from link", func(t *testing.T) {
+		bindings := plan["gcs-writer-sa"]
+		require.Len(t, bindings, 1)
+		expectedWriter := iam.IAMBinding{ResourceType: "gcs_bucket", ResourceID: "data-lake-bucket", Role: "roles/storage.objectAdmin"}
+		assert.Contains(t, bindings, expectedWriter)
+	})
+
+	t.Run("BigQuery consumer gets table-level DataViewer role", func(t *testing.T) {
+		bindings := plan["bq-reader-sa"]
 		require.Len(t, bindings, 1)
 
-		expectedViewer := iam.IAMBinding{ResourceType: "gcs_bucket", ResourceID: "explicit-policy-bucket", Role: "roles/storage.objectViewer"}
-		assert.Contains(t, bindings, expectedViewer)
+		expectedReader := iam.IAMBinding{
+			ResourceType: "bigquery_table",
+			ResourceID:   "analytics-dataset:events-table",
+			Role:         "roles/bigquery.dataViewer",
+		}
+		assert.Contains(t, bindings, expectedReader)
 	})
 }

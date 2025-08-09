@@ -102,7 +102,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 		t.Log("Orchestrator confirmed ServiceDirector is ready.")
 
 		// Step 4b: Now that the director is ready, trigger the dataflow setup.
-		err = orch.TriggerDataflowSetup(ctx, "test-flow")
+		err = orch.TriggerDataflowResourceCreation(ctx, "test-flow")
 		require.NoError(t, err)
 
 		// Step 4c: Await the "completion" signal for the dataflow setup.

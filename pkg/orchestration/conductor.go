@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/illmade-knight/go-cloud-manager/pkg/prerequisites" // NEW: Import the new package
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 )
@@ -12,8 +13,10 @@ import (
 // ConductorOptions provides flags to control the orchestration workflow.
 type ConductorOptions struct {
 	// Step Flags: Set to true to execute the step, false to skip.
+	CheckPrerequisites      bool
 	SetupServiceDirectorIAM bool
 	DeployServiceDirector   bool
+	VerifyDataflowIAM       bool
 	SetupDataflowResources  bool
 	ApplyDataflowIAM        bool
 	DeployDataflowServices  bool
@@ -28,6 +31,7 @@ type ConductorOptions struct {
 type Conductor struct {
 	arch                 *servicemanager.MicroserviceArchitecture
 	logger               zerolog.Logger
+	prerequisitesManager *prerequisites.Manager // NEW: Add the prerequisite manager
 	iamOrch              *IAMOrchestrator
 	orch                 *Orchestrator
 	options              ConductorOptions
@@ -37,6 +41,12 @@ type Conductor struct {
 
 // NewConductor creates and initializes a new Conductor with specific options.
 func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, opts ConductorOptions) (*Conductor, error) {
+	prerequisitesClient, err := prerequisites.NewGoogleServiceAPIClient(ctx, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create prerequisite client: %w", err)
+	}
+	prerequisitesManager := prerequisites.NewManager(prerequisitesClient, logger)
+
 	iamOrch, err := NewIAMOrchestrator(ctx, arch, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create IAM orchestrator: %w", err)
@@ -49,6 +59,7 @@ func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitec
 
 	return &Conductor{
 		arch:                 arch,
+		prerequisitesManager: prerequisitesManager,
 		logger:               logger.With().Str("component", "Conductor").Logger(),
 		iamOrch:              iamOrch,
 		orch:                 orch,
@@ -63,6 +74,10 @@ func (c *Conductor) Run(ctx context.Context) error {
 	c.logger.Info().Msg("Starting full architecture orchestration with specified options...")
 
 	var err error
+
+	if err = c.checkPrerequisites(ctx); err != nil {
+		return err
+	}
 
 	err = c.setupServiceDirectorIAM(ctx)
 	if err != nil {
@@ -84,12 +99,48 @@ func (c *Conductor) Run(ctx context.Context) error {
 		return err
 	}
 
+	err = c.verifyDataflowIAM(ctx)
+	if err != nil {
+		return err
+	}
+
 	err = c.deployDataflowServices(ctx)
 	if err != nil {
 		return err
 	}
 
 	c.logger.Info().Msg("✅ Full architecture orchestration completed successfully.")
+	return nil
+}
+
+// checkPrerequisites is the new phase 0 of the orchestration.
+func (c *Conductor) checkPrerequisites(ctx context.Context) error {
+	if !c.options.CheckPrerequisites {
+		c.logger.Info().Msg("Step 0: Skipping prerequisite API check.")
+		return nil
+	}
+	c.logger.Info().Msg("Executing Step 0: Checking prerequisite service APIs...")
+	err := c.prerequisitesManager.CheckAndEnable(ctx, c.arch)
+	if err != nil {
+		return fmt.Errorf("failed during prerequisite API check: %w", err)
+	}
+	c.logger.Info().Msg("Step 0: Prerequisite API check complete.")
+	return nil
+}
+
+func (c *Conductor) verifyDataflowIAM(ctx context.Context) error {
+	if !c.options.VerifyDataflowIAM {
+		c.logger.Info().Msg("Step 4.5: Skipping dataflow IAM verification.")
+		return nil
+	}
+	c.logger.Info().Msg("Executing Step 4.5: Verifying dataflow IAM policy propagation...")
+	for dataflowName := range c.arch.Dataflows {
+		err := c.iamOrch.VerifyIAMForDataflow(ctx, dataflowName)
+		if err != nil {
+			return fmt.Errorf("failed during IAM verification for dataflow '%s': %w", dataflowName, err)
+		}
+	}
+	c.logger.Info().Msg("Step 4.5: Dataflow IAM verification complete.")
 	return nil
 }
 
@@ -138,6 +189,8 @@ func (c *Conductor) deployServiceDirector(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed during ServiceDirector deployment: %w", err)
 	}
+	c.logger.Info().Str("url", url).Msg("ServiceDirector deployment is complete.")
+	c.arch.ServiceManagerSpec.Deployment.ServiceURL = url
 	err = c.orch.AwaitServiceReady(ctx, c.arch.ServiceManagerSpec.Name)
 	if err != nil {
 		return fmt.Errorf("failed while waiting for ServiceDirector to become ready: %w", err)
@@ -158,7 +211,7 @@ func (c *Conductor) setupDataflowResources(ctx context.Context) error {
 	c.logger.Info().Msg("Executing Step 3: Setting up dataflow resources...")
 	for dataflowName := range c.arch.Dataflows {
 		c.logger.Info().Str("dataflow", dataflowName).Msg("Triggering resource setup...")
-		err := c.orch.TriggerDataflowSetup(ctx, dataflowName)
+		err := c.orch.TriggerDataflowResourceCreation(ctx, dataflowName)
 		if err != nil {
 			return fmt.Errorf("failed to trigger setup for dataflow '%s': %w", dataflowName, err)
 		}

@@ -403,9 +403,9 @@ func (o *Orchestrator) TeardownDataflowServices(ctx context.Context, dataflowNam
 	return nil
 }
 
-// TriggerDataflowSetup sends a command to the ServiceDirector to begin resource creation for a dataflow.
-func (o *Orchestrator) TriggerDataflowSetup(ctx context.Context, dataflowName string) error {
-	o.logger.Info().Str("dataflow", dataflowName).Msg("Publishing dataflow setup command...")
+// TriggerDataflowResourceCreation sends a command to the ServiceDirector to begin resource creation for a dataflow.
+func (o *Orchestrator) TriggerDataflowResourceCreation(ctx context.Context, dataflowName string) error {
+	o.logger.Info().Str("dataflow", dataflowName).Str("topic", o.commandTopic.ID()).Msg("Publishing dataflow setup command...")
 	cmdPayload := Command{
 		Instruction: Setup,
 		Value:       dataflowName,

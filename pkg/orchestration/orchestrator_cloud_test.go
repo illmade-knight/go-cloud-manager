@@ -46,16 +46,18 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 		t.Cleanup(cleanupSource)
 
 		runID := uuid.New().String()[:8]
-		serviceName := fmt.Sprintf("toy-app-%s", runID)
+		serviceName := "toy-app"
+		serviceAccountName := "sa-toy-app"
+		region := "us-central1"
 
 		arch = &servicemanager.MicroserviceArchitecture{
 			Environment: servicemanager.Environment{
 				ProjectID: projectID,
-				Region:    "us-central1",
+				Region:    region,
 			},
 			ServiceManagerSpec: servicemanager.ServiceSpec{
 				Name:           serviceName,
-				ServiceAccount: fmt.Sprintf("toy-sa-%s", runID),
+				ServiceAccount: serviceAccountName,
 				Deployment: &servicemanager.DeploymentSpec{
 					SourcePath:          sourcePath,
 					BuildableModulePath: ".",
@@ -63,7 +65,7 @@ func TestOrchestrator_RealCloud_FullLifecycle(t *testing.T) {
 			},
 		}
 
-		err := servicemanager.HydrateArchitecture(arch, "test-images", "", logger)
+		err := servicemanager.HydrateTestArchitecture(arch, "test-images", "", logger)
 		require.NoError(t, err)
 
 		iamOrch, err = orchestration.NewIAMOrchestrator(ctx, arch, logger)

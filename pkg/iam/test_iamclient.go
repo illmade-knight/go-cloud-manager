@@ -220,3 +220,7 @@ func (c *TestIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Cont
 func (c *TestIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
 	return c.realClient.AddMemberToServiceAccountRole(ctx, serviceAccountEmail, member, role)
 }
+
+func (c *TestIAMClient) CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error) {
+	return c.realClient.CheckResourceIAMBinding(ctx, binding, member)
+}

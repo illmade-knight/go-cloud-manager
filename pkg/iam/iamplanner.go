@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -82,6 +83,7 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	for _, dataflow := range arch.Dataflows {
 		// First, plan roles from the explicit Pub/Sub producer/consumer links.
 		p.planPubSubLinkRoles(dataflow, finalPlan, &mu)
+		p.planDataResourceLinkRoles(dataflow, finalPlan, &mu) // MODIFIED: Call the new planning function.
 
 		// Next, iterate through each service to plan for its other dependencies and resource usage.
 		for serviceName, serviceSpec := range dataflow.Services {
@@ -94,13 +96,64 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	return finalPlan, nil
 }
 
+// planDataResourceLinkRoles is a NEW function to plan IAM roles for GCS and BigQuery.
+func (p *RolePlanner) planDataResourceLinkRoles(dataflow servicemanager.ResourceGroup, plan map[string][]IAMBinding, mu *sync.Mutex) {
+	// Plan roles for GCS Buckets
+	for _, bucket := range dataflow.Resources.GCSBuckets {
+		// Producers get writer permissions.
+		for _, producer := range bucket.Producers {
+			if service, ok := dataflow.Services[producer.Name]; ok {
+				p.logger.Info().Str("service", service.Name).Str("bucket", bucket.Name).Msg("Planning GCS writer role from Producer link")
+				binding := IAMBinding{ResourceType: "gcs_bucket", ResourceID: bucket.Name, Role: "roles/storage.objectAdmin"}
+				addBindingToPlan(service.ServiceAccount, binding, plan, mu)
+			}
+		}
+		// Consumers get reader permissions.
+		for _, consumer := range bucket.Consumers {
+			if service, ok := dataflow.Services[consumer.Name]; ok {
+				p.logger.Info().Str("service", service.Name).Str("bucket", bucket.Name).Msg("Planning GCS reader role from Consumer link")
+				binding := IAMBinding{ResourceType: "gcs_bucket", ResourceID: bucket.Name, Role: "roles/storage.objectViewer"}
+				addBindingToPlan(service.ServiceAccount, binding, plan, mu)
+			}
+		}
+	}
+
+	for _, table := range dataflow.Resources.BigQueryTables {
+		resourceID := fmt.Sprintf("%s:%s", table.Dataset, table.Name)
+		// Producers get dataEditor permissions on the specific table.
+		for _, producer := range table.Producers {
+			if service, ok := dataflow.Services[producer.Name]; ok {
+				p.logger.Info().Str("service", service.Name).Str("table", table.Name).Msg("Planning BigQuery table dataEditor role from Producer link")
+				binding := IAMBinding{
+					ResourceType: "bigquery_table",
+					ResourceID:   resourceID,
+					Role:         "roles/bigquery.dataEditor",
+				}
+				addBindingToPlan(service.ServiceAccount, binding, plan, mu)
+			}
+		}
+		// Consumers get dataViewer permissions on the specific table.
+		for _, consumer := range table.Consumers {
+			if service, ok := dataflow.Services[consumer.Name]; ok {
+				p.logger.Info().Str("service", service.Name).Str("table", table.Name).Msg("Planning BigQuery table dataViewer role from Consumer link")
+				binding := IAMBinding{
+					ResourceType: "bigquery_table",
+					ResourceID:   resourceID,
+					Role:         "roles/bigquery.dataViewer",
+				}
+				addBindingToPlan(service.ServiceAccount, binding, plan, mu)
+			}
+		}
+	}
+}
+
 // planPubSubLinkRoles plans IAM roles based on the `ProducerService` and `ConsumerService`
 // fields in the Pub/Sub resource definitions.
 func (p *RolePlanner) planPubSubLinkRoles(dataflow servicemanager.ResourceGroup, plan map[string][]IAMBinding, mu *sync.Mutex) {
 	// Plan Publisher roles from Topics based on `ProducerService`
 	for _, topic := range dataflow.Resources.Topics {
-		if topic.ProducerService != "" {
-			if service, ok := dataflow.Services[topic.ProducerService]; ok {
+		if topic.ProducerService != nil {
+			if service, ok := dataflow.Services[topic.ProducerService.Name]; ok {
 				p.logger.Info().Str("service", service.Name).Str("topic", topic.Name).Msg("Planning explicit publisher and viewer roles from ProducerService link")
 				// A publisher needs both publisher and viewer roles on the topic.
 				pubBinding := IAMBinding{ResourceType: "pubsub_topic", ResourceID: topic.Name, Role: "roles/pubsub.publisher"}
@@ -113,8 +166,8 @@ func (p *RolePlanner) planPubSubLinkRoles(dataflow servicemanager.ResourceGroup,
 
 	// Plan Subscriber roles from Subscriptions based on `ConsumerService`
 	for _, sub := range dataflow.Resources.Subscriptions {
-		if sub.ConsumerService != "" {
-			if service, ok := dataflow.Services[sub.ConsumerService]; ok {
+		if sub.ConsumerService != nil {
+			if service, ok := dataflow.Services[sub.ConsumerService.Name]; ok {
 				p.logger.Info().Str("service", service.Name).Str("subscription", sub.Name).Msg("Planning explicit subscriber and topic viewer roles from ConsumerService link")
 				// A subscriber needs the subscriber role on the subscription itself.
 				subBinding := IAMBinding{ResourceType: "pubsub_subscription", ResourceID: sub.Name, Role: "roles/pubsub.subscriber"}
@@ -155,17 +208,9 @@ func (p *RolePlanner) planResourceUsageRoles(serviceName string, serviceSpec ser
 
 	// Infer roles from conventions in the deployment spec.
 	if serviceSpec.Deployment != nil {
-		envVars := serviceSpec.Deployment.EnvironmentVars
-		if datasetID, ok := envVars["BIGQUERY_DATASET"]; ok {
-			p.logger.Info().Str("service", serviceName).Str("dataset", datasetID).Msg("Inferred BigQuery dataEditor role")
-			binding := IAMBinding{ResourceType: "bigquery_dataset", ResourceID: datasetID, Role: "roles/bigquery.dataEditor"}
-			addBindingToPlan(serviceSpec.ServiceAccount, binding, plan, mu)
-		}
-		if bucketName, ok := envVars["GCS_BUCKET_NAME"]; ok {
-			p.logger.Info().Str("service", serviceName).Str("bucket", bucketName).Msg("Inferred Storage objectAdmin role")
-			binding := IAMBinding{ResourceType: "gcs_bucket", ResourceID: bucketName, Role: "roles/storage.objectAdmin"}
-			addBindingToPlan(serviceSpec.ServiceAccount, binding, plan, mu)
-		}
+		// REMOVED: The brittle logic that checked for GCS_BUCKET_NAME and BIGQUERY_DATASET env vars.
+
+		// This part remains, as it's a valid convention.
 		if len(serviceSpec.Deployment.SecretEnvironmentVars) > 0 {
 			for _, secretVar := range serviceSpec.Deployment.SecretEnvironmentVars {
 				p.logger.Info().Str("service", serviceName).Str("secret", secretVar.ValueFrom).Msg("Inferred Secret Manager secretAccessor role")

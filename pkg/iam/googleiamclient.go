@@ -1,6 +1,12 @@
 package iam
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
 	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
 	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/iam"
@@ -10,16 +16,12 @@ import (
 	"cloud.google.com/go/pubsub"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/storage"
-	"context"
-	"errors"
-	"fmt"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"strings"
 )
 
 // --- (Structs, NewGoogleIAMClient, and other functions are included for completeness) ---
@@ -57,13 +59,14 @@ func (h *secretIAMHandle) SetPolicy(ctx context.Context, p *iam.Policy) error {
 }
 
 type GoogleIAMClient struct {
-	projectID      string
-	iamAdminClient *admin.IamClient
-	pubsubClient   *pubsub.Client
-	storageClient  *storage.Client
-	bigqueryClient *bigquery.Client
-	secretsClient  *secretmanager.Client
-	runService     *run.Service
+	projectID              string
+	iamAdminClient         *admin.IamClient
+	bigqueryAdminClient    *BigQueryIAMManager
+	pubsubClient           *pubsub.Client
+	storageClient          *storage.Client
+	secretsClient          *secretmanager.Client
+	runService             *run.Service
+	artifactRegistryClient *artifactregistry.Client
 }
 
 // NewGoogleIAMClient creates a new, fully initialized GoogleIAMClient.
@@ -84,6 +87,10 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bigquery client: %w", err)
 	}
+	bigQueryIAMManager, err := NewBigQueryIAMManager(bqClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bigquery manager: %w", err)
+	}
 	secretsClient, err := secretmanager.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create secretmanager client: %w", err)
@@ -92,15 +99,28 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 	if err != nil {
 		return nil, fmt.Errorf("failed to create run service: %w", err)
 	}
+	arClient, err := artifactregistry.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create artifactregistry client: %w", err)
+	}
 	return &GoogleIAMClient{
-		projectID:      projectID,
-		iamAdminClient: adminClient,
-		pubsubClient:   psClient,
-		storageClient:  gcsClient,
-		bigqueryClient: bqClient,
-		secretsClient:  secretsClient,
-		runService:     runService,
+		projectID:              projectID,
+		iamAdminClient:         adminClient,
+		pubsubClient:           psClient,
+		storageClient:          gcsClient,
+		bigqueryAdminClient:    bigQueryIAMManager,
+		secretsClient:          secretsClient,
+		runService:             runService,
+		artifactRegistryClient: arClient,
 	}, nil
+}
+
+func bigqueryTableSplitter(binding IAMBinding) ([]string, error) {
+	ids := strings.Split(binding.ResourceID, ":")
+	if len(ids) != 2 {
+		return nil, fmt.Errorf("invalid bigquery_table ResourceID format: expected 'dataset:table', got '%s'", binding.ResourceID)
+	}
+	return ids, nil
 }
 
 // AddResourceIAMBinding adds a member to a role on a specific cloud resource.
@@ -113,26 +133,119 @@ func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAM
 		Str("member", member).
 		Msg("GoogleIAMClient: Attempting to add resource IAM binding")
 
-	switch binding.ResourceType {
-	case "bigquery_dataset":
-		return c.addBigQueryDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
-	case "pubsub_topic":
-		return addStandardIAMBinding(ctx, c.pubsubClient.Topic(binding.ResourceID).IAM(), binding.Role, member)
-	case "pubsub_subscription":
-		return addStandardIAMBinding(ctx, c.pubsubClient.Subscription(binding.ResourceID).IAM(), binding.Role, member)
-	case "gcs_bucket":
-		return addStandardIAMBinding(ctx, c.storageClient.Bucket(binding.ResourceID).IAM(), binding.Role, member)
-	case "secret":
-		handle := &secretIAMHandle{
-			client:     c.secretsClient,
-			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
+	const maxRetries = 5
+	const retryDelay = 3 * time.Second
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		var err error
+
+		switch binding.ResourceType {
+		case "bigquery_dataset":
+			err = c.bigqueryAdminClient.AddDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+		case "bigquery_table":
+			ids, lErr := bigqueryTableSplitter(binding)
+			if lErr != nil {
+				// this is a fatal error so return right away
+				return lErr
+			}
+			datasetID, tableID := ids[0], ids[1]
+			handle := c.bigqueryAdminClient.client.Dataset(datasetID).Table(tableID).IAM()
+			err = addStandardIAMBinding(ctx, handle, binding.Role, member)
+		case "pubsub_topic":
+			err = addStandardIAMBinding(ctx, c.pubsubClient.Topic(binding.ResourceID).IAM(), binding.Role, member)
+		case "pubsub_subscription":
+			err = addStandardIAMBinding(ctx, c.pubsubClient.Subscription(binding.ResourceID).IAM(), binding.Role, member)
+		case "gcs_bucket":
+			err = addStandardIAMBinding(ctx, c.storageClient.Bucket(binding.ResourceID).IAM(), binding.Role, member)
+		case "secret":
+			handle := &secretIAMHandle{
+				client:     c.secretsClient,
+				resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
+			}
+			err = addStandardIAMBinding(ctx, handle, binding.Role, member)
+		case "cloudrun_service":
+			err = c.addCloudRunServiceIAMBinding(ctx, binding.ResourceLocation, binding.ResourceID, binding.Role, member)
+		default:
+			err = fmt.Errorf("unsupported resource type for IAM binding: %s", binding.ResourceType)
 		}
-		return addStandardIAMBinding(ctx, handle, binding.Role, member)
-	case "cloudrun_service":
-		return c.addCloudRunServiceIAMBinding(ctx, binding.ResourceLocation, binding.ResourceID, binding.Role, member)
-	default:
-		return fmt.Errorf("unsupported resource type for IAM binding: %s", binding.ResourceType)
+		if err == nil {
+			return nil // Success
+		}
+		lastErr = err
+
+		// REFACTOR: The retry logic here is specifically for resource propagation delay (NotFound).
+		// The more granular network retry logic is handled within the helper functions like addStandardIAMBinding.
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
+			log.Warn().
+				Err(err).
+				Int("attempt", i+1).
+				Int("max_retries", maxRetries).
+				Msg("Resource not found, likely due to propagation delay. Retrying...")
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		// For other errors, fail immediately.
+		return err
 	}
+
+	return fmt.Errorf("failed to add IAM binding after %d retries: %w", maxRetries, lastErr)
+}
+
+// REFACTOR: This function now includes a retry loop to handle transient network errors,
+// making it more resilient on flaky connections.
+func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error) {
+	const maxRetries = 5
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		var policy *iam.Policy
+		var err error
+
+		switch binding.ResourceType {
+		case "bigquery_dataset":
+			// The custom BQ dataset manager has its own retry/check logic.
+			return c.bigqueryAdminClient.CheckDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+		case "bigquery_table":
+			ids, lErr := bigqueryTableSplitter(binding)
+			if lErr != nil {
+				// this is a fatal error so return right away
+				return false, lErr
+			}
+			datasetID, tableID := ids[0], ids[1]
+			policy, err = c.bigqueryAdminClient.client.Dataset(datasetID).Table(tableID).IAM().Policy(ctx)
+		case "pubsub_topic":
+			policy, err = c.pubsubClient.Topic(binding.ResourceID).IAM().Policy(ctx)
+		case "pubsub_subscription":
+			policy, err = c.pubsubClient.Subscription(binding.ResourceID).IAM().Policy(ctx)
+		default:
+			return false, fmt.Errorf("unsupported resource type for IAM check: %s", binding.ResourceType)
+		}
+
+		if err == nil {
+			// Success, check the policy for the role.
+			return policy.HasRole(member, iam.RoleName(binding.Role)), nil
+		}
+
+		lastErr = err
+		// If the resource itself isn't found, the binding can't exist. This is not an error.
+		if status.Code(err) == codes.NotFound {
+			return false, nil
+		}
+		// If the error is a retriable network issue, log it and continue the loop.
+		if isRetriableError(err) {
+			log.Warn().Err(err).Int("attempt", i+1).Msg("CheckResourceIAMBinding failed with a transient error, retrying...")
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond) // backoff with jitter
+			continue
+		}
+
+		// For any other error, fail immediately.
+		return false, fmt.Errorf("could not get IAM policy for %s '%s': %w", binding.ResourceType, binding.ResourceID, err)
+	}
+
+	return false, fmt.Errorf("CheckResourceIAMBinding failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // RemoveResourceIAMBinding removes a member from a role on a specific cloud resource.
@@ -146,7 +259,16 @@ func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding 
 
 	switch binding.ResourceType {
 	case "bigquery_dataset":
-		return c.removeBigQueryDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+		return c.bigqueryAdminClient.RemoveDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+	case "bigquery_table":
+		ids, lErr := bigqueryTableSplitter(binding)
+		if lErr != nil {
+			// this is a fatal error so return right away
+			return lErr
+		}
+		datasetID, tableID := ids[0], ids[1]
+		handle := c.bigqueryAdminClient.client.Dataset(datasetID).Table(tableID).IAM()
+		return removeStandardIAMBinding(ctx, handle, binding.Role, member)
 	case "pubsub_topic":
 		return removeStandardIAMBinding(ctx, c.pubsubClient.Topic(binding.ResourceID).IAM(), binding.Role, member)
 	case "pubsub_subscription":
@@ -225,11 +347,14 @@ func (c *GoogleIAMClient) Close() error {
 	if err := c.storageClient.Close(); err != nil {
 		errs = append(errs, fmt.Sprintf("storageClient: %v", err))
 	}
-	if err := c.bigqueryClient.Close(); err != nil {
+	if err := c.bigqueryAdminClient.Close(); err != nil {
 		errs = append(errs, fmt.Sprintf("bigqueryClient: %v", err))
 	}
 	if err := c.secretsClient.Close(); err != nil {
 		errs = append(errs, fmt.Sprintf("secretsClient: %v", err))
+	}
+	if err := c.artifactRegistryClient.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("artifactRegistryClient: %v", err))
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("errors while closing clients: %s", strings.Join(errs, "; "))
@@ -239,78 +364,123 @@ func (c *GoogleIAMClient) Close() error {
 
 // --- Standard IAM Handling ---
 
-// addStandardIAMBinding uses the "get-modify-set" pattern on a resource's iam.Handle.
-// This pattern is common for many GCP services like Pub/Sub, Storage, etc.
-func addStandardIAMBinding(ctx context.Context, handle iamHandle, role, member string) error {
-	policy, err := handle.Policy(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get policy: %w", err)
+// REFACTOR: This new helper function centralizes the logic for identifying
+// transient gRPC errors that are safe to retry.
+func isRetriableError(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		// Not a gRPC status error, so not retriable by this logic.
+		return false
 	}
+	switch st.Code() {
+	case codes.Unavailable, codes.ResourceExhausted, codes.Unauthenticated:
+		// Unauthenticated is included because it can result from a transient
+		// failure to fetch an auth token due to network issues (like unexpected EOF).
+		return true
+	default:
+		return false
+	}
+}
 
-	policy.Add(member, iam.RoleName(role))
+// REFACTOR: This function's retry logic is now enhanced to check for transient
+// network errors in addition to concurrency errors.
+func addStandardIAMBinding(ctx context.Context, handle iamHandle, role, member string) error {
+	const maxRetries = 5
+	var lastErr error
 
-	err = handle.SetPolicy(ctx, policy)
-	if err != nil {
+	for i := 0; i < maxRetries; i++ {
+		policy, err := handle.Policy(ctx)
+		if err != nil {
+			if isRetriableError(err) {
+				lastErr = err
+				log.Warn().Err(err).Int("attempt", i+1).Msg("addStandardIAMBinding failed to get policy due to a transient error, retrying...")
+				time.Sleep(time.Duration(i*100+50) * time.Millisecond) // backoff with jitter
+				continue
+			}
+			return fmt.Errorf("failed to get policy: %w", err)
+		}
+
+		policy.Add(member, iam.RoleName(role))
+
+		err = handle.SetPolicy(ctx, policy)
+		if err == nil {
+			log.Info().Str("role", role).Str("member", member).Msg("GoogleIAMClient: Successfully set IAM policy.")
+			return nil // Success!
+		}
+		lastErr = err
+
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.Aborted {
+			log.Warn().
+				Err(err).
+				Int("attempt", i+1).
+				Msg("Concurrent modification detected while setting IAM policy. Retrying...")
+			time.Sleep(time.Duration(i*100) * time.Millisecond) // Exponential backoff
+			continue
+		}
+
+		if isRetriableError(err) {
+			log.Warn().Err(err).Int("attempt", i+1).Msg("addStandardIAMBinding failed to set policy due to a transient error, retrying...")
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond)
+			continue
+		}
+
 		log.Error().Err(err).Str("role", role).Str("member", member).Msg("GoogleIAMClient: FAILED to set IAM policy.")
 		return fmt.Errorf("failed to set policy: %w", err)
 	}
-
-	log.Info().Str("role", role).Str("member", member).Msg("GoogleIAMClient: Successfully set IAM policy.")
-	return nil
+	return fmt.Errorf("failed to set IAM policy after %d retries: %w", maxRetries, lastErr)
 }
 
-// removeStandardIAMBinding uses the same "get-modify-set" pattern to remove a member.
+// REFACTOR: This function's retry logic is now enhanced to check for transient network errors.
 func removeStandardIAMBinding(ctx context.Context, handle iamHandle, role, member string) error {
-	policy, err := handle.Policy(ctx)
-	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			return nil // Resource doesn't exist, so binding is already gone.
+	const maxRetries = 5
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		policy, err := handle.Policy(ctx)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil
+			}
+			if isRetriableError(err) {
+				lastErr = err
+				log.Warn().Err(err).Int("attempt", i+1).Msg("removeStandardIAMBinding failed to get policy due to a transient error, retrying...")
+				time.Sleep(time.Duration(i*100+50) * time.Millisecond) // backoff with jitter
+				continue
+			}
+			return fmt.Errorf("failed to get policy for removal: %w", err)
 		}
-		return fmt.Errorf("failed to get policy for removal: %w", err)
+
+		policy.Remove(member, iam.RoleName(role))
+
+		err = handle.SetPolicy(ctx, policy)
+		if err == nil {
+			return nil // Success!
+		}
+		lastErr = err
+
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.Aborted {
+			log.Warn().
+				Err(err).
+				Int("attempt", i+1).
+				Msg("Concurrent modification detected while removing IAM policy. Retrying...")
+			time.Sleep(time.Duration(i*100) * time.Millisecond)
+			continue
+		}
+
+		if isRetriableError(err) {
+			log.Warn().Err(err).Int("attempt", i+1).Msg("removeStandardIAMBinding failed to set policy due to a transient error, retrying...")
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond)
+			continue
+		}
+
+		return fmt.Errorf("failed to set policy for removal: %w", err)
 	}
-	policy.Remove(member, iam.RoleName(role))
-	return handle.SetPolicy(ctx, policy)
+	return fmt.Errorf("failed to remove IAM policy binding after %d retries: %w", maxRetries, lastErr)
 }
 
 // --- Specialized IAM Handlers ---
-
-// addBigQueryDatasetIAMBinding modifies the Access Control List (ACL) of a BigQuery dataset.
-// BigQuery's IAM model is older and does not use the standard iam.Handle. Instead, permissions
-// are added as AccessEntry items to the dataset's metadata.
-func (c *GoogleIAMClient) addBigQueryDatasetIAMBinding(ctx context.Context, datasetID, role, member string) error {
-	dataset := c.bigqueryClient.Dataset(datasetID)
-	meta, err := dataset.Metadata(ctx)
-	if err != nil {
-		return err
-	}
-	update := bigquery.DatasetMetadataToUpdate{
-		Access: append(meta.Access, &bigquery.AccessEntry{
-			Role:       bigquery.AccessRole(role),
-			EntityType: bigquery.IAMMemberEntity,
-			Entity:     member, // The Entity must be the full IAM member identifier (e.g., "serviceAccount:...")
-		}),
-	}
-	_, err = dataset.Update(ctx, update, meta.ETag)
-	return err
-}
-
-func (c *GoogleIAMClient) removeBigQueryDatasetIAMBinding(ctx context.Context, datasetID, role, member string) error {
-	dataset := c.bigqueryClient.Dataset(datasetID)
-	meta, err := dataset.Metadata(ctx)
-	if err != nil {
-		return err
-	}
-	var updatedAccess []*bigquery.AccessEntry
-	for _, entry := range meta.Access {
-		// Add all entries to the new list except the one we want to remove.
-		if !(entry.Role == bigquery.AccessRole(role) && entry.EntityType == bigquery.IAMMemberEntity && entry.Entity == member) {
-			updatedAccess = append(updatedAccess, entry)
-		}
-	}
-	update := bigquery.DatasetMetadataToUpdate{Access: updatedAccess}
-	_, err = dataset.Update(ctx, update, meta.ETag)
-	return err
-}
 
 // addCloudRunServiceIAMBinding handles IAM for Cloud Run, which uses its own distinct IAM policy format.
 func (c *GoogleIAMClient) addCloudRunServiceIAMBinding(ctx context.Context, location, serviceID, role, member string) error {
@@ -432,34 +602,52 @@ func (c *GoogleIAMClient) ListServiceAccounts(ctx context.Context) ([]*adminpb.S
 	return accounts, nil
 }
 
+// AddMemberToServiceAccountRole now uses a retry loop to prevent race conditions.
 func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
 	resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", c.projectID, serviceAccountEmail)
-	policy, err := c.iamAdminClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
-	if err != nil {
-		return fmt.Errorf("failed to get IAM policy for SA %s: %w", serviceAccountEmail, err)
-	}
-	policy.Add(member, iam.RoleName(role))
-	_, err = c.iamAdminClient.SetIamPolicy(ctx, &admin.SetIamPolicyRequest{
-		Resource: resourceName,
-		Policy:   policy,
-	})
-	if err != nil {
+
+	const maxRetries = 5
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		// Step 1: Get the low-level protobuf policy object.
+		policy, err := c.iamAdminClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
+		if err != nil {
+			return fmt.Errorf("failed to get IAM policy for SA %s: %w", serviceAccountEmail, err)
+		}
+
+		policy.Add(member, iam.RoleName(role))
+		_, err = c.iamAdminClient.SetIamPolicy(ctx, &admin.SetIamPolicyRequest{
+			Resource: resourceName,
+			Policy:   policy,
+		})
+
+		// Step 4: Check for success or a retriable error.
+		if err == nil {
+			log.Info().Str("member", member).Str("role", role).Str("on_sa", serviceAccountEmail).Msg("Successfully added IAM binding to service account.")
+			return nil // Success!
+		}
+		lastErr = err
+
+		if st, ok := status.FromError(err); ok && st.Code() == codes.Aborted {
+			log.Warn().
+				Err(err).
+				Int("attempt", i+1).
+				Str("sa", serviceAccountEmail).
+				Msg("Concurrent modification detected while setting SA IAM policy. Retrying...")
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond) // Exponential backoff with jitter
+			continue
+		}
+
 		return fmt.Errorf("failed to set IAM policy for SA %s: %w", serviceAccountEmail, err)
 	}
-	log.Info().Str("member", member).Str("role", role).Str("on_sa", serviceAccountEmail).Msg("Successfully added IAM binding to service account.")
-	return nil
+	return fmt.Errorf("failed to set IAM policy for SA %s after %d retries: %w", serviceAccountEmail, maxRetries, lastErr)
 }
 
 func (c *GoogleIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
-	arClient, err := artifactregistry.NewClient(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create artifactregistry client: %w", err)
-	}
-	defer func() {
-		_ = arClient.Close()
-	}()
+
 	repoResource := fmt.Sprintf("projects/%s/locations/%s/repositories/%s", c.projectID, location, repositoryID)
-	policy, err := arClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: repoResource})
+	policy, err := c.artifactRegistryClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: repoResource})
 	if err != nil {
 		return fmt.Errorf("failed to get IAM policy for repository %s: %w", repositoryID, err)
 	}
@@ -490,7 +678,7 @@ func (c *GoogleIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Co
 		log.Info().Msgf("Member %s already has role %s on repository %s. No changes needed.", member, role, repositoryID)
 		return nil
 	}
-	_, err = arClient.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
+	_, err = c.artifactRegistryClient.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
 		Resource: repoResource,
 		Policy:   policy,
 	})

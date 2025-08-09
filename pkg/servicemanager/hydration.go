@@ -8,166 +8,284 @@ import (
 	"strings"
 )
 
-// HydrateArchitecture iterates through a MicroserviceArchitecture and fills in
-// default and dynamically generated values for all deployment specifications.
-// It performs validation first, then proceeds in two main passes:
-//  1. Hydrates basic names, regions, and container image paths for all services.
-//  2. Injects environment variables into services based on the now-finalized
-//     resource names they are explicitly linked to in the configuration.
-func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID string, logger zerolog.Logger) error {
+// HydrateArchitecture prepares an architecture for a production-like deployment. It fills
+// in default values and injects environment variables based on the static resource
+// links in the YAML, without applying any test-specific transformations.
+func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo string, logger zerolog.Logger) error {
 	if arch == nil {
 		return errors.New("cannot hydrate a nil architecture")
 	}
-
-	// First, ensure the architecture definition is valid.
-	validationErr := arch.Validate()
-	if validationErr != nil {
-		return fmt.Errorf("architecture validation failed: %w", validationErr)
+	if err := arch.Validate(); err != nil {
+		return fmt.Errorf("architecture validation failed: %w", err)
 	}
 
-	defaultRegion := arch.Environment.Region
 	log := logger.With().Str("component", "Hydration").Logger()
+	log.Info().Msg("Starting production architecture hydration...")
 
-	// --- Pass 1: Hydrate basic deployment specs and names for all services ---
-	log.Info().Msg("Starting hydration pass 1: Standard service properties and names.")
+	// Step 1: Hydrate deployment specs with defaults and generate final image paths.
+	hydrateAllDeploymentSpecs(arch, defaultImageRepo)
 
-	// Hydrate the service manager first.
-	if arch.ServiceManagerSpec.Deployment != nil {
-		originalName := arch.ServiceManagerSpec.Name
-		if runID != "" {
-			arch.ServiceManagerSpec.Name = fmt.Sprintf("%s-%s", arch.ServiceManagerSpec.Name, runID)
-			log.Info().Str("original_name", originalName).Str("new_name", arch.ServiceManagerSpec.Name).Str("run_id", runID).Msg("Service Manager name hydrated with run ID.")
-		}
-		hydrateDeploymentSpec(
-			arch.ServiceManagerSpec.Deployment,
-			arch.ServiceManagerSpec.Name,
-			"conductor", // The ServiceManager belongs to the "conductor" pseudo-dataflow.
-			arch.ProjectID,
-			defaultRegion,
-			defaultImageRepo,
-			log,
-		)
-	}
+	// Step 2: Inject environment variables using the final, static names.
+	injectAllEnvironmentVariables(arch)
 
-	// Hydrate all services within dataflows.
-	for dataflowName, dataflow := range arch.Dataflows {
-		for serviceKey, service := range dataflow.Services {
-			if service.Deployment == nil {
-				continue
-			}
-
-			originalName := service.Name
-			if runID != "" {
-				// Create a new name with the runID and update the service spec.
-				hydratedName := fmt.Sprintf("%s-%s", service.Name, runID)
-				service.Name = hydratedName
-				// REFACTOR_NOTE: It's crucial to re-assign the modified struct back to the map
-				// because maps in Go hold copies of structs.
-				dataflow.Services[serviceKey] = service
-				log.Info().Str("original_name", originalName).Str("new_name", service.Name).Str("run_id", runID).Msg("Service name hydrated with run ID.")
-			}
-
-			hydrateDeploymentSpec(
-				service.Deployment,
-				service.Name,
-				dataflowName,
-				arch.ProjectID,
-				defaultRegion,
-				defaultImageRepo,
-				log,
-			)
-		}
-	}
-
-	// --- Pass 2: Inject environment variables based on explicit resource links. ---
-	// This makes the YAML purely declarative about which service uses which resource.
-	log.Info().Msg("Starting hydration pass 2: Injecting environment variables from resource links.")
-	for _, dataflow := range arch.Dataflows {
-		// Inject environment variables for topics.
-		for _, topic := range dataflow.Resources.Topics {
-			if topic.ProducerService == "" {
-				continue
-			}
-			if service, ok := dataflow.Services[topic.ProducerService]; ok {
-				if service.Deployment.EnvironmentVars == nil {
-					service.Deployment.EnvironmentVars = make(map[string]string)
-				}
-				envKey := fmt.Sprintf("%s_TOPIC_ID", strings.Replace(strings.ToUpper(topic.Name), "-", "_", -1))
-				service.Deployment.EnvironmentVars[envKey] = topic.Name
-				dataflow.Services[topic.ProducerService] = service
-				log.Debug().Str("service", service.Name).Str("env_var", envKey).Str("value", topic.Name).Msg("Injected topic environment variable.")
-			}
-		}
-
-		// Inject environment variables for subscriptions.
-		for _, sub := range dataflow.Resources.Subscriptions {
-			if sub.ConsumerService == "" {
-				continue
-			}
-			if service, ok := dataflow.Services[sub.ConsumerService]; ok {
-				if service.Deployment.EnvironmentVars == nil {
-					service.Deployment.EnvironmentVars = make(map[string]string)
-				}
-				envKey := fmt.Sprintf("%s_SUB_ID", strings.Replace(strings.ToUpper(sub.Name), "-", "_", -1))
-				service.Deployment.EnvironmentVars[envKey] = sub.Name
-				dataflow.Services[sub.ConsumerService] = service
-				log.Debug().Str("service", service.Name).Str("env_var", envKey).Str("value", sub.Name).Msg("Injected subscription environment variable.")
-				service.Deployment.EnvironmentVars[envKey] = sub.Name
-				dataflow.Services[sub.ConsumerService] = service
-				log.Debug().Str("service", service.Name).Str("env_var", envKey).Str("value", sub.Name).Msg("Injected subscription environment variable.")
-			}
-		}
-	}
-	log.Info().Msg("Architecture hydration complete.")
+	log.Info().Msg("Production architecture hydration complete.")
 	return nil
 }
 
-// hydrateDeploymentSpec is a private helper that fills in default and dynamically
-// generated values for a single DeploymentSpec.
-func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, dataflowName, projectID, defaultRegion, defaultImageRepo string, log zerolog.Logger) {
-	log = log.With().Str("service", serviceName).Logger()
+// HydrateTestArchitecture prepares an architecture for an isolated test run. It first
+// transforms all names, keys, and cross-references using the provided runID, then
+// hydrates the deployment specs and injects environment variables based on the new names.
+func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID string, logger zerolog.Logger) (map[string]string, error) {
+	if runID == "" {
+		return nil, errors.New("HydrateTestArchitecture requires a non-empty runID")
+	}
+	if arch == nil {
+		return nil, errors.New("cannot hydrate a nil architecture")
+	}
+	if err := arch.Validate(); err != nil {
+		return nil, fmt.Errorf("architecture validation failed: %w", err)
+	}
 
+	log := logger.With().Str("component", "Hydration").Logger()
+	log.Info().Msgf("Starting test architecture hydration with runID '%s'...", runID)
+
+	nameMap := make(map[string]string)
+
+	// Step 1: Apply the runID transformation to all names, keys, and links.
+	applyRunIDTransformation(arch, runID, nameMap)
+
+	// Step 2: Hydrate deployment specs with defaults, now using the transformed names.
+	hydrateAllDeploymentSpecs(arch, defaultImageRepo)
+
+	// Step 3: Inject environment variables using the final, transformed names.
+	injectAllEnvironmentVariables(arch)
+
+	log.Info().Msg("Test architecture hydration complete.")
+	return nameMap, nil
+}
+
+// --- Private Helpers ---
+
+// applyRunIDTransformation modifies all names, keys, and cross-references in the architecture.
+func applyRunIDTransformation(arch *MicroserviceArchitecture, runID string, nameMap map[string]string) {
+	if arch.ServiceManagerSpec.Deployment != nil {
+		originalName := arch.ServiceManagerSpec.Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		arch.ServiceManagerSpec.Name = hydratedName
+		arch.ServiceManagerSpec.ServiceAccount = fmt.Sprintf("%s-%s", arch.ServiceManagerSpec.ServiceAccount, runID)
+		nameMap[originalName] = hydratedName
+
+		for key, val := range arch.ServiceManagerSpec.Deployment.EnvironmentVars {
+			hydratedVal := fmt.Sprintf("%s-%s", val, runID)
+			arch.ServiceManagerSpec.Deployment.EnvironmentVars[key] = hydratedVal
+			nameMap[val] = hydratedVal
+		}
+	}
+
+	for dataflowName, dataflow := range arch.Dataflows {
+		for k, service := range dataflow.Services {
+			originalName := service.Name
+			hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+			service.Name = hydratedName
+			service.ServiceAccount = fmt.Sprintf("%s-%s", service.ServiceAccount, runID)
+			dataflow.Services[k] = service
+			nameMap[originalName] = hydratedName
+		}
+		hydrateResourceNamesWithRunID(&dataflow.Resources, runID, nameMap)
+
+		rekeyedServices := make(map[string]ServiceSpec, len(dataflow.Services))
+		for _, service := range dataflow.Services {
+			rekeyedServices[service.Name] = service
+		}
+		dataflow.Services = rekeyedServices
+
+		updateAllCrossReferences(&dataflow, runID)
+		arch.Dataflows[dataflowName] = dataflow
+	}
+}
+
+// hydrateAllDeploymentSpecs fills in defaults for all services in the architecture.
+func hydrateAllDeploymentSpecs(arch *MicroserviceArchitecture, defaultImageRepo string) {
+	if arch.ServiceManagerSpec.Deployment != nil {
+		hydrateDeploymentSpec(arch.ServiceManagerSpec.Deployment, arch.ServiceManagerSpec.Name, "conductor", arch.ProjectID, arch.Region, defaultImageRepo)
+	}
+	for dataflowName, dataflow := range arch.Dataflows {
+		for _, service := range dataflow.Services {
+			if service.Deployment != nil {
+				hydrateDeploymentSpec(service.Deployment, service.Name, dataflowName, arch.ProjectID, arch.Region, defaultImageRepo)
+			}
+		}
+	}
+}
+
+// injectAllEnvironmentVariables handles the injection of all resource links as env vars.
+func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
+	for _, dataflow := range arch.Dataflows {
+		for _, topic := range dataflow.Resources.Topics {
+			if topic.ProducerService != nil {
+				if service, ok := dataflow.Services[topic.ProducerService.Name]; ok {
+					injectEnvVar(service.Deployment, topic.ProducerService.Env, topic.Name, "TOPIC_ID")
+				}
+			}
+		}
+		for _, sub := range dataflow.Resources.Subscriptions {
+			if sub.ConsumerService != nil {
+				if service, ok := dataflow.Services[sub.ConsumerService.Name]; ok {
+					injectEnvVar(service.Deployment, sub.ConsumerService.Env, sub.Name, "SUB_ID")
+				}
+			}
+		}
+		for _, table := range dataflow.Resources.BigQueryTables {
+			for _, producer := range table.Producers {
+				if service, ok := dataflow.Services[producer.Name]; ok {
+					injectEnvVar(service.Deployment, producer.Env, table.Name, "WRITE_TABLE")
+				}
+			}
+			for _, consumer := range table.Consumers {
+				if service, ok := dataflow.Services[consumer.Name]; ok {
+					injectEnvVar(service.Deployment, consumer.Env, table.Name, "READ_TABLE")
+				}
+			}
+		}
+		for _, bucket := range dataflow.Resources.GCSBuckets {
+			for _, producer := range bucket.Producers {
+				if service, ok := dataflow.Services[producer.Name]; ok {
+					injectEnvVar(service.Deployment, producer.Env, bucket.Name, "WRITE_BUCKET")
+				}
+			}
+			for _, consumer := range bucket.Consumers {
+				if service, ok := dataflow.Services[consumer.Name]; ok {
+					injectEnvVar(service.Deployment, consumer.Env, bucket.Name, "READ_BUCKET")
+				}
+			}
+		}
+	}
+}
+
+func updateAllCrossReferences(dataflow *ResourceGroup, runID string) {
+	for _, service := range dataflow.Services {
+		for i, depName := range service.Dependencies {
+			service.Dependencies[i] = fmt.Sprintf("%s-%s", depName, runID)
+		}
+	}
+	resources := &dataflow.Resources
+	for i := range resources.Topics {
+		if resources.Topics[i].ProducerService != nil {
+			resources.Topics[i].ProducerService.Name = fmt.Sprintf("%s-%s", resources.Topics[i].ProducerService.Name, runID)
+		}
+		for j := range resources.Topics[i].IAMPolicy {
+			resources.Topics[i].IAMPolicy[j].Name = fmt.Sprintf("%s-%s", resources.Topics[i].IAMPolicy[j].Name, runID)
+		}
+	}
+	for i := range resources.Subscriptions {
+		if resources.Subscriptions[i].ConsumerService != nil {
+			resources.Subscriptions[i].ConsumerService.Name = fmt.Sprintf("%s-%s", resources.Subscriptions[i].ConsumerService.Name, runID)
+		}
+		for j := range resources.Subscriptions[i].IAMPolicy {
+			resources.Subscriptions[i].IAMPolicy[j].Name = fmt.Sprintf("%s-%s", resources.Subscriptions[i].IAMPolicy[j].Name, runID)
+		}
+	}
+	for i := range resources.GCSBuckets {
+		for j := range resources.GCSBuckets[i].Producers {
+			resources.GCSBuckets[i].Producers[j].Name = fmt.Sprintf("%s-%s", resources.GCSBuckets[i].Producers[j].Name, runID)
+		}
+		for j := range resources.GCSBuckets[i].Consumers {
+			resources.GCSBuckets[i].Consumers[j].Name = fmt.Sprintf("%s-%s", resources.GCSBuckets[i].Consumers[j].Name, runID)
+		}
+		for j := range resources.GCSBuckets[i].IAMPolicy {
+			resources.GCSBuckets[i].IAMPolicy[j].Name = fmt.Sprintf("%s-%s", resources.GCSBuckets[i].IAMPolicy[j].Name, runID)
+		}
+	}
+	for i := range resources.BigQueryTables {
+		for j := range resources.BigQueryTables[i].Producers {
+			resources.BigQueryTables[i].Producers[j].Name = fmt.Sprintf("%s-%s", resources.BigQueryTables[i].Producers[j].Name, runID)
+		}
+		for j := range resources.BigQueryTables[i].Consumers {
+			resources.BigQueryTables[i].Consumers[j].Name = fmt.Sprintf("%s-%s", resources.BigQueryTables[i].Consumers[j].Name, runID)
+		}
+	}
+	for i := range resources.BigQueryDatasets {
+		for j := range resources.BigQueryDatasets[i].IAMPolicy {
+			resources.BigQueryDatasets[i].IAMPolicy[j].Name = fmt.Sprintf("%s-%s", resources.BigQueryDatasets[i].IAMPolicy[j].Name, runID)
+		}
+	}
+}
+
+func hydrateResourceNamesWithRunID(resources *CloudResourcesSpec, runID string, nameMap map[string]string) {
+	for i := range resources.Topics {
+		originalName := resources.Topics[i].Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		resources.Topics[i].Name = hydratedName
+		nameMap[originalName] = hydratedName
+	}
+	for i := range resources.GCSBuckets {
+		originalName := resources.GCSBuckets[i].Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		resources.GCSBuckets[i].Name = hydratedName
+		nameMap[originalName] = hydratedName
+	}
+	for i := range resources.BigQueryDatasets {
+		originalName := resources.BigQueryDatasets[i].Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		resources.BigQueryDatasets[i].Name = hydratedName
+		nameMap[originalName] = hydratedName
+	}
+	for i := range resources.BigQueryTables {
+		originalName := resources.BigQueryTables[i].Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		resources.BigQueryTables[i].Name = hydratedName
+		nameMap[originalName] = hydratedName
+		resources.BigQueryTables[i].Dataset = fmt.Sprintf("%s-%s", resources.BigQueryTables[i].Dataset, runID)
+	}
+	for i := range resources.Subscriptions {
+		originalName := resources.Subscriptions[i].Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		resources.Subscriptions[i].Name = hydratedName
+		nameMap[originalName] = hydratedName
+		resources.Subscriptions[i].Topic = fmt.Sprintf("%s-%s", resources.Subscriptions[i].Topic, runID)
+	}
+}
+
+func generateImagePath(spec *DeploymentSpec, serviceName, projectID string) string {
+	return fmt.Sprintf(
+		"%s-docker.pkg.dev/%s/%s/%s:%s",
+		spec.Region, projectID, spec.ImageRepo, serviceName, uuid.New().String()[:8],
+	)
+}
+
+func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, dataflowName, projectID, defaultRegion, defaultImageRepo string) {
 	if spec.Region == "" {
 		spec.Region = defaultRegion
-		log.Debug().Str("default_region", defaultRegion).Msg("Hydrated region with default.")
 	}
 	if spec.ImageRepo == "" {
 		spec.ImageRepo = defaultImageRepo
-		log.Debug().Str("default_image_repo", defaultImageRepo).Msg("Hydrated image repository with default.")
 	}
 	if spec.CPU == "" {
 		spec.CPU = "1"
-		log.Debug().Msg("Hydrated CPU with default '1'.")
 	}
 	if spec.Memory == "" {
 		spec.Memory = "512Mi"
-		log.Debug().Msg("Hydrated memory with default '512Mi'.")
 	}
-
 	if spec.EnvironmentVars == nil {
 		spec.EnvironmentVars = make(map[string]string)
 	}
-
-	// Standard injected variables that are useful for service runtime introspection.
 	spec.EnvironmentVars["PROJECT_ID"] = projectID
 	spec.EnvironmentVars["SERVICE_NAME"] = serviceName
 	spec.EnvironmentVars["DATAFLOW_NAME"] = dataflowName
-	log.Debug().Msg("Injected standard PROJECT_ID, SERVICE_NAME, and DATAFLOW_NAME environment variables.")
-
-	// Dynamically generate the full container image path with a unique tag.
-	spec.Image = fmt.Sprintf(
-		"%s-docker.pkg.dev/%s/%s/%s:%s",
-		spec.Region,
-		projectID,
-		spec.ImageRepo,
-		serviceName,
-		uuid.New().String()[:8], // Append a unique ID to the tag to avoid collisions.
-	)
-	log.Debug().Str("image_path", spec.Image).Msg("Hydrated full container image path.")
+	spec.Image = generateImagePath(spec, serviceName, projectID)
 }
 
-// Validate performs a pre-flight check on the architecture definition to ensure
-// all required fields are populated before attempting to hydrate or deploy.
+func injectEnvVar(spec *DeploymentSpec, specifiedKey, resourceName, keySuffix string) {
+	if spec.EnvironmentVars == nil {
+		spec.EnvironmentVars = make(map[string]string)
+	}
+	envKey := specifiedKey
+	if envKey == "" {
+		envKey = fmt.Sprintf("%s_%s", strings.Replace(strings.ToUpper(resourceName), "-", "_", -1), keySuffix)
+	}
+	spec.EnvironmentVars[envKey] = resourceName
+}
+
 func (arch *MicroserviceArchitecture) Validate() error {
 	if arch.ServiceManagerSpec.Name == "" {
 		return errors.New("ServiceManagerSpec.Name is a required field")
@@ -175,7 +293,6 @@ func (arch *MicroserviceArchitecture) Validate() error {
 	if arch.ServiceManagerSpec.ServiceAccount == "" {
 		return errors.New("ServiceManagerSpec.ServiceAccount is a required field")
 	}
-
 	for dfName, dataflow := range arch.Dataflows {
 		for serviceKey, service := range dataflow.Services {
 			if service.Name == "" {

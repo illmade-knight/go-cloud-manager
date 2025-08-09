@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"strings"
+
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 )
@@ -75,6 +77,7 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servic
 
 	member := "serviceAccount:" + saEmail
 
+	var bindingErrors []string
 	// 4. Execute the plan by applying each binding.
 	for _, binding := range bindings {
 		im.logger.Info().
@@ -86,8 +89,16 @@ func (im *simpleIAMManager) ApplyIAMForService(ctx context.Context, arch *servic
 
 		err = im.client.AddResourceIAMBinding(ctx, binding, member)
 		if err != nil {
-			return fmt.Errorf("failed to apply binding for resource '%s' with role '%s' to member '%s': %w", binding.ResourceID, binding.Role, member, err)
+			// REFACTOR: Collect all errors instead of returning on the first one.
+			errMessage := fmt.Sprintf("failed to apply binding for resource '%s' with role '%s' to member '%s': %v", binding.ResourceID, binding.Role, member, err)
+			im.logger.Error().Msg(errMessage)
+			bindingErrors = append(bindingErrors, errMessage)
 		}
+	}
+
+	// 5. If any errors were collected, return them as a single aggregated error.
+	if len(bindingErrors) > 0 {
+		return fmt.Errorf("encountered %d error(s) while applying IAM bindings for service '%s': %s", len(bindingErrors), serviceName, strings.Join(bindingErrors, "; "))
 	}
 
 	im.logger.Info().Str("service", serviceName).Int("bindings_applied", len(bindings)).Msg("Successfully applied all planned IAM policies.")

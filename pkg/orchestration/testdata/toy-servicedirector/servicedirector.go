@@ -50,6 +50,7 @@ type Config struct {
 	CompletionTopicID string
 	TracerTopicID     string
 	TracerSubID       string
+	VerifyTopicID     string
 	Port              string
 }
 
@@ -62,10 +63,11 @@ func NewConfig() (*Config, error) {
 		CompletionTopicID: os.Getenv("SD_COMPLETION_TOPIC"),
 		TracerTopicID:     os.Getenv("TRACER_TOPIC_ID"),
 		TracerSubID:       os.Getenv("TRACER_SUB_ID"),
+		VerifyTopicID:     os.Getenv("VERIFY_TOPIC_ID"),
 		Port:              os.Getenv("PORT"),
 	}
 
-	if cfg.ProjectID == "" || cfg.CommandTopicID == "" || cfg.CommandSubID == "" || cfg.CompletionTopicID == "" || cfg.TracerTopicID == "" || cfg.TracerSubID == "" {
+	if cfg.ProjectID == "" || cfg.CommandTopicID == "" || cfg.CommandSubID == "" || cfg.CompletionTopicID == "" || cfg.TracerTopicID == "" || cfg.TracerSubID == "" || cfg.VerifyTopicID == "" {
 		return nil, errors.New("missing required environment variables")
 	}
 
@@ -123,7 +125,7 @@ func (sd *ServiceDirector) setupMessaging(ctx context.Context) error {
 	if !exists {
 		_, err = sd.psClient.CreateSubscription(ctx, sd.cfg.CommandSubID, pubsub.SubscriptionConfig{
 			Topic:       commandTopic,
-			AckDeadline: 10 * time.Second,
+			AckDeadline: 120 * time.Second,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create command subscription: %w", err)
@@ -196,7 +198,6 @@ func (sd *ServiceDirector) listenForCommands(ctx context.Context) {
 	}
 }
 
-// ## 2. Create the Teardown method ##
 // Teardown is the cleanup function that deletes resources created by the service.
 func (sd *ServiceDirector) Teardown(ctx context.Context) {
 	sd.logger.Info().Msg("Cleaning up tracer resources...")
@@ -231,26 +232,28 @@ func (sd *ServiceDirector) startWebServer() *http.Server {
 	}
 }
 
-// --- (Other methods like handleCommand, publishReadyEvent, etc. remain largely the same) ---
 // handleCommand is the callback for processing a single Pub/Sub message.
+// this should only be the setup dataflow cmd from the conductor (or test)
+// confusingly the ctx here is based on the ackDeadline so all the work in here must be completed
+// before the ackDeadline (no matter where we call msg.Ack() inside the function
 func (sd *ServiceDirector) handleCommand(ctx context.Context, msg *pubsub.Message) {
-	msg.Ack()
+
 	sd.logger.Info().Str("data", string(msg.Data)).Msg("Toy Director received command")
 
 	var cmd Command
 	if err := json.Unmarshal(msg.Data, &cmd); err != nil {
 		sd.logger.Error().Err(err).Str("data", string(msg.Data)).Msg("Failed to unmarshal command")
-		return
+		msg.Nack()
 	}
 
 	if cmd.Instruction != DataflowSetup {
 		sd.logger.Warn().Str("instruction", string(cmd.Instruction)).Msg("Received unexpected instruction")
-		return
+		msg.Nack()
 	}
 	sd.logger.Info().Str("instruction", string(cmd.Instruction)).Str("value", cmd.Value).Msg("Processing instruction")
 
 	// Perform the actual resource setup.
-	setupErr := sd.setupTracerResources(ctx, sd.cfg.TracerTopicID, sd.cfg.TracerSubID)
+	setupErr := sd.setupTracerResources(ctx, sd.cfg.VerifyTopicID, sd.cfg.TracerTopicID, sd.cfg.TracerSubID)
 
 	// Prepare the completion event.
 	event := CompletionEvent{Status: DataflowComplete, Value: cmd.Value}
@@ -265,6 +268,8 @@ func (sd *ServiceDirector) handleCommand(ctx context.Context, msg *pubsub.Messag
 	if err != nil {
 		sd.logger.Err(err).Msg("could not publish completion event")
 	}
+
+	msg.Ack()
 }
 
 // publishReadyEvent sends the initial "I'm alive and listening" message.
@@ -289,14 +294,14 @@ func (sd *ServiceDirector) publishCompletionEvent(ctx context.Context, event Com
 		return err
 	}
 
-	sd.logger.Info().Str("serverID", serverID).Str("status", string(event.Status)).Msg("Published completion event")
+	sd.logger.Info().Str("topic", sd.completionTopic.ID()).Str("serverID", serverID).Str("status", string(event.Status)).Msg("Published completion event")
 	return nil
 }
 
 // setupTracerResources creates the topic and subscription for the tracer apps.
-func (sd *ServiceDirector) setupTracerResources(ctx context.Context, topicID, subID string) error {
-	sd.logger.Info().Str("topic", topicID).Msg("Creating tracer topic...")
-	tracerTopic, err := sd.psClient.CreateTopic(ctx, topicID)
+func (sd *ServiceDirector) setupTracerResources(ctx context.Context, verifyTopicID, tracerTopicID, subID string) error {
+	sd.logger.Info().Str("topic", tracerTopicID).Msg("Creating tracer topic...")
+	tracerTopic, err := sd.psClient.CreateTopic(ctx, tracerTopicID)
 	if err != nil && !strings.Contains(err.Error(), "AlreadyExists") {
 		return fmt.Errorf("failed to create tracer topic: %w", err)
 	}
@@ -304,13 +309,23 @@ func (sd *ServiceDirector) setupTracerResources(ctx context.Context, topicID, su
 		sd.logger.Info().Msg("Tracer topic created.")
 	} else {
 		sd.logger.Info().Msg("Tracer topic already exists.")
-		tracerTopic = sd.psClient.Topic(topicID) // Get a handle to the existing topic
+		tracerTopic = sd.psClient.Topic(tracerTopicID) // Get a handle to the existing topic
 	}
 
 	sd.logger.Info().Str("subscription", subID).Msg("Creating tracer subscription...")
 	_, err = sd.psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{Topic: tracerTopic})
 	if err != nil && !strings.Contains(err.Error(), "AlreadyExists") {
 		return fmt.Errorf("failed to create tracer subscription: %w", err)
+	}
+
+	_, err = sd.psClient.CreateTopic(ctx, verifyTopicID)
+	if err != nil && !strings.Contains(err.Error(), "AlreadyExists") {
+		return fmt.Errorf("failed to create verify topic: %w", err)
+	}
+	if err == nil {
+		sd.logger.Info().Msg("Verify topic created.")
+	} else {
+		sd.logger.Info().Msg("Verify topic already exists.")
 	}
 
 	sd.logger.Info().Msg("Finished setting up tracer resources.")

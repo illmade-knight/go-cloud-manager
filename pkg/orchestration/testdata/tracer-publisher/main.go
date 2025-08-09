@@ -84,6 +84,19 @@ func main() {
 	}()
 
 	topic := client.Topic(cfg.TopicID)
+	logger.Info().Str("topic", topic.ID()).Msg("Checking topic existence and IAM policy...")
+	exists, err := topic.Exists(ctx)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to check for topic")
+	}
+	if !exists {
+		logger.Fatal().Msg("Topic does not exist")
+	}
+	policy, err := topic.IAM().Policy(ctx)
+	if err != nil {
+		return
+	}
+	logger.Info().Str("topic", topic.ID()).Interface("policy", policy.Roles()).Msg("Topic exists and has IAM policy:")
 
 	// --- Auto-Publisher (IoT Simulation) ---
 	if cfg.AutoPublishEnabled {
@@ -128,6 +141,8 @@ func startAutoPublisher(ctx context.Context, logger zerolog.Logger, topic *pubsu
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	logger.Info().Str("topic", topic.ID()).Msg("Auto-publisher started. Sending messages...")
 
 	for i := 0; i < count; i++ {
 		select {

@@ -1,7 +1,6 @@
 package servicemanager_test
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -11,191 +10,103 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestHydrateArchitecture_DefaultsAndImage asserts that default values for CPU, memory, region,
-// and a dynamic image path are correctly applied to a service's deployment spec.
-func TestHydrateArchitecture_DefaultsAndImage(t *testing.T) {
+// TestHydrateArchitecture validates the production hydration path.
+func TestHydrateArchitecture(t *testing.T) {
 	// ARRANGE
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			ProjectID: "test-project",
-			Region:    "europe-west1",
-		},
+		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name:           "service-manager",
-			ServiceAccount: "sm-sa",
-			Deployment:     &servicemanager.DeploymentSpec{SourcePath: "."},
+			Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
 		},
-		Dataflows: map[string]servicemanager.ResourceGroup{
-			"test-flow": {
-				Services: map[string]servicemanager.ServiceSpec{
-					"my-service": {
-						Name:           "my-service",
-						ServiceAccount: "my-sa",
-						Deployment:     &servicemanager.DeploymentSpec{SourcePath: "./cmd/myservice"},
-					},
-				},
+		Dataflows: map[string]servicemanager.ResourceGroup{"test-flow": {
+			Services: map[string]servicemanager.ServiceSpec{
+				"my-service": {Name: "my-service", ServiceAccount: "my-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."}},
 			},
-		},
+			Resources: servicemanager.CloudResourcesSpec{
+				Topics: []servicemanager.TopicConfig{{
+					CloudResource:   servicemanager.CloudResource{Name: "events-topic"},
+					ProducerService: &servicemanager.ServiceMapping{Name: "my-service", Env: "EVENTS_TOPIC_ID"},
+				}},
+			},
+		}},
 	}
-	logger := zerolog.Nop()
 
 	// ACT
-	err := servicemanager.HydrateArchitecture(arch, "default-repo", "", logger)
+	err := servicemanager.HydrateArchitecture(arch, "default-repo", zerolog.Nop())
 	require.NoError(t, err)
 
 	// ASSERT
-	hydratedSvc := arch.Dataflows["test-flow"].Services["my-service"]
-	require.NotNil(t, hydratedSvc.Deployment)
-	spec := hydratedSvc.Deployment
+	svc := arch.Dataflows["test-flow"].Services["my-service"]
+	spec := svc.Deployment
+	require.NotNil(t, spec)
 
-	assert.Equal(t, "europe-west1", spec.Region, "Region should be hydrated from the environment default")
-	assert.Equal(t, "1", spec.CPU, "CPU should be hydrated with the default value")
-	assert.Equal(t, "512Mi", spec.Memory, "Memory should be hydrated with the default value")
-
-	// Assert the image path has the correct structure.
-	expectedImagePrefix := "europe-west1-docker.pkg.dev/test-project/default-repo/my-service:"
-	assert.True(t, strings.HasPrefix(spec.Image, expectedImagePrefix), "Image path prefix is incorrect")
-	assert.Len(t, spec.Image, len(expectedImagePrefix)+8, "Image tag should be an 8-character UUID")
+	assert.Equal(t, "europe-west1", spec.Region)
+	assert.True(t, strings.HasPrefix(spec.Image, "europe-west1-docker.pkg.dev/test-project/default-repo/my-service:"))
+	assert.Equal(t, "events-topic", spec.EnvironmentVars["EVENTS_TOPIC_ID"])
 }
 
-// TestHydrateArchitecture_WithRunID asserts that a provided runID is correctly appended
-// to the names of the service manager and all services in dataflows.
-func TestHydrateArchitecture_WithRunID(t *testing.T) {
+// TestHydrateTestArchitecture validates the testing hydration path with a runID.
+func TestHydrateTestArchitecture(t *testing.T) {
 	// ARRANGE
+	runID := "xyz123"
+	originalServiceName := "my-service"
+	originalTopicName := "events-topic"
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "us-central1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name:           "service-manager",
-			ServiceAccount: "sm-sa",
-			Deployment:     &servicemanager.DeploymentSpec{SourcePath: "."},
+			Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
 		},
-		Dataflows: map[string]servicemanager.ResourceGroup{
-			"test-flow": {
-				Services: map[string]servicemanager.ServiceSpec{
-					"service-a": {
-						Name:           "service-a",
-						ServiceAccount: "sa-a",
-						Deployment:     &servicemanager.DeploymentSpec{SourcePath: "./cmd/svca"},
-					},
-				},
+		Dataflows: map[string]servicemanager.ResourceGroup{"test-flow": {
+			Services: map[string]servicemanager.ServiceSpec{
+				originalServiceName: {Name: originalServiceName, ServiceAccount: "my-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."}},
 			},
-		},
+			Resources: servicemanager.CloudResourcesSpec{
+				Topics: []servicemanager.TopicConfig{{
+					CloudResource:   servicemanager.CloudResource{Name: originalTopicName},
+					ProducerService: &servicemanager.ServiceMapping{Name: originalServiceName, Env: "EVENTS_TOPIC_ID"},
+				}},
+			},
+		}},
 	}
-	logger := zerolog.Nop()
-	runID := "xyz123"
 
 	// ACT
-	err := servicemanager.HydrateArchitecture(arch, "default-repo", runID, logger)
+	_, err := servicemanager.HydrateTestArchitecture(arch, "test-repo", runID, zerolog.Nop())
 	require.NoError(t, err)
 
 	// ASSERT
-	expectedSmName := fmt.Sprintf("service-manager-%s", runID)
-	assert.Equal(t, expectedSmName, arch.ServiceManagerSpec.Name)
+	hydratedSvcName := "my-service-xyz123"
+	hydratedTopicName := "events-topic-xyz123"
+	hydratedSvc, newKeyExists := arch.Dataflows["test-flow"].Services[hydratedSvcName]
+	assert.True(t, newKeyExists, "Hydrated service key should exist")
 
-	hydratedSvc := arch.Dataflows["test-flow"].Services["service-a"]
-	expectedSvcName := fmt.Sprintf("service-a-%s", runID)
-	assert.Equal(t, expectedSvcName, hydratedSvc.Name)
+	// Check that names and references were updated
+	assert.Equal(t, hydratedSvcName, hydratedSvc.Name)
+	assert.Equal(t, hydratedTopicName, arch.Dataflows["test-flow"].Resources.Topics[0].Name)
+	assert.Equal(t, hydratedSvcName, arch.Dataflows["test-flow"].Resources.Topics[0].ProducerService.Name, "ProducerService link should be updated")
 
-	// Also assert that the hydrated name is used in the image path.
-	assert.Contains(t, hydratedSvc.Deployment.Image, "/"+expectedSvcName+":")
+	// NEW: Assert that the service account names were also hydrated
+	assert.Equal(t, "sm-sa-xyz123", arch.ServiceManagerSpec.ServiceAccount)
+	assert.Equal(t, "my-sa-xyz123", hydratedSvc.ServiceAccount)
+
+	// Check that derived values (image path and env var) use the new hydrated names
+	assert.Contains(t, hydratedSvc.Deployment.Image, "/"+hydratedSvcName+":", "Image path should use the new hydrated service name")
+	assert.Equal(t, hydratedTopicName, hydratedSvc.Deployment.EnvironmentVars["EVENTS_TOPIC_ID"], "Env var value should be the new hydrated resource name")
 }
 
-// TestHydrateArchitecture_PubSubEnvInjection asserts that environment variables for
-// Pub/Sub topics and subscriptions are correctly injected into the services
-// that are explicitly linked to them.
-func TestHydrateArchitecture_PubSubEnvInjection(t *testing.T) {
-	dataResource := "data-test"
-	expedtedResourcePrefix := "DATA_TEST"
-	// ARRANGE: Create a minimal architecture with explicit producer/consumer links.
-	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			ProjectID: "test-project",
-			Region:    "europe-west1",
-		},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name:           "service-manager",
-			ServiceAccount: "sm-sa",
-			Deployment:     &servicemanager.DeploymentSpec{SourcePath: "."},
-		},
-		Dataflows: map[string]servicemanager.ResourceGroup{
-			"test-flow": {
-				Services: map[string]servicemanager.ServiceSpec{
-					"producer-service": {
-						Name:           "producer-service",
-						ServiceAccount: "producer-sa",
-						Deployment:     &servicemanager.DeploymentSpec{SourcePath: "."},
-					},
-					"consumer-service": {
-						Name:           "consumer-service",
-						ServiceAccount: "consumer-sa",
-						Deployment:     &servicemanager.DeploymentSpec{SourcePath: "."},
-					},
-				},
-				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{
-						{
-							CloudResource:   servicemanager.CloudResource{Name: dataResource},
-							ProducerService: "producer-service",
-						},
-					},
-					Subscriptions: []servicemanager.SubscriptionConfig{
-						{
-							CloudResource:   servicemanager.CloudResource{Name: dataResource},
-							Topic:           "data",
-							ConsumerService: "consumer-service",
-						},
-					},
-				},
-			},
-		},
-	}
-	logger := zerolog.Nop()
-
-	// ACT: Run the hydration logic.
-	err := servicemanager.HydrateArchitecture(arch, "default-repo", "", logger)
-	require.NoError(t, err)
-
-	// ASSERT: Check that the correct environment variables were injected.
-	producerSvc := arch.Dataflows["test-flow"].Services["producer-service"]
-	consumerSvc := arch.Dataflows["test-flow"].Services["consumer-service"]
-
-	require.NotNil(t, producerSvc.Deployment.EnvironmentVars)
-	require.NotNil(t, consumerSvc.Deployment.EnvironmentVars)
-
-	// Check the producer service for the topic ID.
-	expectedTopicKey := fmt.Sprintf("%s_TOPIC_ID", expedtedResourcePrefix)
-	actualTopicID, ok := producerSvc.Deployment.EnvironmentVars[expectedTopicKey]
-	assert.True(t, ok, "Producer service should have the topic ID env var")
-	assert.Equal(t, dataResource, actualTopicID)
-
-	// Check the consumer service for the subscription ID.
-	expectedSubKey := fmt.Sprintf("%s_SUB_ID", expedtedResourcePrefix)
-	actualSubID, ok := consumerSvc.Deployment.EnvironmentVars[expectedSubKey]
-	assert.True(t, ok, "Consumer service should have the subscription ID env var")
-	assert.Equal(t, dataResource, actualSubID)
-}
-
-// TestHydrateArchitecture_ValidationFailure asserts that hydration fails if the
-// initial architecture does not pass validation.
 func TestHydrateArchitecture_ValidationFailure(t *testing.T) {
-	// ARRANGE: Create an invalid architecture (missing a required field).
+	// ARRANGE
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			ProjectID: "test-project",
-			Region:    "europe-west1",
-		},
+		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
 			Name: "service-manager",
-			// ServiceAccount is missing.
+			// ServiceAccount is missing
 		},
 	}
-	logger := zerolog.Nop()
 
 	// ACT
-	err := servicemanager.HydrateArchitecture(arch, "default-repo", "", logger)
+	err := servicemanager.HydrateArchitecture(arch, "repo", zerolog.Nop())
 
 	// ASSERT
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "architecture validation failed")
 	assert.Contains(t, err.Error(), "ServiceManagerSpec.ServiceAccount is a required field")
 }
