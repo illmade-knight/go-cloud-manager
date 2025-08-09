@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os" // REFACTOR: Import 'os' for file operations
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -20,19 +20,26 @@ import (
 	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3" // REFACTOR: Import 'yaml' to generate the config file
+	"gopkg.in/yaml.v3"
 )
 
-// REFACTOR: The test is renamed to reflect its new focus on the Conductor's cloud integration.
-//
-// Its primary purpose is to verify the Conductor's ability to orchestrate a complex,
-// parallel build-and-deploy workflow against real cloud services.
-//
-// IMPORTANT: The services built in this test (from the 'testdata' directory) use their
-// own go.mod file, which requires a STABLE, PUBLISHED version of this repository as a
-// dependency. This test does NOT run against uncommitted code in the 'pkg/' or 'microservice/' directories.
-// Note - it obviously does use the uncommitted code in pkg/ and microservice/ for testing orchestrator, conductor
-// etc, it is only the testdata deployed services which are built from the github published version of this repo.
+func getRepoRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		goModPath := filepath.Join(cwd, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			return cwd, nil
+		}
+		parent := filepath.Dir(cwd)
+		if parent == cwd {
+			return "", errors.New("could not find go.mod in any parent directory")
+		}
+		cwd = parent
+	}
+}
 
 func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// --- Global Test Setup ---
@@ -52,20 +59,21 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
 
+	sourcePath, err := getRepoRoot()
+	require.NoError(t, err)
+
+	// Define build paths relative to the repo root, mirroring the production structure.
+	sdBuildPath := "test/cmd/toy-servicedirector"
+	pubBuildPath := "test/cmd/tracer-publisher"
+	subBuildPath := "test/cmd/tracer-subscriber"
+
 	sdName, sdServiceAccount := "sd", "sd-sa"
-	// REFACTOR: The build path is now relative to the repository root.
-	sdBuildPath := "pkg/orchestration/testdata/servicedirector"
 	dataflowName := "tracer-flow"
-	pubName, pubServiceAccount, pubBuildPath := "tracer-publisher", "pub-sa", "pkg/orchestration/testdata/tracer-publisher"
-	subName, subServiceAccount, subBuildPath := "tracer-subscriber", "sub-sa", "pkg/orchestration/testdata/tracer-subscriber"
+	pubName, pubServiceAccount := "tracer-publisher", "pub-sa"
+	subName, subServiceAccount := "tracer-subscriber", "sub-sa"
 	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
 
 	// 1. Define and Hydrate Architecture
-	// REFACTOR: The sourcePath for the build MUST be the repository root
-	// so that the Go modules and replace directives can be resolved correctly.
-	sourcePath, err := filepath.Abs("../..")
-	require.NoError(t, err)
-
 	arch = &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID, Region: "us-central1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
@@ -84,22 +92,8 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			dataflowName: {
 				Services: map[string]servicemanager.ServiceSpec{
-					subName: {
-						Name:           subName,
-						ServiceAccount: subServiceAccount,
-						Deployment: &servicemanager.DeploymentSpec{
-							SourcePath:          sourcePath,
-							BuildableModulePath: subBuildPath,
-						},
-					},
-					pubName: {
-						Name:           pubName,
-						ServiceAccount: pubServiceAccount,
-						Deployment: &servicemanager.DeploymentSpec{
-							SourcePath:          sourcePath,
-							BuildableModulePath: pubBuildPath,
-						},
-					},
+					subName: {Name: subName, ServiceAccount: subServiceAccount, Deployment: &servicemanager.DeploymentSpec{SourcePath: sourcePath, BuildableModulePath: subBuildPath}},
+					pubName: {Name: pubName, ServiceAccount: pubServiceAccount, Deployment: &servicemanager.DeploymentSpec{SourcePath: sourcePath, BuildableModulePath: pubBuildPath}},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
@@ -118,19 +112,15 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
 	require.NoError(t, err)
 
-	// REFACTOR: Write the hydrated architecture to a YAML file in the ServiceDirector's
-	// build directory. This file will be embedded into the service binary.
 	t.Log("Writing hydrated services.yaml for the ServiceDirector build...")
 	yamlBytes, err := yaml.Marshal(arch)
 	require.NoError(t, err)
 	embeddedYamlPath := filepath.Join(sourcePath, sdBuildPath, "services.yaml")
 	err = os.WriteFile(embeddedYamlPath, yamlBytes, 0644)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = os.Remove(embeddedYamlPath)
-	})
+	t.Cleanup(func() { _ = os.Remove(embeddedYamlPath) })
 
-	// 2. Directly create the required Pub/Sub resources for the test.
+	// 2. Pre-create test resources.
 	t.Log("Pre-creating test resources...")
 	hydratedVerifyTopicName := nameMap[verifyTopicName]
 	hydratedTracerTopicName := nameMap[tracerTopicName]
@@ -145,13 +135,12 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// --- Act & Assert ---
 	t.Log("Creating Conductor...")
 	opts := orchestration.ConductorOptions{
-		CheckPrerequisites:      true,
-		SetupServiceDirectorIAM: true,
-		DeployServiceDirector:   true,
-		VerifyDataflowIAM:       true,
-		SetupDataflowResources:  false,
-		BuildDataflowServices:   true,
-		DeployDataflowServices:  true,
+		CheckPrerequisites:     true,
+		SetupIAM:               true,
+		BuildAndDeployServices: true,
+		TriggerRemoteSetup:     true,
+		VerifyDataflowIAM:      true,
+		VerificationTimeout:    5 * time.Minute,
 	}
 	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
 	require.NoError(t, err)
@@ -175,7 +164,6 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	}
 }
 
-// ... (startVerificationListener and other helpers are unchanged) ...
 func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Subscription, expectedCount int) <-chan error {
 	t.Helper()
 	validationChan := make(chan error, 1)
@@ -200,4 +188,30 @@ func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Su
 		}
 	}()
 	return validationChan
+}
+
+// createVerificationResources is a test helper that requires a hydrated topic name.
+func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, hydratedTopicName string) (*pubsub.Topic, *pubsub.Subscription) {
+	t.Helper()
+	verifyTopic := client.Topic(hydratedTopicName)
+	exists, err := verifyTopic.Exists(ctx)
+	require.NoError(t, err)
+	if !exists {
+		// This should not happen if the test pre-creates it.
+		t.Fatalf("Verification topic %s was expected to exist but was not found.", hydratedTopicName)
+	}
+
+	subID := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
+	verifySub, err := client.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
+		Topic:             verifyTopic,
+		AckDeadline:       20 * time.Second,
+		RetentionDuration: 10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = verifySub.Delete(context.Background())
+	})
+
+	return verifyTopic, verifySub
 }

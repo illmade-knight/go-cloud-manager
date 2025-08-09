@@ -224,3 +224,7 @@ func (c *TestIAMClient) AddMemberToServiceAccountRole(ctx context.Context, servi
 func (c *TestIAMClient) CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error) {
 	return c.realClient.CheckResourceIAMBinding(ctx, binding, member)
 }
+
+func (c *TestIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBinding) error {
+	return c.realClient.ApplyIAMPolicy(ctx, binding)
+}

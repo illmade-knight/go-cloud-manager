@@ -10,87 +10,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// REFACTOR: This new helper filters the flat slice of bindings for a specific service account.
+func findBindingsForSA(plan []iam.IAMBinding, saName string) []iam.IAMBinding {
+	var results []iam.IAMBinding
+	for _, binding := range plan {
+		if binding.ServiceAccount == saName {
+			results = append(results, binding)
+		}
+	}
+	return results
+}
+
 func TestPlanRolesForApplicationServices(t *testing.T) {
-	// ARRANGE: Create a comprehensive test architecture with various IAM requirements.
+	// ARRANGE: (Architecture is unchanged)
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			ProjectID: "test-project",
-			Region:    "europe-west1",
-		},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "service-manager",
-		},
+		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-flow": {
 				Services: map[string]servicemanager.ServiceSpec{
-					"publisher-service": {
-						Name:           "publisher-service",
-						ServiceAccount: "publisher-sa",
-						Deployment: &servicemanager.DeploymentSpec{
-							Region: "europe-west1", // Specific region for this service.
-						},
-					},
-					"subscriber-service": {
-						Name:           "subscriber-service",
-						ServiceAccount: "subscriber-sa",
-					},
-					"secret-service": {
-						Name:           "secret-service",
-						ServiceAccount: "secret-sa",
-						Deployment: &servicemanager.DeploymentSpec{
-							SecretEnvironmentVars: []servicemanager.SecretEnvVar{
-								{Name: "API_KEY", ValueFrom: "my-api-key"},
-							},
-						},
-					},
-					"invoker-service": {
-						Name:           "invoker-service",
-						ServiceAccount: "invoker-sa",
-						Dependencies:   []string{"publisher-service"}, // Depends on another service.
-					},
-					// MODIFIED: Add new services for GCS and BQ testing
-					"gcs-writer-service": {
-						Name:           "gcs-writer-service",
-						ServiceAccount: "gcs-writer-sa",
-					},
-					"bq-reader-service": {
-						Name:           "bq-reader-service",
-						ServiceAccount: "bq-reader-sa",
-					},
+					"publisher-service":  {Name: "publisher-service", ServiceAccount: "publisher-sa", Deployment: &servicemanager.DeploymentSpec{Region: "europe-west1"}},
+					"subscriber-service": {Name: "subscriber-service", ServiceAccount: "subscriber-sa"},
+					"secret-service":     {Name: "secret-service", ServiceAccount: "secret-sa", Deployment: &servicemanager.DeploymentSpec{SecretEnvironmentVars: []servicemanager.SecretEnvVar{{Name: "API_KEY", ValueFrom: "my-api-key"}}}},
+					"invoker-service":    {Name: "invoker-service", ServiceAccount: "invoker-sa", Dependencies: []string{"publisher-service"}},
+					"gcs-writer-service": {Name: "gcs-writer-service", ServiceAccount: "gcs-writer-sa"},
+					"bq-reader-service":  {Name: "bq-reader-service", ServiceAccount: "bq-reader-sa"},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{
-						{
-							CloudResource:   servicemanager.CloudResource{Name: "data-topic"},
-							ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"}, // Implicit publisher role.
-						},
-					},
-					Subscriptions: []servicemanager.SubscriptionConfig{
-						{
-							CloudResource:   servicemanager.CloudResource{Name: "data-sub"},
-							Topic:           "data-topic",
-							ConsumerService: &servicemanager.ServiceMapping{Name: "subscriber-service"}, // Implicit subscriber role.
-						},
-					},
-					GCSBuckets: []servicemanager.GCSBucket{
-						{
-							CloudResource: servicemanager.CloudResource{Name: "data-lake-bucket"},
-							// MODIFIED: Use producer/consumer links instead of explicit policy
-							Producers: []servicemanager.ServiceMapping{
-								{Name: "gcs-writer-service"},
-							},
-						},
-					},
-					BigQueryTables: []servicemanager.BigQueryTable{
-						{
-							CloudResource: servicemanager.CloudResource{Name: "events-table"},
-							Dataset:       "analytics-dataset",
-							// MODIFIED: Use producer/consumer links
-							Consumers: []servicemanager.ServiceMapping{
-								{Name: "bq-reader-service"},
-							},
-						},
-					},
+					Topics:        []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: "data-topic"}, ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"}}},
+					Subscriptions: []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: "data-sub"}, Topic: "data-topic", ConsumerService: &servicemanager.ServiceMapping{Name: "subscriber-service"}}},
+					GCSBuckets:    []servicemanager.GCSBucket{{CloudResource: servicemanager.CloudResource{Name: "data-lake-bucket"}, Producers: []servicemanager.ServiceMapping{{Name: "gcs-writer-service"}}}},
+					BigQueryTables: []servicemanager.BigQueryTable{{
+						CloudResource: servicemanager.CloudResource{Name: "events-table"},
+						Dataset:       "analytics-dataset",
+						Consumers:     []servicemanager.ServiceMapping{{Name: "bq-reader-service"}},
+					}},
 				},
 			},
 		},
@@ -103,63 +56,52 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 
-	// ASSERT: Verify the generated plan for each service account.
+	// ASSERT: REFACTOR: Assertions are updated to filter the plan slice.
 	t.Run("Publisher gets Publisher and Viewer roles", func(t *testing.T) {
-		bindings := plan["publisher-sa"]
+		bindings := findBindingsForSA(plan, "publisher-sa")
 		require.Len(t, bindings, 2)
-		expectedPublisher := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.publisher"}
-		expectedViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
+		expectedPublisher := iam.IAMBinding{ServiceAccount: "publisher-sa", ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.publisher"}
+		expectedViewer := iam.IAMBinding{ServiceAccount: "publisher-sa", ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
 		assert.Contains(t, bindings, expectedPublisher)
 		assert.Contains(t, bindings, expectedViewer)
 	})
 
 	t.Run("Subscriber gets Subscriber and Topic Viewer roles", func(t *testing.T) {
-		bindings := plan["subscriber-sa"]
+		bindings := findBindingsForSA(plan, "subscriber-sa")
 		require.Len(t, bindings, 3)
-		expectedSubscriber := iam.IAMBinding{ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.subscriber"}
-		expectedSubViewer := iam.IAMBinding{ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.viewer"}
-		expectedTopicViewer := iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
+		expectedSubscriber := iam.IAMBinding{ServiceAccount: "subscriber-sa", ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.subscriber"}
+		expectedSubViewer := iam.IAMBinding{ServiceAccount: "subscriber-sa", ResourceType: "pubsub_subscription", ResourceID: "data-sub", Role: "roles/pubsub.viewer"}
+		expectedTopicViewer := iam.IAMBinding{ServiceAccount: "subscriber-sa", ResourceType: "pubsub_topic", ResourceID: "data-topic", Role: "roles/pubsub.viewer"}
 		assert.Contains(t, bindings, expectedSubscriber)
 		assert.Contains(t, bindings, expectedSubViewer)
 		assert.Contains(t, bindings, expectedTopicViewer)
 	})
 
 	t.Run("Secret user gets Secret Accessor role", func(t *testing.T) {
-		bindings := plan["secret-sa"]
+		bindings := findBindingsForSA(plan, "secret-sa")
 		require.Len(t, bindings, 1)
-		expectedAccessor := iam.IAMBinding{ResourceType: "secret", ResourceID: "my-api-key", Role: "roles/secretmanager.secretAccessor"}
+		expectedAccessor := iam.IAMBinding{ServiceAccount: "secret-sa", ResourceType: "secret", ResourceID: "my-api-key", Role: "roles/secretmanager.secretAccessor"}
 		assert.Contains(t, bindings, expectedAccessor)
 	})
 
 	t.Run("Dependent service gets Invoker role", func(t *testing.T) {
-		bindings := plan["invoker-sa"]
+		bindings := findBindingsForSA(plan, "invoker-sa")
 		require.Len(t, bindings, 1)
-		expectedInvoker := iam.IAMBinding{
-			ResourceType:     "cloudrun_service",
-			ResourceID:       "publisher-service",
-			Role:             "roles/run.invoker",
-			ResourceLocation: "europe-west1",
-		}
+		expectedInvoker := iam.IAMBinding{ServiceAccount: "invoker-sa", ResourceType: "cloudrun_service", ResourceID: "publisher-service", Role: "roles/run.invoker", ResourceLocation: "europe-west1"}
 		assert.Contains(t, bindings, expectedInvoker)
 	})
 
-	// MODIFIED: New test cases for the updated logic
 	t.Run("GCS writer service gets ObjectAdmin role from link", func(t *testing.T) {
-		bindings := plan["gcs-writer-sa"]
+		bindings := findBindingsForSA(plan, "gcs-writer-sa")
 		require.Len(t, bindings, 1)
-		expectedWriter := iam.IAMBinding{ResourceType: "gcs_bucket", ResourceID: "data-lake-bucket", Role: "roles/storage.objectAdmin"}
+		expectedWriter := iam.IAMBinding{ServiceAccount: "gcs-writer-sa", ResourceType: "gcs_bucket", ResourceID: "data-lake-bucket", Role: "roles/storage.objectAdmin"}
 		assert.Contains(t, bindings, expectedWriter)
 	})
 
 	t.Run("BigQuery consumer gets table-level DataViewer role", func(t *testing.T) {
-		bindings := plan["bq-reader-sa"]
+		bindings := findBindingsForSA(plan, "bq-reader-sa")
 		require.Len(t, bindings, 1)
-
-		expectedReader := iam.IAMBinding{
-			ResourceType: "bigquery_table",
-			ResourceID:   "analytics-dataset:events-table",
-			Role:         "roles/bigquery.dataViewer",
-		}
+		expectedReader := iam.IAMBinding{ServiceAccount: "bq-reader-sa", ResourceType: "bigquery_table", ResourceID: "analytics-dataset:events-table", Role: "roles/bigquery.dataViewer"}
 		assert.Contains(t, bindings, expectedReader)
 	})
 }

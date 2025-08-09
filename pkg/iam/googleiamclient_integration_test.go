@@ -78,6 +78,83 @@ func executeWithRetry(t *testing.T, operationName string, operation func() error
 	require.NoError(t, lastErr, "Operation '%s' failed after all retries", operationName)
 }
 
+// TestApplyIAMPolicy_AtomicUpdate verifies that the new ApplyIAMPolicy method
+// correctly overwrites the entire policy on a resource, ensuring an atomic update.
+func TestApplyIAMPolicy_AtomicUpdate(t *testing.T) {
+	// --- Arrange ---
+	projectID := auth.CheckGCPAuth(t)
+	projectNumber := getProjectNumber(t, context.Background(), projectID)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = iamClient.Close() })
+
+	psClient, err := pubsub.NewClient(ctx, projectID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = psClient.Close() })
+
+	topicName := fmt.Sprintf("test-atomic-iam-topic-%d", time.Now().UnixNano())
+	var topic *pubsub.Topic
+	executeWithRetry(t, "CreatePubSubTopic", func() error {
+		var createErr error
+		topic, createErr = psClient.CreateTopic(ctx, topicName)
+		return createErr
+	})
+	require.NotNil(t, topic)
+	t.Cleanup(func() { _ = topic.Delete(context.Background()) })
+
+	member := fmt.Sprintf("serviceAccount:%s-compute@developer.gserviceaccount.com", projectNumber)
+	rogueRole := "roles/pubsub.editor"
+	desiredRole := "roles/pubsub.viewer"
+
+	// 1. Pre-condition: Add a rogue role that should be removed by the atomic update.
+	t.Logf("Applying rogue role '%s' to be overwritten...", rogueRole)
+	err = iamClient.AddResourceIAMBinding(ctx, iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: topicName, Role: rogueRole}, member)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		found, _ := iamClient.CheckResourceIAMBinding(ctx, iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: topicName, Role: rogueRole}, member)
+		return found
+	}, 1*time.Minute, 2*time.Second, "Rogue role failed to apply")
+	t.Log("Rogue role applied.")
+
+	// 2. Define the desired final state of the policy.
+	desiredPolicy := iam.PolicyBinding{
+		ResourceType: "pubsub_topic",
+		ResourceID:   topicName,
+		MemberRoles: map[string][]string{
+			desiredRole: {member},
+		},
+	}
+
+	// --- Act ---
+	t.Log("Applying the desired policy atomically with ApplyIAMPolicy...")
+	err = iamClient.ApplyIAMPolicy(ctx, desiredPolicy)
+	require.NoError(t, err)
+
+	// --- Assert ---
+	t.Log("Verifying final policy state...")
+	require.Eventually(t, func() bool {
+		policy, err := topic.IAM().Policy(ctx)
+		if err != nil {
+			return false
+		}
+
+		hasDesiredRole := policy.HasRole(member, gcpiam.RoleName(desiredRole))
+		hasRogueRole := policy.HasRole(member, gcpiam.RoleName(rogueRole))
+		finalBindingCount := 0
+		for range policy.Members(gcpiam.RoleName(desiredRole)) {
+			finalBindingCount++
+		}
+
+		// The final state must have the desired role, not have the rogue role, and have exactly one member in that role.
+		return hasDesiredRole && !hasRogueRole && finalBindingCount == 1
+	}, 2*time.Minute, 5*time.Second, "The final policy state was not what was expected.")
+
+	t.Log("✅ Atomic update verified. Policy is in the correct final state.")
+}
+
 // REFACTOR: This helper is updated with a retry loop to handle transient
 // network errors during test setup.
 func getProjectNumber(t *testing.T, ctx context.Context, projectID string) string {
@@ -89,7 +166,9 @@ func getProjectNumber(t *testing.T, ctx context.Context, projectID string) strin
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer func() {
+			_ = c.Close()
+		}()
 
 		req := &resourcemanagerpb.GetProjectRequest{
 			Name: fmt.Sprintf("projects/%s", projectID),

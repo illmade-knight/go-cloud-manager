@@ -3,16 +3,10 @@
 package orchestration_test
 
 import (
-	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"cloud.google.com/go/pubsub"
-
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -185,40 +179,4 @@ func createTestSourceDir(t *testing.T, files map[string]string) (string, func())
 	return tmpDir, func() {
 		_ = os.RemoveAll(tmpDir)
 	}
-}
-
-// createVerificationResources creates the topic and subscription used by the test to verify results.
-// createVerificationResources creates the topic and subscription used by the test to verify results.
-// MODIFIED: This function now takes the final, hydrated topic name directly.
-func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, hydratedTopicName string) (*pubsub.Topic, *pubsub.Subscription) {
-	t.Helper()
-	// The topic is created using the exact name provided by the hydrated architecture.
-	verifyTopic := client.Topic(hydratedTopicName)
-	exists, err := verifyTopic.Exists(ctx)
-	require.NoError(t, err)
-	require.True(t, exists)
-	require.NotNil(t, verifyTopic)
-
-	// The subscription is ephemeral to the test runner, so its name can be unique.
-	subID := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
-	verifySub, err := client.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-		Topic:               verifyTopic,
-		AckDeadline:         20 * time.Second,
-		RetainAckedMessages: true,
-		RetentionDuration:   10 * time.Minute,
-	})
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		t.Log("Cleaning up verification resources...")
-		cleanupCtx := context.Background()
-		if err := verifySub.Delete(cleanupCtx); err != nil {
-			t.Logf("Error deleting verify sub: %v", err)
-		}
-		if err := verifyTopic.Delete(cleanupCtx); err != nil {
-			t.Logf("Error deleting verify topic: %v", err)
-		}
-	})
-
-	return verifyTopic, verifySub
 }

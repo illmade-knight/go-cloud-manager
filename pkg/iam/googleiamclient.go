@@ -123,6 +123,97 @@ func bigqueryTableSplitter(binding IAMBinding) ([]string, error) {
 	return ids, nil
 }
 
+// ApplyIAMPolicy : This new method implements the atomic Get-Modify-Set logic for a full policy.
+func (c *GoogleIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBinding) error {
+	log.Info().
+		Str("resourceType", binding.ResourceType).
+		Str("resourceID", binding.ResourceID).
+		Int("role_count", len(binding.MemberRoles)).
+		Msg("GoogleIAMClient: Applying full IAM policy to resource")
+
+	var handle iamHandle
+	switch binding.ResourceType {
+	case "pubsub_topic":
+		handle = c.pubsubClient.Topic(binding.ResourceID).IAM()
+	case "pubsub_subscription":
+		handle = c.pubsubClient.Subscription(binding.ResourceID).IAM()
+	case "bigquery_table":
+		ids := strings.Split(binding.ResourceID, ":")
+		if len(ids) != 2 {
+			return fmt.Errorf("invalid bigquery_table ResourceID: %s", binding.ResourceID)
+		}
+		handle = c.bigqueryAdminClient.client.Dataset(ids[0]).Table(ids[1]).IAM()
+	// Add other resource types that use the standard iamHandle here.
+	default:
+		// For resource types with custom IAM logic, we would need specific handlers.
+		// For now, we fall back to adding bindings one by one for safety.
+		log.Warn().Str("resourceType", binding.ResourceType).Msg("ApplyIAMPolicy not implemented for this resource type, falling back to additive binding.")
+		for role, members := range binding.MemberRoles {
+			for _, member := range members {
+				b := IAMBinding{
+					ResourceType:     binding.ResourceType,
+					ResourceID:       binding.ResourceID,
+					ResourceLocation: binding.ResourceLocation,
+					Role:             role,
+				}
+				if err := c.AddResourceIAMBinding(ctx, b, member); err != nil {
+					return fmt.Errorf("fallback AddResourceIAMBinding failed for role %s: %w", role, err)
+				}
+			}
+		}
+		return nil
+	}
+
+	return c.setFullIAMPolicy(ctx, handle, binding.MemberRoles)
+}
+
+// setFullIAMPolicy contains the core retry logic for a Get-Modify-Set operation.
+func (c *GoogleIAMClient) setFullIAMPolicy(ctx context.Context, handle iamHandle, memberRoles map[string][]string) error {
+	const maxRetries = 5
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		policy, err := handle.Policy(ctx)
+		if err != nil {
+			if isRetriableError(err) {
+				lastErr = err
+				time.Sleep(time.Duration(i*100+50) * time.Millisecond) // backoff with jitter
+				continue
+			}
+			return fmt.Errorf("failed to get policy: %w", err)
+		}
+
+		// Overwrite all existing bindings with the new desired state.
+		policy.InternalProto.Bindings = nil
+		for role, members := range memberRoles {
+			for _, member := range members {
+				policy.Add(member, iam.RoleName(role))
+			}
+		}
+
+		err = handle.SetPolicy(ctx, policy)
+		if err == nil {
+			return nil // Success!
+		}
+		lastErr = err
+
+		if st, ok := status.FromError(err); ok && st.Code() == codes.Aborted {
+			log.Warn().Err(err).Int("attempt", i+1).Msg("Concurrent modification detected, retrying...")
+			time.Sleep(time.Duration(i*100) * time.Millisecond) // Exponential backoff
+			continue
+		}
+
+		if isRetriableError(err) {
+			log.Warn().Err(err).Int("attempt", i+1).Msg("SetPolicy failed with transient error, retrying...")
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond)
+			continue
+		}
+
+		return fmt.Errorf("failed to set policy: %w", err)
+	}
+	return fmt.Errorf("failed to set IAM policy after %d retries: %w", maxRetries, lastErr)
+}
+
 // AddResourceIAMBinding adds a member to a role on a specific cloud resource.
 // It acts as a router, dispatching the request to the appropriate handler based on the resource type.
 func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {

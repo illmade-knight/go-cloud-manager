@@ -20,23 +20,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// REFACTOR: Add a local mock IAM client to satisfy the new constructor signature.
-// This allows the test to remain focused on the command/reply loop.
+// mockIAMClient is a no-op implementation for testing the ServiceDirector's flow.
 type mockIAMClient struct{}
 
-func (m *mockIAMClient) EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error) {
+func (m *mockIAMClient) ApplyIAMPolicy(ctx context.Context, binding iam.PolicyBinding) error {
+	return nil
+}
+func (m *mockIAMClient) EnsureServiceAccountExists(_ context.Context, accountName string) (string, error) {
 	return "mock-" + accountName + "@project.iam.gserviceaccount.com", nil
 }
-func (m *mockIAMClient) AddResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+func (m *mockIAMClient) AddResourceIAMBinding(_ context.Context, _ iam.IAMBinding, _ string) error {
 	return nil
 }
-func (m *mockIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+func (m *mockIAMClient) RemoveResourceIAMBinding(_ context.Context, _ iam.IAMBinding, _ string) error {
 	return nil
 }
-func (m *mockIAMClient) CheckResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) (bool, error) {
+func (m *mockIAMClient) CheckResourceIAMBinding(_ context.Context, _ iam.IAMBinding, _ string) (bool, error) {
 	return true, nil
 }
-func (m *mockIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
+func (m *mockIAMClient) AddArtifactRegistryRepositoryIAMBinding(_ context.Context, _, _, _, _ string) error {
 	return nil
 }
 func (m *mockIAMClient) DeleteServiceAccount(ctx context.Context, accountName string) error {
@@ -47,11 +49,9 @@ func (m *mockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, servi
 }
 func (m *mockIAMClient) Close() error { return nil }
 
-// TestOrchestratorCommandFlow verifies the full asynchronous command-and-reply loop
-// between the Orchestrator and an in-memory ServiceDirector using Pub/Sub emulators.
-// This test ensures that the core event-driven communication mechanism is working correctly.
+// TestOrchestratorCommandFlow verifies the full asynchronous command-and-reply loop.
 func TestOrchestratorCommandFlow(t *testing.T) {
-	// --- Arrange: Setup Emulators and Config ---
+	// --- Arrange ---
 	logger := log.With().Str("test", "TestOrchestratorCommandFlow").Logger()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -65,11 +65,8 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = psClient.Close()
-	})
+	t.Cleanup(func() { _ = psClient.Close() })
 
-	// --- 2. Define Architecture and Create Orchestrator ---
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
@@ -84,25 +81,25 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-flow": {
+				Services: map[string]servicemanager.ServiceSpec{
+					"producer-service": {ServiceAccount: "producer-sa"},
+				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
-						{CloudResource: servicemanager.CloudResource{Name: dataflowTopicToCreate}},
+						{CloudResource: servicemanager.CloudResource{Name: dataflowTopicToCreate}, ProducerService: &servicemanager.ServiceMapping{Name: "producer-service"}},
 					},
 				},
 			},
 		},
 	}
 
-	// Use NewOrchestratorWithClients to inject the emulator client and a nil deployer.
 	orch, err := orchestration.NewOrchestratorWithClients(ctx, arch, psClient, nil, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = orch.Teardown(context.Background()) })
 
-	// Wait for the orchestrator to finish its initialization (creating topics).
-	require.NoError(t, orchestration.WaitForState(ctx, orch, orchestration.StateCommandInfraReady), "Orchestrator failed to initialize command infrastructure")
+	require.NoError(t, orchestration.WaitForState(ctx, orch, orchestration.StateCommandInfraReady), "Orchestrator failed to initialize")
 	t.Log("Orchestrator is ready.")
 
-	// --- 3. Run ServiceDirector In-Memory ---
 	t.Log("Starting in-memory ServiceDirector...")
 	directorCfg := &servicedirector.Config{
 		BaseConfig: microservice.BaseConfig{ProjectID: projectID},
@@ -118,12 +115,9 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
-	// REFACTOR: Create mock IAM dependencies and pass them to the updated constructor.
 	mockIamClient := &mockIAMClient{}
-	iamManager, err := iam.NewIAMManager(mockIamClient, logger)
-	require.NoError(t, err)
-
-	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, iamManager, mockIamClient, psClient, logger)
+	planner := iam.NewRolePlanner(logger)
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, planner, mockIamClient, psClient, logger)
 	require.NoError(t, err)
 
 	go func() {
@@ -134,29 +128,21 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	t.Cleanup(func() { director.Shutdown(context.Background()) })
 	<-director.Ready()
 
-	// --- 4. Act and Assert in Sequence ---
-	t.Run("Act and Assert Event Flow", func(t *testing.T) {
-		// Step 4a: Await the "ready" signal from the ServiceDirector.
-		err = orch.AwaitServiceReady(ctx, arch.ServiceManagerSpec.Name)
-		require.NoError(t, err, "Did not receive 'service_ready' event from in-memory director")
-		t.Log("Orchestrator confirmed ServiceDirector is ready.")
+	// --- Act & Assert ---
+	err = orch.AwaitServiceReady(ctx, arch.ServiceManagerSpec.Name)
+	require.NoError(t, err, "Did not receive 'service_ready' event from in-memory director")
+	t.Log("Orchestrator confirmed ServiceDirector is ready.")
 
-		// Step 4b: Now that the director is ready, trigger the dataflow setup.
-		err = orch.TriggerDataflowResourceCreation(ctx, "test-flow")
-		require.NoError(t, err)
+	err = orch.TriggerDataflowResourceCreation(ctx, "test-flow")
+	require.NoError(t, err)
 
-		// Step 4c: Await the "completion" signal for the dataflow setup.
-		err = orch.AwaitDataflowReady(ctx, "test-flow")
-		require.NoError(t, err, "Did not receive completion event in time")
-	})
+	err = orch.AwaitDataflowReady(ctx, "test-flow")
+	require.NoError(t, err, "Did not receive completion event in time")
 
-	// --- 5. Final Verification ---
-	t.Run("Verify Resource Creation", func(t *testing.T) {
-		t.Log("Verifying that the dataflow resource was created in the emulator...")
-		topic := psClient.Topic(dataflowTopicToCreate)
-		exists, err := topic.Exists(ctx)
-		require.NoError(t, err, "Failed to check for new topic existence")
-		require.True(t, exists, "The ServiceDirector should have created the dataflow topic in the emulator")
-		t.Log("✅ Resource creation verified. Test successful.")
-	})
+	t.Log("Verifying that the dataflow resource was created in the emulator...")
+	topic := psClient.Topic(dataflowTopicToCreate)
+	exists, err := topic.Exists(ctx)
+	require.NoError(t, err, "Failed to check for new topic existence")
+	require.True(t, exists, "The ServiceDirector should have created the dataflow topic in the emulator")
+	t.Log("✅ Resource creation verified. Test successful.")
 }

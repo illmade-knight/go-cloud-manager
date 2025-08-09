@@ -77,49 +77,9 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	testTopicName := fmt.Sprintf("test-topic-for-iam-%d", runID)
 	testSecretName := fmt.Sprintf("test-secret-for-iam-%d", runID)
 	testDatasetName := fmt.Sprintf("test_dataset_for_iam_%d", runID)
-	testSaName := "pooled-iam-test-sa"
 	testSaPrefix := "it-iam"
 	targetServiceName := fmt.Sprintf("target-service-%d", runID)
 	const testLocation = "europe-west1"
-
-	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{ProjectID: projectID, Region: testLocation},
-		Dataflows: map[string]servicemanager.ResourceGroup{
-			"test-dataflow": {
-				Services: map[string]servicemanager.ServiceSpec{
-					"test-service": {
-						Name:           "test-service",
-						ServiceAccount: testSaName,
-						Dependencies:   []string{targetServiceName},
-						Deployment: &servicemanager.DeploymentSpec{
-							SecretEnvironmentVars: []servicemanager.SecretEnvVar{
-								{Name: "MY_SECRET", ValueFrom: testSecretName},
-							},
-						},
-					},
-					targetServiceName: {
-						Name:           targetServiceName,
-						ServiceAccount: "pooled-iam-target-sa",
-						Deployment:     &servicemanager.DeploymentSpec{Region: testLocation},
-					},
-				},
-				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{{
-						CloudResource: servicemanager.CloudResource{
-							Name:      testTopicName,
-							IAMPolicy: []servicemanager.IAM{{Name: "test-service", Role: "roles/pubsub.publisher"}},
-						},
-					}},
-					BigQueryDatasets: []servicemanager.BigQueryDataset{{
-						CloudResource: servicemanager.CloudResource{
-							Name:      testDatasetName,
-							IAMPolicy: []servicemanager.IAM{{Name: "test-service", Role: "WRITER"}},
-						},
-					}},
-				},
-			},
-		},
-	}
 
 	// 1. Create prerequisite resources for the test to apply IAM policies to.
 	psClient, err := pubsub.NewClient(ctx, projectID)
@@ -152,15 +112,6 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, testSaPrefix)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = iamClient.Close() })
-
-	iamManager, err := iam.NewIAMManager(iamClient, logger)
-	require.NoError(t, err)
-
-	t.Run("Act - Apply IAM", func(t *testing.T) {
-		t.Log("Applying IAM policies for the dataflow...")
-		err = iamManager.ApplyIAMForService(ctx, arch, "test-dataflow", "test-service")
-		require.NoError(t, err)
-	})
 
 	t.Run("Assert - Verify Policies", func(t *testing.T) {
 		t.Log("Verifying the IAM policies were set correctly...")

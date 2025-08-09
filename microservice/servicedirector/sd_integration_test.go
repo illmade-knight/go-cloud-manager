@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,15 +22,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockIAMClient is a no-op implementation for testing the ServiceDirector's flow.
-// It allows us to verify resource creation without needing real IAM credentials.
-type mockIAMClient struct{}
+// REFACTOR: The mock is upgraded to a "spy" that records calls to ApplyIAMPolicy.
+type mockIAMClient struct {
+	mu              sync.Mutex
+	AppliedPolicies []iam.PolicyBinding
+}
+
+func (m *mockIAMClient) ApplyIAMPolicy(ctx context.Context, binding iam.PolicyBinding) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.AppliedPolicies = append(m.AppliedPolicies, binding)
+	return nil
+}
 
 func (m *mockIAMClient) EnsureServiceAccountExists(_ context.Context, accountName string) (string, error) {
 	return "mock-" + accountName + "@project.iam.gserviceaccount.com", nil
 }
 func (m *mockIAMClient) AddResourceIAMBinding(_ context.Context, _ iam.IAMBinding, _ string) error {
-	return nil // Assume success
+	return nil
 }
 func (m *mockIAMClient) RemoveResourceIAMBinding(_ context.Context, _ iam.IAMBinding, _ string) error {
 	return nil
@@ -49,7 +59,7 @@ func (m *mockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, servi
 func (m *mockIAMClient) Close() error { return nil }
 
 // TestServiceDirector_Integration verifies that the director correctly processes a 'setup'
-// command, creating resources and applying IAM policies.
+// command, creating resources AND applying the correct IAM policies.
 func TestServiceDirector_Integration(t *testing.T) {
 	// --- Arrange ---
 	logger := zerolog.New(zerolog.NewTestWriter(t)).With().Timestamp().Logger()
@@ -62,68 +72,63 @@ func TestServiceDirector_Integration(t *testing.T) {
 	completionTopicID := "sd-test-events"
 	dataflowTopicToCreate := "new-dataflow-topic"
 
-	// 1. Setup Pub/Sub Emulator
 	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
 
-	// Pre-create the topics the orchestrator would normally create.
 	_, err = psClient.CreateTopic(ctx, commandTopicID)
 	require.NoError(t, err)
 	_, err = psClient.CreateTopic(ctx, completionTopicID)
 	require.NoError(t, err)
 
-	// 2. Define the Test Architecture
+	// REFACTOR: Define a more realistic architecture so the planner will generate IAM bindings.
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "test-director",
-		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-flow": {
 				Services: map[string]servicemanager.ServiceSpec{
-					"test-service": {
-						ServiceAccount: "test-sa",
-					},
+					"producer-service": {ServiceAccount: "producer-sa"},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
-						{CloudResource: servicemanager.CloudResource{Name: dataflowTopicToCreate}},
+						{
+							CloudResource:   servicemanager.CloudResource{Name: dataflowTopicToCreate},
+							ProducerService: &servicemanager.ServiceMapping{Name: "producer-service"},
+						},
 					},
 				},
 			},
 		},
 	}
 
-	// 3. Create ServiceDirector with Mocks and Emulator Clients
 	directorCfg := &servicedirector.Config{
 		BaseConfig: microservice.BaseConfig{ProjectID: projectID},
 		Commands: &servicedirector.PubsubConfig{
 			CommandTopicID:    commandTopicID,
 			CommandSubID:      commandSubID,
 			CompletionTopicID: completionTopicID,
+			Options:           pubsubConn.ClientOptions,
 		},
 	}
 
 	mockIamClient := &mockIAMClient{}
-	iamManager, err := iam.NewIAMManager(mockIamClient, logger)
-	require.NoError(t, err)
+	planner := iam.NewRolePlanner(logger)
 
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
-	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, iamManager, mockIamClient, psClient, logger)
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, planner, mockIamClient, psClient, logger)
 	require.NoError(t, err)
+
 	go func() {
-		// We don't require.NoError here because a successful shutdown will return http.ErrServerClosed,
-		// which we don't want to fail the test on.
 		if err := director.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			t.Errorf("director.Start() returned an unexpected error: %v", err)
 		}
 	}()
 	t.Cleanup(func() { director.Shutdown(context.Background()) })
+	<-director.Ready()
 
 	// --- Act ---
 	t.Log("Publishing 'setup' command to ServiceDirector...")
@@ -134,7 +139,6 @@ func TestServiceDirector_Integration(t *testing.T) {
 	cmdData, err := json.Marshal(cmd)
 	require.NoError(t, err)
 
-	// Listen for the completion event to know when the Director is done.
 	completionSubID := "test-completion-listener"
 	completionSub, err := psClient.CreateSubscription(ctx, completionSubID, pubsub.SubscriptionConfig{Topic: psClient.Topic(completionTopicID)})
 	require.NoError(t, err)
@@ -151,10 +155,8 @@ func TestServiceDirector_Integration(t *testing.T) {
 		})
 	}()
 
-	// Publish the command to trigger the setup.
 	psClient.Topic(commandTopicID).Publish(ctx, &pubsub.Message{Data: cmdData})
 
-	// Wait for the completion signal or timeout.
 	select {
 	case <-done:
 		t.Log("Received completion event from ServiceDirector.")
@@ -163,10 +165,28 @@ func TestServiceDirector_Integration(t *testing.T) {
 	}
 
 	// --- Assert ---
-	t.Log("Verifying that the dataflow resource was created in the emulator...")
-	topic := psClient.Topic(dataflowTopicToCreate)
-	exists, err := topic.Exists(ctx)
-	require.NoError(t, err, "Failed to check for new topic existence")
-	require.True(t, exists, "The ServiceDirector should have created the dataflow topic in the emulator")
-	t.Log("✅ Resource creation verified. Test successful.")
+	t.Run("Verify Resource Creation", func(t *testing.T) {
+		t.Log("Verifying that the dataflow resource was created in the emulator...")
+		topic := psClient.Topic(dataflowTopicToCreate)
+		exists, err := topic.Exists(ctx)
+		require.NoError(t, err, "Failed to check for new topic existence")
+		require.True(t, exists, "The ServiceDirector should have created the dataflow topic")
+		t.Log("✅ Resource creation verified.")
+	})
+
+	// REFACTOR: Add a new assertion to verify the IAM logic was executed correctly.
+	t.Run("Verify IAM Policy Application", func(t *testing.T) {
+		t.Log("Verifying that the correct IAM policies were applied...")
+		require.Len(t, mockIamClient.AppliedPolicies, 1, "Expected ApplyIAMPolicy to be called once for the topic")
+
+		policyForTopic := mockIamClient.AppliedPolicies[0]
+		require.Equal(t, "pubsub_topic", policyForTopic.ResourceType)
+		require.Equal(t, dataflowTopicToCreate, policyForTopic.ResourceID)
+
+		expectedMember := "serviceAccount:mock-producer-sa@project.iam.gserviceaccount.com"
+		// The planner should grant both publisher and viewer to a producer service.
+		require.Contains(t, policyForTopic.MemberRoles["roles/pubsub.publisher"], expectedMember)
+		require.Contains(t, policyForTopic.MemberRoles["roles/pubsub.viewer"], expectedMember)
+		t.Log("✅ IAM policy application verified.")
+	})
 }

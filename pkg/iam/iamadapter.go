@@ -7,6 +7,8 @@ import "context"
 type IAMClient interface {
 	EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error)
 
+	ApplyIAMPolicy(ctx context.Context, binding PolicyBinding) error
+
 	AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error
 	RemoveResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error
 	CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error)
