@@ -4,11 +4,14 @@ package orchestration_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/pubsub"
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-dataflow/pkg/microservice"
@@ -16,6 +19,33 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
+
+// REFACTOR: Add a local mock IAM client to satisfy the new constructor signature.
+// This allows the test to remain focused on the command/reply loop.
+type mockIAMClient struct{}
+
+func (m *mockIAMClient) EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error) {
+	return "mock-" + accountName + "@project.iam.gserviceaccount.com", nil
+}
+func (m *mockIAMClient) AddResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+	return nil
+}
+func (m *mockIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) error {
+	return nil
+}
+func (m *mockIAMClient) CheckResourceIAMBinding(ctx context.Context, binding iam.IAMBinding, member string) (bool, error) {
+	return true, nil
+}
+func (m *mockIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
+	return nil
+}
+func (m *mockIAMClient) DeleteServiceAccount(ctx context.Context, accountName string) error {
+	return nil
+}
+func (m *mockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
+	return nil
+}
+func (m *mockIAMClient) Close() error { return nil }
 
 // TestOrchestratorCommandFlow verifies the full asynchronous command-and-reply loop
 // between the Orchestrator and an in-memory ServiceDirector using Pub/Sub emulators.
@@ -80,6 +110,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 			CommandTopicID:    commandTopicID,
 			CommandSubID:      commandSubID,
 			CompletionTopicID: completionTopicID,
+			Options:           pubsubConn.ClientOptions,
 		},
 	}
 
@@ -87,12 +118,21 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
-	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, psClient, logger)
+	// REFACTOR: Create mock IAM dependencies and pass them to the updated constructor.
+	mockIamClient := &mockIAMClient{}
+	iamManager, err := iam.NewIAMManager(mockIamClient, logger)
 	require.NoError(t, err)
-	require.NoError(t, director.Start())
-	t.Cleanup(func() {
-		director.Shutdown(ctx)
-	})
+
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, iamManager, mockIamClient, psClient, logger)
+	require.NoError(t, err)
+
+	go func() {
+		if err := director.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("director.Start() returned an unexpected error: %v", err)
+		}
+	}()
+	t.Cleanup(func() { director.Shutdown(context.Background()) })
+	<-director.Ready()
 
 	// --- 4. Act and Assert in Sequence ---
 	t.Run("Act and Assert Event Flow", func(t *testing.T) {

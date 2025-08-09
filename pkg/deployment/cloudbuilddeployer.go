@@ -106,7 +106,7 @@ func NewCloudBuildDeployer(ctx context.Context, projectID, defaultRegion, source
 	}, nil
 }
 
-func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerolog.Logger, storage storageAPI, ar artifactRegistryAPI, builder cloudBuildAPI, runner cloudRunAPI) *CloudBuildDeployer {
+func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerolog.Logger, storage storageAPI, ar artifactRegistryAPI, builder cloudBuildAPI, runner cloudRunAPI) ContainerDeployer {
 	return &CloudBuildDeployer{
 		projectID:        projectID,
 		defaultRegion:    region,
@@ -119,8 +119,28 @@ func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerol
 	}
 }
 
+// REFACTOR: This is the original Deploy function, renamed. It provides the simple, sequential workflow.
 func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
-	d.logger.Info().Str("service", serviceName).Msg("Starting native cloud build and deploy workflow...")
+	d.logger.Info().Str("service", serviceName).Msg("Starting sequential build and deploy workflow...")
+	// The Build step now returns the final image URI.
+	builtImageURI, err := d.Build(ctx, serviceName, spec)
+	if err != nil {
+		return "", err
+	}
+	spec.Image = builtImageURI // Update the spec with the result of the build.
+
+	// The DeployService step now only handles the final deployment.
+	serviceURL, err := d.DeployService(ctx, serviceName, serviceAccountEmail, spec)
+	if err != nil {
+		return "", err
+	}
+	return serviceURL, nil
+}
+
+// REFACTOR: This new Build function encapsulates all steps required to produce a container image.
+// It can be run in parallel with other infrastructure setup.
+func (d *CloudBuildDeployer) Build(ctx context.Context, serviceName string, spec servicemanager.DeploymentSpec) (string, error) {
+	d.logger.Info().Str("service", serviceName).Msg("Starting container build phase...")
 
 	err := d.storage.EnsureBucketExists(ctx, d.sourceBucket)
 	if err != nil {
@@ -146,6 +166,15 @@ func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAcc
 		return "", fmt.Errorf("cloud Build failed for service '%s': %w", serviceName, err)
 	}
 	d.logger.Info().Str("image", spec.Image).Msg("Cloud Build successful. Image is ready.")
+	return spec.Image, nil
+}
+
+// REFACTOR: This new DeployService function handles only the final deployment of a pre-built image to Cloud Run.
+func (d *CloudBuildDeployer) DeployService(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
+	d.logger.Info().Str("service", serviceName).Msg("Starting service deployment phase...")
+	if spec.Image == "" {
+		return "", errors.New("cannot deploy service: image URI is missing from deployment spec")
+	}
 
 	deployedSvc, err := d.runner.CreateOrUpdate(ctx, serviceName, serviceAccountEmail, spec)
 	if err != nil {

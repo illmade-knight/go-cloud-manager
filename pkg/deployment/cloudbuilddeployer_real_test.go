@@ -6,11 +6,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/illmade-knight/go-test/auth"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/illmade-knight/go-test/auth"
 
 	"cloud.google.com/go/iam/admin/apiv1"
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
@@ -31,8 +32,7 @@ import (
 )
 
 // ensureCloudBuildPermissions uses the refactored iam package to programmatically
-// grant the necessary roles to the default Cloud Build service account. This replaces
-// the functionality of the deleted googleresourcemanager.go file.
+// grant the necessary roles to the default Cloud Build service account.
 func ensureCloudBuildPermissions(t *testing.T, ctx context.Context, projectID string) {
 	t.Helper()
 	t.Log("Ensuring default Cloud Build service account has necessary permissions...")

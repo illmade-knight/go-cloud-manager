@@ -1,17 +1,17 @@
 package orchestration
 
 import (
-	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
-	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
+	"strings"
+	"time"
+
+	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
+	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"strings"
-	"time"
 )
 
 // WaitForState is a helper function that blocks until the Orchestrator's state
@@ -119,21 +119,4 @@ func ensureArtifactRegistryRepositoryExists(ctx context.Context, client *artifac
 	}
 	log.Info().Str("repository", repoName).Msg("Successfully created repository.")
 	return nil
-}
-
-// ensureTopicExists is a private helper to create a Pub/Sub topic if it doesn't already exist.
-func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID string) (*pubsub.Topic, error) {
-	topic := client.Topic(topicID)
-	exists, err := topic.Exists(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check for topic %s: %w", topicID, err)
-	}
-	if !exists {
-		log.Info().Str("topic", topicID).Msg("Topic not found, creating it now.")
-		topic, err = client.CreateTopic(ctx, topicID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create topic %s: %w", topicID, err)
-		}
-	}
-	return topic, nil
 }

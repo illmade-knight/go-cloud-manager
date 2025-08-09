@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os" // REFACTOR: Import 'os' for file operations
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -19,198 +20,173 @@ import (
 	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3" // REFACTOR: Import 'yaml' to generate the config file
 )
 
-// TestOrchestrator_DataflowE2E performs a full, end-to-end integration test of a complex dataflow.
-func TestOrchestrator_DataflowE2E(t *testing.T) {
+// REFACTOR: The test is renamed to reflect its new focus on the Conductor's cloud integration.
+//
+// Its primary purpose is to verify the Conductor's ability to orchestrate a complex,
+// parallel build-and-deploy workflow against real cloud services.
+//
+// IMPORTANT: The services built in this test (from the 'testdata' directory) use their
+// own go.mod file, which requires a STABLE, PUBLISHED version of this repository as a
+// dependency. This test does NOT run against uncommitted code in the 'pkg/' or 'microservice/' directories.
+// Note - it obviously does use the uncommitted code in pkg/ and microservice/ for testing orchestrator, conductor
+// etc, it is only the testdata deployed services which are built from the github published version of this repo.
+
+func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// --- Global Test Setup ---
 	projectID := auth.CheckGCPAuth(t)
-	logger := log.With().Str("test", "TestOrchestrator_DataflowE2E").Logger()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	logger := log.With().Str("test", "TestConductor_Dataflow_CloudIntegration").Logger()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	runID := uuid.New().String()[:8]
-
-	// we always want to use a pool of service accounts for this test.
 	t.Setenv("TEST_SA_POOL_MODE", "true")
 	t.Setenv("TEST_SA_POOL_PREFIX", "it-")
 
-	// --- Arrange: Define and hydrate the full architecture for the test ---
+	// --- Arrange ---
 	var arch *servicemanager.MicroserviceArchitecture
 	var nameMap map[string]string
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
 
-	// Define original, un-hydrated names using variables.
-	sdName := "sd"
-	sdServiceAccount := "sd-sa"
-	sdBuildPath := "toy-servicedirector"
-
+	sdName, sdServiceAccount := "sd", "sd-sa"
+	// REFACTOR: The build path is now relative to the repository root.
+	sdBuildPath := "pkg/orchestration/testdata/servicedirector"
 	dataflowName := "tracer-flow"
+	pubName, pubServiceAccount, pubBuildPath := "tracer-publisher", "pub-sa", "pkg/orchestration/testdata/tracer-publisher"
+	subName, subServiceAccount, subBuildPath := "tracer-subscriber", "sub-sa", "pkg/orchestration/testdata/tracer-subscriber"
+	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
 
-	pubName := "tracer-publisher"
-	pubServiceAccount := "pub-sa"
-	pubBuildPath := "tracer-publisher"
+	// 1. Define and Hydrate Architecture
+	// REFACTOR: The sourcePath for the build MUST be the repository root
+	// so that the Go modules and replace directives can be resolved correctly.
+	sourcePath, err := filepath.Abs("../..")
+	require.NoError(t, err)
 
-	subName := "tracer-subscriber"
-	subServiceAccount := "sub-sa"
-	subBuildPath := "tracer-subscriber"
-
-	commandTopicID := "director-commands"
-	commandSubID := "director-command-sub"
-	completionTopicID := "director-events"
-
-	verifyTopicName := "verify-topic"
-	tracerTopicName := "tracer-topic"
-	tracerSubName := "tracer-sub"
-	//bqDatasetName := "test-bq-dataset"
-	//bqTableName := "test-bq-table"
-	var verifySub *pubsub.Subscription
-
-	t.Run("Arrange - Build and Hydrate Architecture", func(t *testing.T) {
-		sourcePath, _ := filepath.Abs("./testdata")
-		arch = &servicemanager.MicroserviceArchitecture{
-			Environment: servicemanager.Environment{ProjectID: projectID, Region: "us-central1"},
-			ServiceManagerSpec: servicemanager.ServiceSpec{
-				Name:           sdName,
-				ServiceAccount: sdServiceAccount,
-				Deployment: &servicemanager.DeploymentSpec{
-					SourcePath:          sourcePath,
-					BuildableModulePath: sdBuildPath,
-					EnvironmentVars: map[string]string{
-						"SD_COMMAND_TOPIC":        commandTopicID,
-						"SD_COMMAND_SUBSCRIPTION": commandSubID,
-						"SD_COMPLETION_TOPIC":     completionTopicID,
-						"TRACER_TOPIC_ID":         tracerTopicName,
-						"TRACER_SUB_ID":           tracerSubName,
-						"VERIFY_TOPIC_ID":         verifyTopicName,
-					},
+	arch = &servicemanager.MicroserviceArchitecture{
+		Environment: servicemanager.Environment{ProjectID: projectID, Region: "us-central1"},
+		ServiceManagerSpec: servicemanager.ServiceSpec{
+			Name:           sdName,
+			ServiceAccount: sdServiceAccount,
+			Deployment: &servicemanager.DeploymentSpec{
+				SourcePath:          sourcePath,
+				BuildableModulePath: sdBuildPath,
+				EnvironmentVars: map[string]string{
+					"SD_COMMAND_TOPIC":        "director-commands",
+					"SD_COMMAND_SUBSCRIPTION": "director-command-sub",
+					"SD_COMPLETION_TOPIC":     "director-events",
 				},
 			},
-			Dataflows: map[string]servicemanager.ResourceGroup{
-				dataflowName: {
-					Services: map[string]servicemanager.ServiceSpec{
-						subName: {
-							Name:           subName,
-							ServiceAccount: subServiceAccount,
-							Deployment:     &servicemanager.DeploymentSpec{SourcePath: sourcePath, BuildableModulePath: subBuildPath},
-						},
-						pubName: {
-							Name:           pubName,
-							ServiceAccount: pubServiceAccount,
-							Deployment:     &servicemanager.DeploymentSpec{SourcePath: sourcePath, BuildableModulePath: pubBuildPath},
+		},
+		Dataflows: map[string]servicemanager.ResourceGroup{
+			dataflowName: {
+				Services: map[string]servicemanager.ServiceSpec{
+					subName: {
+						Name:           subName,
+						ServiceAccount: subServiceAccount,
+						Deployment: &servicemanager.DeploymentSpec{
+							SourcePath:          sourcePath,
+							BuildableModulePath: subBuildPath,
 						},
 					},
-					Resources: servicemanager.CloudResourcesSpec{
-						Topics: []servicemanager.TopicConfig{
-							{
-								CloudResource:   servicemanager.CloudResource{Name: tracerTopicName},
-								ProducerService: &servicemanager.ServiceMapping{Name: pubName, Env: "TOPIC_ID"},
-							},
-							{
-								CloudResource:   servicemanager.CloudResource{Name: verifyTopicName},
-								ProducerService: &servicemanager.ServiceMapping{Name: subName, Env: "VERIFY_TOPIC_ID"},
-							},
+					pubName: {
+						Name:           pubName,
+						ServiceAccount: pubServiceAccount,
+						Deployment: &servicemanager.DeploymentSpec{
+							SourcePath:          sourcePath,
+							BuildableModulePath: pubBuildPath,
 						},
-						Subscriptions: []servicemanager.SubscriptionConfig{{
-							CloudResource:   servicemanager.CloudResource{Name: tracerSubName},
-							Topic:           tracerTopicName,
-							ConsumerService: &servicemanager.ServiceMapping{Name: subName, Env: "SUBSCRIPTION_ID"},
-						}},
-						//BigQueryDatasets: []servicemanager.BigQueryDataset{{
-						//	CloudResource: servicemanager.CloudResource{Name: bqDatasetName},
-						//}},
-						//BigQueryTables: []servicemanager.BigQueryTable{{
-						//	CloudResource: servicemanager.CloudResource{Name: bqTableName},
-						//	Dataset:       bqDatasetName,
-						//	Consumers:     []servicemanager.ServiceMapping{{Name: subName, Env: "TABLE_ID"}},
-						//	Producers:     []servicemanager.ServiceMapping{{Name: pubName, Env: "TABLE_ID"}},
-						//}},
 					},
 				},
+				Resources: servicemanager.CloudResourcesSpec{
+					Topics: []servicemanager.TopicConfig{
+						{CloudResource: servicemanager.CloudResource{Name: tracerTopicName}, ProducerService: &servicemanager.ServiceMapping{Name: pubName, Env: "TOPIC_ID"}},
+						{CloudResource: servicemanager.CloudResource{Name: verifyTopicName}, ProducerService: &servicemanager.ServiceMapping{Name: subName, Env: "VERIFY_TOPIC_ID"}},
+					},
+					Subscriptions: []servicemanager.SubscriptionConfig{{
+						CloudResource:   servicemanager.CloudResource{Name: tracerSubName},
+						Topic:           tracerTopicName,
+						ConsumerService: &servicemanager.ServiceMapping{Name: subName, Env: "SUBSCRIPTION_ID"},
+					}},
+				},
 			},
-		}
-		nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
-		require.NoError(t, err)
-		require.NotNil(t, nameMap)
+		},
+	}
+	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
+	require.NoError(t, err)
+
+	// REFACTOR: Write the hydrated architecture to a YAML file in the ServiceDirector's
+	// build directory. This file will be embedded into the service binary.
+	t.Log("Writing hydrated services.yaml for the ServiceDirector build...")
+	yamlBytes, err := yaml.Marshal(arch)
+	require.NoError(t, err)
+	embeddedYamlPath := filepath.Join(sourcePath, sdBuildPath, "services.yaml")
+	err = os.WriteFile(embeddedYamlPath, yamlBytes, 0644)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = os.Remove(embeddedYamlPath)
 	})
 
-	t.Run("Act and Assert Full Workflow", func(t *testing.T) {
-		iamOrch, err := orchestration.NewIAMOrchestrator(ctx, arch, logger)
-		require.NoError(t, err)
-		orch, err := orchestration.NewOrchestrator(ctx, arch, logger)
-		require.NoError(t, err)
+	// 2. Directly create the required Pub/Sub resources for the test.
+	t.Log("Pre-creating test resources...")
+	hydratedVerifyTopicName := nameMap[verifyTopicName]
+	hydratedTracerTopicName := nameMap[tracerTopicName]
+	verifyTopic, err := psClient.CreateTopic(ctx, hydratedVerifyTopicName)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = verifyTopic.Delete(context.Background()) })
+	tracerTopic, err := psClient.CreateTopic(ctx, hydratedTracerTopicName)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tracerTopic.Delete(context.Background()) })
+	t.Log("Test resources created successfully.")
 
-		t.Cleanup(func() {
-			cCtx, cCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cCancel()
-			logger.Info().Msg("--- Starting Full Teardown ---")
-			if err = orch.TeardownDataflowServices(cCtx, dataflowName); err != nil {
-				logger.Error().Err(err).Msg("Dataflow services teardown failed")
-			}
-			if err = orch.TeardownCloudRunService(cCtx, arch.ServiceManagerSpec.Name); err != nil {
-				logger.Error().Err(err).Msg("Service director teardown failed")
-			}
-			if err = orch.Teardown(cCtx); err != nil {
-				logger.Error().Err(err).Msg("Orchestrator teardown failed")
-			}
-			if err = iamOrch.Teardown(cCtx); err != nil {
-				logger.Error().Err(err).Msg("IAM teardown failed")
-			}
-			logger.Info().Msg("--- Teardown Complete ---")
-		})
+	// --- Act & Assert ---
+	t.Log("Creating Conductor...")
+	opts := orchestration.ConductorOptions{
+		CheckPrerequisites:      true,
+		SetupServiceDirectorIAM: true,
+		DeployServiceDirector:   true,
+		VerifyDataflowIAM:       true,
+		SetupDataflowResources:  false,
+		BuildDataflowServices:   true,
+		DeployDataflowServices:  true,
+	}
+	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conductor.Teardown(context.Background()) })
 
-		sdSaEmails, err := iamOrch.SetupServiceDirectorIAM(ctx)
-		require.NoError(t, err)
-		directorURL, err := orch.DeployServiceDirector(ctx, sdSaEmails)
-		require.NoError(t, err)
+	_, verifySub := createVerificationResources(t, ctx, psClient, hydratedVerifyTopicName)
+	validationChan := startVerificationListener(t, ctx, verifySub, 2)
 
-		err = orch.AwaitServiceReady(ctx, nameMap[sdName])
-		require.NoError(t, err, "Did not receive 'service_ready' event in time")
+	t.Log("Running Conductor to execute parallel build and deploy workflow...")
+	err = conductor.Run(ctx)
+	require.NoError(t, err)
+	t.Log("Conductor run completed successfully.")
 
-		err = orch.TriggerDataflowResourceCreation(ctx, dataflowName)
-		require.NoError(t, err)
-		err = orch.AwaitDataflowReady(ctx, dataflowName)
-		require.NoError(t, err)
-		dfSaEmails, err := iamOrch.ApplyIAMForDataflow(ctx, dataflowName)
-		require.NoError(t, err)
-		err = iamOrch.VerifyIAMForDataflow(ctx, dataflowName)
-		require.NoError(t, err)
-
-		hydratedVerifyTopicName := nameMap[verifyTopicName]
-		require.NotEmpty(t, hydratedVerifyTopicName, "Could not find hydrated verification topic name in nameMap")
-
-		_, verifySub = createVerificationResources(t, ctx, psClient, hydratedVerifyTopicName)
-		validationChan := startVerificationListener(t, ctx, verifySub, 2)
-
-		err = orch.DeployDataflowServices(ctx, dataflowName, dfSaEmails, directorURL)
-		require.NoError(t, err)
-
-		select {
-		case err := <-validationChan:
-			logger.Info().Err(err).Msg("Verification complete.")
-		case <-ctx.Done():
-			t.Fatal("Test context timed out before verification completed.")
-		}
-	})
+	t.Log("Waiting for verification messages from deployed services...")
+	select {
+	case err := <-validationChan:
+		require.NoError(t, err, "Verification listener received an error")
+		logger.Info().Msg("✅ Verification complete. All messages received.")
+	case <-ctx.Done():
+		t.Fatal("Test context timed out before receiving all verification messages.")
+	}
 }
 
+// ... (startVerificationListener and other helpers are unchanged) ...
 func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Subscription, expectedCount int) <-chan error {
 	t.Helper()
 	validationChan := make(chan error, 1)
 	var receivedCount atomic.Int32
-	// REFACTOR: Use sync.Once to ensure the channel is closed only once.
-	// This prevents a race condition where multiple concurrent callbacks could
-	// attempt to close the channel, causing a panic.
 	var closeOnce sync.Once
 
 	go func() {
 		err := sub.Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
 			log.Info().Str("data", string(m.Data)).Msg("Verifier received a message.")
 			m.Ack()
-			if receivedCount.Add(1) == int32(expectedCount) {
-				// REFACTOR: Safely close the channel exactly once.
+			if receivedCount.Add(1) >= int32(expectedCount) {
 				closeOnce.Do(func() {
 					close(validationChan)
 				})

@@ -118,10 +118,10 @@ func (ew *eventWaiter) signal(key CompletionStatus) {
 // "worker" for the Conductor, communicating with the deployed ServiceDirector via Pub/Sub
 // to trigger resource creation and listening for completion events.
 type Orchestrator struct {
-	archMutex   sync.Mutex
+	archMutex   sync.RWMutex // REFACTOR: Changed to RWMutex for safe concurrent reads.
 	arch        *servicemanager.MicroserviceArchitecture
 	logger      zerolog.Logger
-	deployer    *deployment.CloudBuildDeployer
+	deployer    deployment.ContainerDeployer // REFACTOR: Use the new ContainerDeployer interface
 	psClient    *pubsub.Client
 	eventWaiter *eventWaiter
 	stateChan   chan OrchestratorState
@@ -172,7 +172,7 @@ func NewOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceArchi
 
 // NewOrchestratorWithClients creates a new Orchestrator with pre-existing clients,
 // which is useful for unit testing with mocks.
-func NewOrchestratorWithClients(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, psClient *pubsub.Client, deployer *deployment.CloudBuildDeployer, logger zerolog.Logger) (*Orchestrator, error) {
+func NewOrchestratorWithClients(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, psClient *pubsub.Client, deployer deployment.ContainerDeployer, logger zerolog.Logger) (*Orchestrator, error) {
 	if arch.ProjectID == "" {
 		return nil, errors.New("ProjectID cannot be empty in the architecture definition")
 	}
@@ -211,6 +211,7 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, saEmails map[s
 		return "", errors.New("ServiceManagerSpec.Deployment is not defined in the architecture")
 	}
 
+	// REFACTOR: Use the sequential BuildAndDeploy for the ServiceDirector.
 	serviceURL, err := o.deployer.Deploy(ctx, serviceName, saEmail, *deploymentSpec)
 	if err != nil {
 		o.stateChan <- StateError
@@ -222,17 +223,81 @@ func (o *Orchestrator) DeployServiceDirector(ctx context.Context, saEmails map[s
 	return serviceURL, nil
 }
 
-// DeployDataflowServices deploys all application services within a given dataflow in parallel.
-func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName string, saEmails map[string]string, directorURL string) error {
+// REFACTOR: This new method orchestrates the parallel building of all service containers for a dataflow.
+// It returns a map of service names to the URIs of their built container images.
+func (o *Orchestrator) BuildDataflowServices(ctx context.Context, dataflowName string) (map[string]string, error) {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Beginning parallel build of all application services...")
+
+	o.archMutex.RLock()
+	dataflow, ok := o.arch.Dataflows[dataflowName]
+	o.archMutex.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("dataflow '%s' not found in architecture definition", dataflowName)
+	}
+	if len(dataflow.Services) == 0 {
+		o.logger.Info().Str("dataflow", dataflowName).Msg("No application services defined, skipping build.")
+		return nil, nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(dataflow.Services))
+	results := make(chan buildResult, len(dataflow.Services))
+
+	for sName, sSpec := range dataflow.Services {
+		if sSpec.Deployment == nil {
+			o.logger.Warn().Str("service", sName).Msg("Service has no deployment spec, skipping build.")
+			continue
+		}
+		wg.Add(1)
+		go func(serviceName string, serviceSpec servicemanager.ServiceSpec) {
+			defer wg.Done()
+			o.logger.Info().Str("service", serviceName).Msg("Starting build...")
+			imageURI, err := o.deployer.Build(ctx, serviceName, *serviceSpec.Deployment)
+			if err != nil {
+				errs <- fmt.Errorf("failed to build service '%s': %w", serviceName, err)
+				return
+			}
+			results <- buildResult{serviceName: serviceName, imageURI: imageURI}
+			o.logger.Info().Str("service", serviceName).Str("image", imageURI).Msg("Build successful.")
+		}(sName, sSpec)
+	}
+
+	wg.Wait()
+	close(errs)
+	close(results)
+
+	var buildErrors []string
+	for err := range errs {
+		buildErrors = append(buildErrors, err.Error())
+	}
+	if len(buildErrors) > 0 {
+		return nil, fmt.Errorf("encountered %d error(s) during build phase: %s", len(buildErrors), strings.Join(buildErrors, "; "))
+	}
+
+	builtImages := make(map[string]string)
+	for result := range results {
+		builtImages[result.serviceName] = result.imageURI
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully built all dataflow services.")
+	return builtImages, nil
+}
+
+// REFACTOR: This method is updated to deploy services using pre-built images.
+// It now takes a map of service names to their container image URIs.
+func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName string, saEmails map[string]string, builtImages map[string]string, directorURL string) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Beginning parallel deployment of all application services...")
 
+	o.archMutex.RLock()
 	dataflow, ok := o.arch.Dataflows[dataflowName]
+	o.archMutex.RUnlock()
+
 	if !ok {
 		return fmt.Errorf("dataflow '%s' not found in architecture definition", dataflowName)
 	}
-
 	if len(dataflow.Services) == 0 {
-		o.logger.Info().Str("dataflow", dataflowName).Msg("No application services defined, skipping.")
+		o.logger.Info().Str("dataflow", dataflowName).Msg("No application services defined, skipping deployment.")
 		return nil
 	}
 
@@ -241,42 +306,42 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 	results := make(chan deploymentResult, len(dataflow.Services))
 
 	for sName, sSpec := range dataflow.Services {
-		serviceName := sName
-		serviceSpec := sSpec
-
-		deploymentSpec := serviceSpec.Deployment
-		if deploymentSpec == nil {
-			o.logger.Warn().Str("service", serviceName).Msg("Service has no deployment spec, skipping.")
-			continue
+		if sSpec.Deployment == nil {
+			continue // Already logged in build phase.
 		}
 
-		saEmail, ok := saEmails[serviceName]
+		saEmail, ok := saEmails[sName]
 		if !ok {
-			return fmt.Errorf("service account email not found for service '%s'", serviceName)
+			return fmt.Errorf("service account email not found for service '%s'", sName)
+		}
+		imageURI, ok := builtImages[sName]
+		if !ok {
+			return fmt.Errorf("pre-built image URI not found for service '%s'", sName)
 		}
 
 		wg.Add(1)
-		go func() {
+		go func(serviceName string, serviceSpec servicemanager.ServiceSpec, saEmail, imageURI string) {
 			defer wg.Done()
 			o.logger.Info().Str("service", serviceName).Msg("Starting deployment...")
 
-			// Create a safe local copy of the spec and inject the director URL.
-			localSpec := *deploymentSpec
+			// Create a safe local copy of the spec and inject dynamic values.
+			localSpec := *serviceSpec.Deployment
+			localSpec.Image = imageURI // Use the pre-built image.
 			localSpec.EnvironmentVars = make(map[string]string)
-			for k, v := range deploymentSpec.EnvironmentVars {
+			for k, v := range serviceSpec.Deployment.EnvironmentVars {
 				localSpec.EnvironmentVars[k] = v
 			}
 			localSpec.EnvironmentVars["SERVICE_DIRECTOR_URL"] = directorURL
 			localSpec.EnvironmentVars["PROJECT_ID"] = o.arch.ProjectID
 
-			serviceURL, err := o.deployer.Deploy(ctx, serviceName, saEmail, localSpec)
+			serviceURL, err := o.deployer.DeployService(ctx, serviceName, saEmail, localSpec)
 			if err != nil {
 				errs <- fmt.Errorf("failed to deploy service '%s': %w", serviceName, err)
 				return
 			}
 			results <- deploymentResult{serviceName: serviceName, serviceURL: serviceURL}
 			o.logger.Info().Str("service", serviceName).Str("url", serviceURL).Msg("Deployment successful.")
-		}()
+		}(sName, sSpec, saEmail, imageURI)
 	}
 
 	o.logger.Info().Msg("Waiting for all service deployments to complete...")
@@ -286,16 +351,16 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 	o.logger.Info().Msg("All service deployments have completed.")
 
 	// Safely process the results to update the main architecture spec.
+	o.archMutex.Lock()
 	for result := range results {
-		o.archMutex.Lock()
 		if svc, ok := o.arch.Dataflows[dataflowName].Services[result.serviceName]; ok {
 			if svc.Deployment != nil {
 				svc.Deployment.ServiceURL = result.serviceURL
 				o.arch.Dataflows[dataflowName].Services[result.serviceName] = svc
 			}
 		}
-		o.archMutex.Unlock()
 	}
+	o.archMutex.Unlock()
 
 	var deploymentErrors []string
 	for err := range errs {
@@ -362,9 +427,9 @@ func (o *Orchestrator) TeardownCloudRunService(ctx context.Context, serviceName 
 func (o *Orchestrator) TeardownDataflowServices(ctx context.Context, dataflowName string) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Beginning parallel teardown of all application services...")
 
-	o.archMutex.Lock()
+	o.archMutex.RLock()
 	dataflow, ok := o.arch.Dataflows[dataflowName]
-	o.archMutex.Unlock()
+	o.archMutex.RUnlock()
 
 	if !ok {
 		return fmt.Errorf("dataflow '%s' not found in architecture definition", dataflowName)
@@ -378,14 +443,13 @@ func (o *Orchestrator) TeardownDataflowServices(ctx context.Context, dataflowNam
 	errs := make(chan error, len(dataflow.Services))
 
 	for serviceName := range dataflow.Services {
-		serviceNameToDelete := serviceName
 		wg.Add(1)
-		go func() {
+		go func(serviceNameToDelete string) {
 			defer wg.Done()
 			if err := o.TeardownCloudRunService(ctx, serviceNameToDelete); err != nil {
 				errs <- err
 			}
-		}()
+		}(serviceName)
 	}
 
 	wg.Wait()
@@ -557,8 +621,27 @@ func (o *Orchestrator) ensureCommandInfra(ctx context.Context) error {
 	return nil
 }
 
-// deploymentResult is a simple struct to pass deployment outcomes from goroutines back to the main thread.
+// REFACTOR: Add internal types to manage parallel results.
 type deploymentResult struct {
 	serviceName string
 	serviceURL  string
+}
+
+type buildResult struct {
+	serviceName string
+	imageURI    string
+}
+
+// REFACTOR: This helper is a copy from the original DeployDataflowServices,
+// as it's not exported from that function.
+func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID string) (*pubsub.Topic, error) {
+	topic := client.Topic(topicID)
+	exists, err := topic.Exists(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check for topic '%s': %w", topicID, err)
+	}
+	if exists {
+		return topic, nil
+	}
+	return client.CreateTopic(ctx, topicID)
 }

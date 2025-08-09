@@ -13,6 +13,8 @@ import (
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // IAMOrchestrator is responsible for the high-level orchestration of all IAM policies for an architecture.
@@ -286,16 +288,72 @@ func (o *IAMOrchestrator) GetProjectNumber(ctx context.Context, projectID string
 		_ = c.Close()
 	}()
 
-	req := &resourcemanagerpb.GetProjectRequest{
-		Name: fmt.Sprintf("projects/%s", projectID),
+	var projectNumber string
+
+	operation := func() error {
+		c, err := resourcemanager.NewProjectsClient(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = c.Close()
+		}()
+
+		req := &resourcemanagerpb.GetProjectRequest{
+			Name: fmt.Sprintf("projects/%s", projectID),
+		}
+
+		project, err := c.GetProject(ctx, req)
+		if err != nil {
+			return err
+		}
+
+		projectNumber = strings.TrimPrefix(project.Name, "projects/")
+		return nil
 	}
 
-	project, err := c.GetProject(ctx, req)
+	err = executeWithRetry("getProjectNumber", operation)
 	if err != nil {
-		return "", fmt.Errorf("GetProject: %w", err)
+		return "", err
+	}
+	return projectNumber, nil
+}
+
+func executeWithRetry(operationName string, operation func() error) error {
+
+	const maxRetries = 5
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if isRetriableError(err) {
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond) // backoff with jitter
+			continue
+		}
+
+		return err
 	}
 
-	// The project name is returned as "projects/123456789". We just want the number.
-	projectNumber := project.Name[len("projects/"):]
-	return projectNumber, nil
+	return lastErr
+}
+
+func isRetriableError(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		// Not a gRPC status error, so not retriable by this logic.
+		return false
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.ResourceExhausted, codes.Unauthenticated:
+		// Unauthenticated is included because it can result from a transient
+		// failure to fetch an auth token due to network issues (like unexpected EOF).
+		return true
+	default:
+		return false
+	}
 }

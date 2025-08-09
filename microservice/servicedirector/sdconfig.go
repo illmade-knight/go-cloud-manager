@@ -2,9 +2,11 @@ package servicedirector
 
 import (
 	"flag"
-	"github.com/illmade-knight/go-dataflow/pkg/microservice"
 	"os"
 	"strings"
+
+	"github.com/illmade-knight/go-dataflow/pkg/microservice"
+	"google.golang.org/api/option"
 
 	"github.com/rs/zerolog/log"
 )
@@ -19,6 +21,7 @@ type PubsubConfig struct {
 	CommandTopicID    string
 	CommandSubID      string
 	CompletionTopicID string
+	Options           []option.ClientOption
 }
 
 // Config now only holds configuration that is NOT defined in the architecture spec.
