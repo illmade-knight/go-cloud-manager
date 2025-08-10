@@ -36,7 +36,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// --- Global Test Setup ---
 	projectID := auth.CheckGCPAuth(t)
 	logger := log.With().Str("test", "TestConductor_Dataflow_CloudIntegration").Logger()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
 	runID := uuid.New().String()[:8]
@@ -64,8 +64,9 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	pubName, pubServiceAccount := "tracer-publisher", "pub-sa"
 	subName, subServiceAccount := "tracer-subscriber", "sub-sa"
 	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
+	sdCommandTopicName, sdCompletionTopicName, sdCommandSubName := "director-commands", "director-events", "director-command-sub"
 
-	// 1. Define Architecture with logical service account names.
+	// 1. Define Architecture with logical names.
 	arch = &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID, Region: "us-central1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
@@ -75,22 +76,42 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 				SourcePath:          sourcePath,
 				BuildableModulePath: sdBuildPath,
 				EnvironmentVars: map[string]string{
-					"SD_COMMAND_TOPIC":        "director-commands",
-					"SD_COMMAND_SUBSCRIPTION": "director-command-sub",
-					"SD_COMPLETION_TOPIC":     "director-events",
+					"SD_COMMAND_TOPIC":        sdCommandTopicName,
+					"SD_COMMAND_SUBSCRIPTION": sdCommandSubName,
+					"SD_COMPLETION_TOPIC":     sdCompletionTopicName,
 				},
 			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			dataflowName: {
 				Services: map[string]servicemanager.ServiceSpec{
-					subName: {Name: subName, ServiceAccount: subServiceAccount, Deployment: &servicemanager.DeploymentSpec{SourcePath: sourcePath, BuildableModulePath: subBuildPath}},
-					pubName: {Name: pubName, ServiceAccount: pubServiceAccount, Deployment: &servicemanager.DeploymentSpec{SourcePath: sourcePath, BuildableModulePath: pubBuildPath}},
+					subName: {
+						Name:           subName,
+						ServiceAccount: subServiceAccount,
+						Deployment: &servicemanager.DeploymentSpec{
+							SourcePath:          sourcePath,
+							BuildableModulePath: subBuildPath,
+						},
+					},
+					pubName: {
+						Name:           pubName,
+						ServiceAccount: pubServiceAccount,
+						Deployment: &servicemanager.DeploymentSpec{
+							SourcePath:          sourcePath,
+							BuildableModulePath: pubBuildPath,
+						},
+					},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
-						{CloudResource: servicemanager.CloudResource{Name: tracerTopicName}, ProducerService: &servicemanager.ServiceMapping{Name: pubName, Env: "TOPIC_ID"}},
-						{CloudResource: servicemanager.CloudResource{Name: verifyTopicName}, ProducerService: &servicemanager.ServiceMapping{Name: subName, Env: "VERIFY_TOPIC_ID"}},
+						{
+							CloudResource:   servicemanager.CloudResource{Name: tracerTopicName},
+							ProducerService: &servicemanager.ServiceMapping{Name: pubName, Env: "TOPIC_ID"},
+						},
+						{
+							CloudResource:   servicemanager.CloudResource{Name: verifyTopicName},
+							ProducerService: &servicemanager.ServiceMapping{Name: subName, Env: "VERIFY_TOPIC_ID"},
+						},
 					},
 					Subscriptions: []servicemanager.SubscriptionConfig{{
 						CloudResource:   servicemanager.CloudResource{Name: tracerSubName},
@@ -102,12 +123,14 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		},
 	}
 
-	// 2. Perform test-specific hydration using a pooled client.
+	// 2. Hydrate the architecture with unique resource names and pooled SA emails.
 	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, "it-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = iamClient.Close() })
 
-	t.Log("Hydrating architecture with service accounts from the pool...")
+	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
+	require.NoError(t, err)
+
 	leasedSDEmail, err := iamClient.EnsureServiceAccountExists(ctx, arch.ServiceManagerSpec.ServiceAccount)
 	require.NoError(t, err)
 	arch.ServiceManagerSpec.ServiceAccount = leasedSDEmail
@@ -121,8 +144,9 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		arch.Dataflows[dfName] = df
 	}
 
-	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
-	require.NoError(t, err)
+	arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"] = nameMap[sdCommandTopicName]
+	arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"] = nameMap[sdCompletionTopicName]
+	arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"] = nameMap[sdCommandSubName]
 
 	// 3. Write the fully hydrated YAML for the ServiceDirector build.
 	t.Log("Writing hydrated services.yaml for the ServiceDirector build...")
@@ -153,8 +177,8 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		BuildAndDeployServices: true,
 		TriggerRemoteSetup:     true,
 		VerifyDataflowIAM:      true,
-		SAPollTimeout:          time.Minute,
-		PolicyPollTimeout:      time.Minute,
+		SAPollTimeout:          4 * time.Minute,
+		PolicyPollTimeout:      7 * time.Minute, // Generous timeout for policy propagation
 	}
 	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
 	require.NoError(t, err)
@@ -173,7 +197,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	select {
 	case err := <-validationChan:
 		require.NoError(t, err, "Verification listener received an error")
-		logger.Info().Msg("✅ Verification complete. All messages received.")
+		log.Info().Msg("✅ Verification complete. All messages received.")
 	case <-ctx.Done():
 		t.Fatal("Test context timed out before receiving all verification messages.")
 	}

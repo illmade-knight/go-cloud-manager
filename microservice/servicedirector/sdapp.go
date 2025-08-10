@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"cloud.google.com/go/pubsub"
@@ -68,37 +67,6 @@ func withServiceManager(sm *servicemanager.ServiceManager) DirectorOption {
 			}
 		}
 		d.serviceManager = sm
-		return nil
-	}
-}
-
-// withIAM is an option to configure the Director with its IAM dependencies.
-func withIAM(iamManager iam.IAMManager, iamClient iam.IAMClient) DirectorOption {
-	return func(ctx context.Context, d *Director) error {
-		if iamClient == nil {
-			var err error
-			if os.Getenv("TEST_SA_POOL_MODE") == "true" {
-				d.logger.Info().Msg("ServiceDirector is starting in SA POOLING MODE.")
-				prefix := os.Getenv("TEST_SA_POOL_PREFIX")
-				iamClient, err = iam.NewTestIAMClient(ctx, d.architecture.ProjectID, d.logger, prefix)
-			} else {
-				d.logger.Info().Msg("ServiceDirector is starting in standard mode.")
-				iamClient, err = iam.NewGoogleIAMClient(ctx, d.architecture.ProjectID)
-			}
-			if err != nil {
-				return fmt.Errorf("director: failed to create IAM client: %w", err)
-			}
-		}
-		if iamManager == nil {
-			var err error
-			iamManager, err = iam.NewIAMManager(iamClient, d.logger)
-			if err != nil {
-				_ = iamClient.Close()
-				return fmt.Errorf("director: failed to create IAM manager: %w", err)
-			}
-		}
-		d.iamManager = iamManager
-		d.iamClient = iamClient
 		return nil
 	}
 }
@@ -296,6 +264,30 @@ func (d *Director) listenForCommands(ctx context.Context) {
 		d.logger.Error().Err(err).Msg("Command listener shut down with error")
 	} else {
 		d.logger.Info().Msg("Command listener shut down gracefully.")
+	}
+}
+
+func withIAM(iamManager iam.IAMManager, iamClient iam.IAMClient) DirectorOption {
+	return func(ctx context.Context, d *Director) error {
+		if iamClient == nil {
+			var err error
+			d.logger.Info().Msg("ServiceDirector creating standard Google IAM Client.")
+			iamClient, err = iam.NewGoogleIAMClient(ctx, d.architecture.ProjectID)
+			if err != nil {
+				return fmt.Errorf("director: failed to create IAM client: %w", err)
+			}
+		}
+		if iamManager == nil {
+			var err error
+			iamManager, err = iam.NewIAMManager(iamClient, d.logger)
+			if err != nil {
+				_ = iamClient.Close()
+				return fmt.Errorf("director: failed to create IAM manager: %w", err)
+			}
+		}
+		d.iamManager = iamManager
+		d.iamClient = iamClient
+		return nil
 	}
 }
 

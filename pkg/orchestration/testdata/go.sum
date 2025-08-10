@@ -161,8 +161,8 @@ github.com/googleapis/gax-go/v2 v2.15.0 h1:SyjDc1mGgZU5LncH8gimWo9lW1DtIfPibOG81
 github.com/googleapis/gax-go/v2 v2.15.0/go.mod h1:zVVkkxAQHa1RQpg9z2AUCMnKhi0Qld9rcmyfL1OZhoc=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
-github.com/illmade-knight/go-cloud-manager v0.2.2-beta h1:sd5Y3nrnM9dAFRkZS7Jr6YioBfYnHJ2VzkiSr8fMCuw=
-github.com/illmade-knight/go-cloud-manager v0.2.2-beta/go.mod h1:UJ5LR5BMHXFSimuy4h8QY4pzGt4t0K8MiarD9poEHE4=
+github.com/illmade-knight/go-cloud-manager v0.2.3-beta h1:DMKa7I1GgBaw6bGFJ6GL+5U41ZQRbGG4o1VcqxD4gbM=
+github.com/illmade-knight/go-cloud-manager v0.2.3-beta/go.mod h1:VFraEqh1QQa/+fLOyJr5rfmwZuvnwclaD3MqlG1zIvo=
 github.com/illmade-knight/go-dataflow v0.2.1-beta h1:Ue2MAK9aKkxXyjkPsMbXUSzvC+cCqJRFtkazMMl6LJQ=
 github.com/illmade-knight/go-dataflow v0.2.1-beta/go.mod h1:kz43+B89zYbVsUDawQoRbgUOukbOWXpX46duOIc5FK8=
 github.com/illmade-knight/go-test v0.0.2-beta h1:b7LKySBc2v93kU4JhSv4FzDdVAO0UD/2YyFtCv/LKco=
@@ -360,8 +360,8 @@ google.golang.org/protobuf v1.22.0/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2
 google.golang.org/protobuf v1.23.0/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2l/sGQquU=
 google.golang.org/protobuf v1.23.1-0.20200526195155-81db48ad09cc/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2l/sGQquU=
 google.golang.org/protobuf v1.25.0/go.mod h1:9JNX74DMeImyA3h4bdi1ymwjUzf21/xIlbajtzgsN7c=
-google.golang.org/protobuf v1.36.6 h1:z1NpPI8ku2WgiWnf+t9wTPsn6eP1L7ksHUlkfLvd9xY=
-google.golang.org/protobuf v1.36.6/go.mod h1:jduwjTPXsFjZGTmRluh+L6NjiWu7pchiJ2/5YcXBHnY=
+google.golang.org/protobuf v1.36.7 h1:IgrO7UwFQGJdRNXH/sQux4R1Dj1WAKcLElzeeRaXV2A=
+google.golang.org/protobuf v1.36.7/go.mod h1:jduwjTPXsFjZGTmRluh+L6NjiWu7pchiJ2/5YcXBHnY=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=

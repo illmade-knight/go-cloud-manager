@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -72,39 +71,28 @@ func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitec
 // Run executes the full, multi-phase orchestration workflow in the correct sequence.
 func (c *Conductor) Run(ctx context.Context) error {
 	c.logger.Info().Msg("Starting full architecture orchestration...")
+
 	if err := c.checkPrerequisites(ctx); err != nil {
 		return err
 	}
+	// Phase 1: Create all service accounts and wait for them to propagate.
 	if err := c.setupIAMPhase(ctx); err != nil {
 		return err
 	}
-
-	var buildErr error
-	var remoteSetupErr error
-	var completionEvents map[string]CompletionEvent
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		buildErr = c.buildAndDeployDirectorPhase(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		completionEvents, remoteSetupErr = c.triggerRemoteSetup(ctx)
-	}()
-	wg.Wait()
-
-	if buildErr != nil {
-		return buildErr
+	// Phase 2: Run builds in parallel with only the ServiceDirector deployment. This is a blocking phase.
+	if err := c.buildAndDeployPhase(ctx); err != nil {
+		return err
 	}
-	if remoteSetupErr != nil {
-		return remoteSetupErr
+	// Phase 3: Now that builds are done and director is ready, trigger remote setup. This is a blocking phase.
+	completionEvents, err := c.triggerRemoteSetup(ctx)
+	if err != nil {
+		return err
 	}
-
+	// Phase 4: Now that remote setup is complete, verify IAM policy propagation.
 	if err := c.verificationPhase(ctx, completionEvents); err != nil {
 		return err
 	}
+	// Phase 5: Now that everything is verified, deploy the final application services.
 	if err := c.deploymentPhase(ctx); err != nil {
 		return err
 	}
@@ -159,7 +147,7 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	return nil
 }
 
-func (c *Conductor) buildAndDeployDirectorPhase(ctx context.Context) error {
+func (c *Conductor) buildAndDeployPhase(ctx context.Context) error {
 	if !c.options.BuildAndDeployServices {
 		return nil
 	}
@@ -219,21 +207,15 @@ func (c *Conductor) deployServiceDirector(ctx context.Context) error {
 	if _, ok := c.serviceAccountEmails[c.arch.ServiceManagerSpec.Name]; !ok {
 		return errors.New("cannot deploy service director: SA email not found")
 	}
-	deploymentSpec := c.arch.ServiceManagerSpec.Deployment
-	if os.Getenv("TEST_SA_POOL_MODE") == "true" {
-		if deploymentSpec.EnvironmentVars == nil {
-			deploymentSpec.EnvironmentVars = make(map[string]string)
-		}
-		deploymentSpec.EnvironmentVars["TEST_SA_POOL_MODE"] = "true"
-		deploymentSpec.EnvironmentVars["TEST_SA_POOL_PREFIX"] = os.Getenv("TEST_SA_POOL_PREFIX")
-	}
+
 	url, err := c.orch.DeployServiceDirector(ctx, c.serviceAccountEmails)
 	if err != nil {
 		return fmt.Errorf("failed during ServiceDirector deployment: %w", err)
 	}
 	c.directorURL = url
-	c.logger.Info().Str("url", url).Msg("Waiting for ServiceDirector to become ready...")
-	err = c.orch.AwaitServiceReady(ctx, c.arch.ServiceManagerSpec.Name)
+	c.logger.Info().Str("url", url).Str("topic", c.orch.completionTopic.ID()).
+		Str("sub", c.orch.completionSubscription.ID()).Msg("Waiting for ServiceDirector to become ready...")
+	err = c.orch.AwaitServiceReady(ctx, ServiceDirector)
 	if err != nil {
 		return fmt.Errorf("failed while waiting for ServiceDirector to become ready: %w", err)
 	}

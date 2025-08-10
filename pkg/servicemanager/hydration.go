@@ -3,9 +3,10 @@ package servicemanager
 import (
 	"errors"
 	"fmt"
+	"strings"
+
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"strings"
 )
 
 // HydrateArchitecture prepares an architecture for a production-like deployment. It fills
