@@ -1,12 +1,20 @@
 package iam
 
 import (
-	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
-	"cloud.google.com/go/iam/apiv1/iampb"
 	"context"
 	"fmt"
+
+	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
+	"cloud.google.com/go/iam/apiv1/iampb"
 	"github.com/rs/zerolog"
 )
+
+type RepoConfig struct {
+	ProjectID     string
+	ProjectNumber string
+	Location      string
+	Name          string
+}
 
 // GrantCloudRunAgentPermissions ensures that the Google-managed Cloud Run service agent
 // has reader permissions on a specific Artifact Registry repository. This is a necessary

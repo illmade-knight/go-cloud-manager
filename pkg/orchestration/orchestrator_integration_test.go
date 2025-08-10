@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,10 +21,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockIAMClient is a no-op implementation for testing the ServiceDirector's flow.
-type mockIAMClient struct{}
+// mockIAMClient is a no-op mock that satisfies the iam.IAMClient interface.
+// It is used to isolate the ServiceDirector from real cloud APIs in this test.
+type mockIAMClient struct {
+	mu              sync.Mutex
+	AppliedPolicies []iam.PolicyBinding
+}
 
 func (m *mockIAMClient) ApplyIAMPolicy(ctx context.Context, binding iam.PolicyBinding) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.AppliedPolicies = append(m.AppliedPolicies, binding)
+	return nil
+}
+func (m *mockIAMClient) GetServiceAccount(ctx context.Context, accountEmail string) error {
 	return nil
 }
 func (m *mockIAMClient) EnsureServiceAccountExists(_ context.Context, accountName string) (string, error) {
@@ -44,12 +55,13 @@ func (m *mockIAMClient) AddArtifactRegistryRepositoryIAMBinding(_ context.Contex
 func (m *mockIAMClient) DeleteServiceAccount(ctx context.Context, accountName string) error {
 	return nil
 }
-func (m *mockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
+func (m *mockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, a, b, c string) error {
 	return nil
 }
 func (m *mockIAMClient) Close() error { return nil }
 
-// TestOrchestratorCommandFlow verifies the full asynchronous command-and-reply loop.
+// TestOrchestratorCommandFlow verifies the full asynchronous command-and-reply loop
+// between the Orchestrator and an in-memory ServiceDirector using Pub/Sub emulators.
 func TestOrchestratorCommandFlow(t *testing.T) {
 	// --- Arrange ---
 	logger := log.With().Str("test", "TestOrchestratorCommandFlow").Logger()
@@ -116,8 +128,10 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	mockIamClient := &mockIAMClient{}
-	planner := iam.NewRolePlanner(logger)
-	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, planner, mockIamClient, psClient, logger)
+	iamManager, err := iam.NewIAMManager(mockIamClient, logger)
+	require.NoError(t, err)
+
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, iamManager, mockIamClient, psClient, logger)
 	require.NoError(t, err)
 
 	go func() {
@@ -136,7 +150,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	err = orch.TriggerDataflowResourceCreation(ctx, "test-flow")
 	require.NoError(t, err)
 
-	err = orch.AwaitDataflowReady(ctx, "test-flow")
+	_, err = orch.AwaitDataflowReady(ctx, "test-flow")
 	require.NoError(t, err, "Did not receive completion event in time")
 
 	t.Log("Verifying that the dataflow resource was created in the emulator...")

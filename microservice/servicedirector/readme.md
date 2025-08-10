@@ -29,7 +29,7 @@ This package includes a pre-built Go client to make this interaction simple for 
 
 This is how a separate "tracer-subscriber" service could use the client to verify its resources are ready before starting its main processing loop.
 
-```go
+```
 package main
 
 import (

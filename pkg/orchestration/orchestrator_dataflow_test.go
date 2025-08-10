@@ -15,6 +15,7 @@ import (
 
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/auth"
@@ -23,24 +24,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func getRepoRoot() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for {
-		goModPath := filepath.Join(cwd, "go.mod")
-		if _, err := os.Stat(goModPath); err == nil {
-			return cwd, nil
-		}
-		parent := filepath.Dir(cwd)
-		if parent == cwd {
-			return "", errors.New("could not find go.mod in any parent directory")
-		}
-		cwd = parent
-	}
-}
-
+// TestConductor_Dataflow_CloudIntegration is the final end-to-end cloud integration test for the Conductor.
+//
+// Its primary purpose is to verify the Conductor's ability to orchestrate a complex,
+// parallel build-and-deploy workflow against real cloud services.
+//
+// This test uses a self-contained Go module located in the `testdata` directory. This module
+// requires a stable, versioned release of the main repository from GitHub. This strategy
+// ensures that the build process is isolated and reproducible.
 func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// --- Global Test Setup ---
 	projectID := auth.CheckGCPAuth(t)
@@ -59,13 +50,14 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
 
-	sourcePath, err := getRepoRoot()
+	// The sourcePath for the build is the self-contained testdata module.
+	sourcePath, err := filepath.Abs("./testdata")
 	require.NoError(t, err)
 
-	// Define build paths relative to the repo root, mirroring the production structure.
-	sdBuildPath := "test/cmd/toy-servicedirector"
-	pubBuildPath := "test/cmd/tracer-publisher"
-	subBuildPath := "test/cmd/tracer-subscriber"
+	// Build paths are now relative to the testdata directory.
+	sdBuildPath := "servicedirector"
+	pubBuildPath := "tracer-publisher"
+	subBuildPath := "tracer-subscriber"
 
 	sdName, sdServiceAccount := "sd", "sd-sa"
 	dataflowName := "tracer-flow"
@@ -73,7 +65,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	subName, subServiceAccount := "tracer-subscriber", "sub-sa"
 	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
 
-	// 1. Define and Hydrate Architecture
+	// 1. Define Architecture with logical service account names.
 	arch = &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID, Region: "us-central1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
@@ -109,9 +101,30 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 			},
 		},
 	}
+
+	// 2. Perform test-specific hydration using a pooled client.
+	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, "it-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = iamClient.Close() })
+
+	t.Log("Hydrating architecture with service accounts from the pool...")
+	leasedSDEmail, err := iamClient.EnsureServiceAccountExists(ctx, arch.ServiceManagerSpec.ServiceAccount)
+	require.NoError(t, err)
+	arch.ServiceManagerSpec.ServiceAccount = leasedSDEmail
+	for dfName, df := range arch.Dataflows {
+		for svcName, svc := range df.Services {
+			leasedEmail, err := iamClient.EnsureServiceAccountExists(ctx, svc.ServiceAccount)
+			require.NoError(t, err)
+			svc.ServiceAccount = leasedEmail
+			df.Services[svcName] = svc
+		}
+		arch.Dataflows[dfName] = df
+	}
+
 	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
 	require.NoError(t, err)
 
+	// 3. Write the fully hydrated YAML for the ServiceDirector build.
 	t.Log("Writing hydrated services.yaml for the ServiceDirector build...")
 	yamlBytes, err := yaml.Marshal(arch)
 	require.NoError(t, err)
@@ -120,7 +133,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.Remove(embeddedYamlPath) })
 
-	// 2. Pre-create test resources.
+	// 4. Pre-create test resources.
 	t.Log("Pre-creating test resources...")
 	hydratedVerifyTopicName := nameMap[verifyTopicName]
 	hydratedTracerTopicName := nameMap[tracerTopicName]
@@ -132,7 +145,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = tracerTopic.Delete(context.Background()) })
 	t.Log("Test resources created successfully.")
 
-	// --- Act & Assert ---
+	// --- Act ---
 	t.Log("Creating Conductor...")
 	opts := orchestration.ConductorOptions{
 		CheckPrerequisites:     true,
@@ -140,7 +153,8 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		BuildAndDeployServices: true,
 		TriggerRemoteSetup:     true,
 		VerifyDataflowIAM:      true,
-		VerificationTimeout:    5 * time.Minute,
+		SAPollTimeout:          time.Minute,
+		PolicyPollTimeout:      time.Minute,
 	}
 	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
 	require.NoError(t, err)
@@ -154,6 +168,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Log("Conductor run completed successfully.")
 
+	// --- Assert ---
 	t.Log("Waiting for verification messages from deployed services...")
 	select {
 	case err := <-validationChan:
@@ -164,6 +179,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	}
 }
 
+// startVerificationListener is a test helper that listens on a subscription for a specified number of messages.
 func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Subscription, expectedCount int) <-chan error {
 	t.Helper()
 	validationChan := make(chan error, 1)
@@ -190,16 +206,13 @@ func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Su
 	return validationChan
 }
 
-// createVerificationResources is a test helper that requires a hydrated topic name.
+// createVerificationResources is a test helper that creates the ephemeral Pub/Sub resources needed by the test runner.
 func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, hydratedTopicName string) (*pubsub.Topic, *pubsub.Subscription) {
 	t.Helper()
 	verifyTopic := client.Topic(hydratedTopicName)
 	exists, err := verifyTopic.Exists(ctx)
 	require.NoError(t, err)
-	if !exists {
-		// This should not happen if the test pre-creates it.
-		t.Fatalf("Verification topic %s was expected to exist but was not found.", hydratedTopicName)
-	}
+	require.True(t, exists)
 
 	subID := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
 	verifySub, err := client.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{

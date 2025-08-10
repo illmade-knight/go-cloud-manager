@@ -54,59 +54,60 @@ service_manager_spec:
 
 **`dataflow_ingestion.yaml`**
 
-```yaml
+```
 # dataflow_ingestion.yaml: A logical grouping of services and resources.
 name: "ingestion-pipeline"
-description: "Handles incoming telemetry data."
-lifecycle:
-  strategy: ephemeral # This entire group of resources can be torn down.
-
-services:
-  ingest-service:
-    name: "ingest-service"
-    service_account: "ingest-sa@your-gcp-project-id.iam.gserviceaccount.com"
-    deployment:
-      source_path: "./cmd/ingest"
-      # Env vars for topic/subscription will be auto-injected by hydration
   
-  storage-service:
-    name: "storage-service"
-    service_account: "storage-sa@your-gcp-project-id.iam.gserviceaccount.com"
-    deployment:
-      source_path: "./cmd/storage"
-
-resources:
-  topics:
-    - name: "telemetry-topic"
-      # The manager will inject TELEMETRY_TOPIC_ID into 'ingest-service'
-      producer_service: "ingest-service" 
-
-  subscriptions:
-    - name: "telemetry-sub-for-storage"
-      topic: "telemetry-topic"
-      # The manager will inject TELEMETRY_SUB_FOR_STORAGE_SUB_ID into 'storage-service'
-      consumer_service: "storage-service"
-      ack_deadline_seconds: 60
-
-  gcs_buckets:
-    - name: "telemetry-archive-bucket"
-      location: "US"
-      storage_class: "STANDARD"
-      lifecycle_rules:
-        - action: { type: "Delete" }
-          condition: { age_in_days: 90 }
-
-  bigquery_datasets:
-    - name: "telemetry_dataset"
-      location: "US"
-      teardown_protection: true # This dataset will not be deleted on teardown.
-  
-  bigquery_tables:
-    - name: "raw_events"
-      dataset: "telemetry_dataset"
-      schema_type: "MyEventSchema" # Must be registered in Go code
-      time_partitioning_field: "timestamp"
-      time_partitioning_type: "DAY"
+    description: "Handles incoming telemetry data."
+    lifecycle:
+      strategy: ephemeral # This entire group of resources can be torn down.
+    
+    services:
+      ingest-service:
+        name: "ingest-service"
+        service_account: "ingest-sa@your-gcp-project-id.iam.gserviceaccount.com"
+        deployment:
+          source_path: "./cmd/ingest"
+          # Env vars for topic/subscription will be auto-injected by hydration
+      
+      storage-service:
+        name: "storage-service"
+        service_account: "storage-sa@your-gcp-project-id.iam.gserviceaccount.com"
+        deployment:
+          source_path: "./cmd/storage"
+    
+    resources:
+      topics:
+        - name: "telemetry-topic"
+          # The manager will inject TELEMETRY_TOPIC_ID into 'ingest-service'
+          producer_service: "ingest-service" 
+    
+      subscriptions:
+        - name: "telemetry-sub-for-storage"
+          topic: "telemetry-topic"
+          # The manager will inject TELEMETRY_SUB_FOR_STORAGE_SUB_ID into 'storage-service'
+          consumer_service: "storage-service"
+          ack_deadline_seconds: 60
+    
+      gcs_buckets:
+        - name: "telemetry-archive-bucket"
+          location: "US"
+          storage_class: "STANDARD"
+          lifecycle_rules:
+            - action: { type: "Delete" }
+              condition: { age_in_days: 90 }
+    
+      bigquery_datasets:
+        - name: "telemetry_dataset"
+          location: "US"
+          teardown_protection: true # This dataset will not be deleted on teardown.
+      
+      bigquery_tables:
+        - name: "raw_events"
+          dataset: "telemetry_dataset"
+          schema_type: "MyEventSchema" # Must be registered in Go code
+          time_partitioning_field: "timestamp"
+          time_partitioning_type: "DAY"
 
 ```
 
@@ -116,7 +117,7 @@ If you use BigQuery tables, you need to register their Go struct schemas. Do thi
 
 **`schemas/events.go`**
 
-```go
+```
 package schemas
 
 import (
@@ -142,7 +143,7 @@ Create a `main.go` file to drive the `ServiceManager`.
 
 **`main.go`**
 
-```go
+```
 package main
 
 import (

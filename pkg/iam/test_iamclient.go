@@ -12,10 +12,11 @@ import (
 	"cloud.google.com/go/iam"
 	"cloud.google.com/go/iam/apiv1/iampb"
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// ErrNoAvailableServiceAccountsInPool is returned by EnsureServiceAccountExists when the pool is
-// configured with TEST_SA_POOL_NO_CREATE=true and all available accounts are in use.
+// ErrNoAvailableServiceAccountsInPool is returned when the pool is exhausted and creation is disabled.
 var ErrNoAvailableServiceAccountsInPool = errors.New("no available service accounts in the pool")
 
 // PoolState represents the status of a single service account in the test pool.
@@ -24,13 +25,8 @@ type PoolState struct {
 	InUse bool
 }
 
-// TestIAMClient implements the IAMClient interface with a service account pooling mechanism.
-// This client is designed for integration tests to mitigate IAM API quota limitations.
-// Instead of creating and deleting service accounts for each test run, it discovers a pool
-// of pre-existing service accounts (identified by a common prefix) and "leases" them to tests.
-//
-// The "delete" operation is faked; it simply returns the account to the pool. The Close method
-// is responsible for cleaning all IAM roles from the leased accounts, making them pristine for the next run.
+// TestIAMClient implements the IAMClient interface with a service account pooling mechanism
+// for integration tests to mitigate IAM API quota limitations.
 type TestIAMClient struct {
 	realClient IAMClient
 	saManager  *ServiceAccountManager
@@ -43,7 +39,6 @@ type TestIAMClient struct {
 }
 
 // NewTestIAMClient creates a new client for testing that manages a pool of service accounts.
-// It discovers all service accounts in the project with the given prefix and initializes the pool.
 func NewTestIAMClient(ctx context.Context, projectID string, logger zerolog.Logger, prefix string) (*TestIAMClient, error) {
 	realClient, err := NewGoogleIAMClient(ctx, projectID)
 	if err != nil {
@@ -72,19 +67,15 @@ func NewTestIAMClient(ctx context.Context, projectID string, logger zerolog.Logg
 	return client, nil
 }
 
-// Close cleans all IAM roles from any service accounts used during the test run
-// and closes the underlying client connections.
+// Close cleans all IAM roles from any service accounts used during the test run.
 func (c *TestIAMClient) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.logger.Info().Msg("Closing test client and cleaning all service accounts in the pool...")
-
-	// Create a short-lived context specifically for the cleanup operations.
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	var errs []error
-
 	for _, state := range c.pool {
 		if !state.InUse {
 			continue // Skip accounts that were not used in this test run.
@@ -97,7 +88,6 @@ func (c *TestIAMClient) Close() error {
 
 		if len(policy.InternalProto.Bindings) > 0 {
 			c.logger.Info().Str("email", state.Email).Msg("Cleaning roles from service account...")
-			// Create a new, empty policy, preserving the ETag for optimistic concurrency control.
 			newPolicy := &iam.Policy{InternalProto: &iampb.Policy{Etag: policy.InternalProto.Etag}}
 			err = c.saManager.SetServiceAccountIAMPolicy(cleanupCtx, state.Email, newPolicy)
 			if err != nil {
@@ -106,7 +96,6 @@ func (c *TestIAMClient) Close() error {
 		}
 	}
 
-	// Close the managers and clients.
 	if err := c.saManager.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to close service account manager: %w", err))
 	}
@@ -120,39 +109,42 @@ func (c *TestIAMClient) Close() error {
 	return nil
 }
 
-// EnsureServiceAccountExists leases an available and "clean" (no IAM bindings) service account from the pool.
-// If no clean accounts are available and TEST_SA_POOL_NO_CREATE is not "true", it will create a new one.
+// EnsureServiceAccountExists leases an available service account from the pool, or creates one as a fallback.
 func (c *TestIAMClient) EnsureServiceAccountExists(ctx context.Context, accountName string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// If a full email is provided, find that specific account in the pool.
+	if strings.Contains(accountName, "@") {
+		if state, ok := c.pool[accountName]; ok {
+			state.InUse = true
+			c.logger.Info().Str("email", accountName).Msg("Leasing specific, pre-allocated service account from pool.")
+			return state.Email, nil
+		}
+	}
+
 	for _, state := range c.pool {
 		if !state.InUse {
-			// Check if the account is clean before leasing.
 			policy, err := c.saManager.GetServiceAccountIAMPolicy(ctx, state.Email)
 			if err != nil {
 				c.logger.Error().Err(err).Str("email", state.Email).Msg("Could not check policy of available SA, skipping.")
 				continue
 			}
 			if len(policy.InternalProto.Bindings) > 0 {
-				c.logger.Warn().Str("email", state.Email).Msg("Found available SA in pool that was not clean, skipping. This may indicate a prior test failed to clean up.")
+				c.logger.Warn().Str("email", state.Email).Msg("Found available SA in pool that was not clean, skipping.")
 				continue
 			}
-
-			// If we're here, the account is available and clean.
 			c.logger.Info().Str("email", state.Email).Msg("Leasing clean service account from pool.")
 			state.InUse = true
 			return state.Email, nil
 		}
 	}
 
-	// If we've exhausted the pool of clean accounts.
 	if os.Getenv("TEST_SA_POOL_NO_CREATE") == "true" {
 		c.logger.Error().Msg("No available service accounts in the pool and creation is disabled.")
 		return "", ErrNoAvailableServiceAccountsInPool
 	}
 
-	// Create a new account to add to the pool.
 	c.logger.Info().Msg("No clean service accounts available in pool, creating a new one.")
 	timestamp := time.Now().Unix()
 	poolAccountName := fmt.Sprintf("%s%d", c.prefix, timestamp)
@@ -164,34 +156,38 @@ func (c *TestIAMClient) EnsureServiceAccountExists(ctx context.Context, accountN
 	return email, nil
 }
 
-// DeleteServiceAccount is a "fake" delete that simply returns a service account to the pool,
-// making it available for the next test that needs one.
+// DeleteServiceAccount is a "fake" delete that returns a service account to the pool.
 func (c *TestIAMClient) DeleteServiceAccount(ctx context.Context, accountEmail string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if state, ok := c.pool[accountEmail]; ok {
 		c.logger.Info().Str("email", accountEmail).Msg("Returning service account to the pool (fake delete).")
 		state.InUse = false
-	} else {
-		c.logger.Warn().Str("email", accountEmail).Msg("Attempted to fake-delete a service account not tracked in the pool.")
 	}
-
 	return nil
 }
 
-// initializePool discovers the pool state by listing all service accounts in the project
-// and adding those with the configured prefix to the in-memory pool.
+// REFACTOR: Implement the GetServiceAccount method to satisfy the IAMClient interface.
+// This mock simulates checking the pool for the account's existence.
+func (c *TestIAMClient) GetServiceAccount(ctx context.Context, accountEmail string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.pool[accountEmail]; ok {
+		return nil // Account exists in the pool.
+	}
+	// To be a realistic mock, simulate the real client's behavior for an unknown account.
+	return status.Error(codes.NotFound, "service account not found in pool")
+}
+
+// initializePool discovers the pool state from GCP.
 func (c *TestIAMClient) initializePool(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	c.logger.Info().Msg("Discovering service account pool from GCP...")
 	allAccounts, err := c.saManager.ListServiceAccounts(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list service accounts for pool discovery: %w", err)
 	}
-
 	for _, sa := range allAccounts {
 		if strings.HasPrefix(strings.Split(sa.Email, "@")[0], c.prefix) {
 			c.pool[sa.Email] = &PoolState{Email: sa.Email, InUse: false}
@@ -202,29 +198,23 @@ func (c *TestIAMClient) initializePool(ctx context.Context) error {
 }
 
 // --- Passthrough Methods ---
-// These methods delegate directly to the real IAM client, as they don't involve
-// the service account lifecycle managed by the pool.
-
-func (c *TestIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
-	return c.realClient.AddResourceIAMBinding(ctx, binding, member)
-}
-
-func (c *TestIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
-	return c.realClient.RemoveResourceIAMBinding(ctx, binding, member)
-}
-
-func (c *TestIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
-	return c.realClient.AddArtifactRegistryRepositoryIAMBinding(ctx, location, repositoryID, role, member)
-}
-
-func (c *TestIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
-	return c.realClient.AddMemberToServiceAccountRole(ctx, serviceAccountEmail, member, role)
-}
-
-func (c *TestIAMClient) CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error) {
-	return c.realClient.CheckResourceIAMBinding(ctx, binding, member)
-}
+// These methods delegate directly to the real IAM client.
 
 func (c *TestIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBinding) error {
 	return c.realClient.ApplyIAMPolicy(ctx, binding)
+}
+func (c *TestIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	return c.realClient.AddResourceIAMBinding(ctx, binding, member)
+}
+func (c *TestIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) error {
+	return c.realClient.RemoveResourceIAMBinding(ctx, binding, member)
+}
+func (c *TestIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Context, location, repositoryID, role, member string) error {
+	return c.realClient.AddArtifactRegistryRepositoryIAMBinding(ctx, location, repositoryID, role, member)
+}
+func (c *TestIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
+	return c.realClient.AddMemberToServiceAccountRole(ctx, serviceAccountEmail, member, role)
+}
+func (c *TestIAMClient) CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error) {
+	return c.realClient.CheckResourceIAMBinding(ctx, binding, member)
 }

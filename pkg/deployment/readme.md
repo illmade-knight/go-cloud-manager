@@ -32,7 +32,7 @@ The `CloudBuildDeployer` is the primary entry point for the package.
 
 ### Example
 
-```go
+```
 package main
 
 import (

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"cloud.google.com/go/pubsub"
@@ -27,23 +28,33 @@ type pubsubCommands struct {
 	completionTopic     *pubsub.Topic
 }
 
-// Director implements the builder.Service interface for our main application.
+// CompletionEvent now includes a field to report back the
+// exact set of IAM policies that were applied for verification purposes.
+type CompletionEvent struct {
+	Status       orchestration.CompletionStatus `json:"status"`
+	Value        string                         `json:"value"`
+	ErrorMessage string                         `json:"error_message,omitempty"`
+	AppliedIAM   map[string]iam.PolicyBinding   `json:"applied_iam,omitempty"`
+}
+
+// Director implements the microservice.Service interface for the main application.
 type Director struct {
 	*microservice.BaseServer
 	serviceManager *servicemanager.ServiceManager
 	architecture   *servicemanager.MicroserviceArchitecture
 	logger         zerolog.Logger
 	commands       *pubsubCommands
+	iamManager     iam.IAMManager
 	iamClient      iam.IAMClient
-	planner        *iam.RolePlanner
 	ready          chan struct{}
 }
 
+// Ready returns a channel that is closed when the service is fully initialized and listening.
 func (d *Director) Ready() <-chan struct{} {
 	return d.ready
 }
 
-// DirectorOption defines the type for the Functional Options Pattern.
+// DirectorOption defines the type for the Functional Options Pattern, used for clean construction.
 type DirectorOption func(ctx context.Context, d *Director) error
 
 // withServiceManager is an option to configure the Director with a ServiceManager.
@@ -61,33 +72,43 @@ func withServiceManager(sm *servicemanager.ServiceManager) DirectorOption {
 	}
 }
 
-// withIAM is an option to configure the Director with an IAMClient and RolePlanner.
-func withIAM(planner *iam.RolePlanner, iamClient iam.IAMClient) DirectorOption {
+// withIAM is an option to configure the Director with its IAM dependencies.
+func withIAM(iamManager iam.IAMManager, iamClient iam.IAMClient) DirectorOption {
 	return func(ctx context.Context, d *Director) error {
 		if iamClient == nil {
 			var err error
-			iamClient, err = iam.NewGoogleIAMClient(ctx, d.architecture.ProjectID)
+			if os.Getenv("TEST_SA_POOL_MODE") == "true" {
+				d.logger.Info().Msg("ServiceDirector is starting in SA POOLING MODE.")
+				prefix := os.Getenv("TEST_SA_POOL_PREFIX")
+				iamClient, err = iam.NewTestIAMClient(ctx, d.architecture.ProjectID, d.logger, prefix)
+			} else {
+				d.logger.Info().Msg("ServiceDirector is starting in standard mode.")
+				iamClient, err = iam.NewGoogleIAMClient(ctx, d.architecture.ProjectID)
+			}
 			if err != nil {
 				return fmt.Errorf("director: failed to create IAM client: %w", err)
 			}
 		}
-		if planner == nil {
-			planner = iam.NewRolePlanner(d.logger)
+		if iamManager == nil {
+			var err error
+			iamManager, err = iam.NewIAMManager(iamClient, d.logger)
+			if err != nil {
+				_ = iamClient.Close()
+				return fmt.Errorf("director: failed to create IAM manager: %w", err)
+			}
 		}
-		d.planner = planner
+		d.iamManager = iamManager
 		d.iamClient = iamClient
 		return nil
 	}
 }
 
-// withPubSubCommands is an option to configure the Director with Pub/Sub command infrastructure.
+// withPubSubCommands is an option to configure the Director with its Pub/Sub command infrastructure.
 func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 	return func(ctx context.Context, d *Director) error {
 		if cfg.Commands == nil {
-			d.logger.Info().Msg("no command infrastructure configured")
 			return nil
 		}
-
 		var err error
 		if psClient == nil {
 			psClient, err = pubsub.NewClient(ctx, d.architecture.ProjectID, cfg.Commands.Options...)
@@ -95,7 +116,6 @@ func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 				return fmt.Errorf("director: failed to create pubsub Client: %w", err)
 			}
 		}
-
 		sub, err := ensureCommandSubscriptionExists(ctx, psClient, cfg.Commands.CommandTopicID, cfg.Commands.CommandSubID)
 		if err != nil {
 			return err
@@ -109,7 +129,6 @@ func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 			commandSubscription: sub,
 			completionTopic:     topic,
 		}
-
 		if err = d.publishReadyEvent(ctx); err != nil {
 			d.logger.Error().Err(err).Msg("Failed to publish initial 'service_ready' event")
 		}
@@ -118,7 +137,71 @@ func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 	}
 }
 
-// NewServiceDirector is the primary constructor, using the Functional Options Pattern.
+// handleSetupCommand orchestrates the setup of a dataflow's resources and IAM policies.
+// REFACTOR: This function is updated to capture the results from the IAMManager
+// and pass them to the completion event publisher.
+func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' command...")
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	// Helper function to contain the logic for a single dataflow.
+	setupAndApplyIAM := func(dfName string) error {
+		d.logger.Info().Str("dataflow", dfName).Msg("Setting up resources...")
+		_, err := d.serviceManager.SetupDataflow(ctx, d.architecture, dfName)
+		if err != nil {
+			return fmt.Errorf("resource setup failed for dataflow '%s': %w", dfName, err)
+		}
+		d.logger.Info().Str("dataflow", dfName).Msg("Resource setup complete.")
+
+		d.logger.Info().Str("dataflow", dfName).Msg("Applying IAM policies...")
+		// The Director now delegates the entire IAM application process to the IAMManager.
+		// It captures the map of applied policies that is returned.
+		appliedPolicies, err := d.iamManager.ApplyIAMForDataflow(ctx, d.architecture, dfName)
+		if err != nil {
+			return fmt.Errorf("iam application failed for dataflow '%s': %w", dfName, err)
+		}
+		d.logger.Info().Str("dataflow", dfName).Msg("IAM policy application complete.")
+
+		// After a successful run, publish a completion event that includes the
+		// map of policies that were just applied for verification by the Conductor.
+		return d.publishCompletionEvent(ctx, dfName, nil, appliedPolicies)
+	}
+
+	if dataflowName == "all" || dataflowName == "" {
+		for name := range d.architecture.Dataflows {
+			if err := setupAndApplyIAM(name); err != nil {
+				// On failure, publish an event without a policy map.
+				_ = d.publishCompletionEvent(ctx, name, err, nil)
+				return err
+			}
+		}
+		return nil
+	}
+	return setupAndApplyIAM(dataflowName)
+}
+
+// publishReadyEvent sends the initial "I'm alive and listening" message.
+func (d *Director) publishReadyEvent(ctx context.Context) error {
+	d.logger.Info().Msg("Publishing 'service_ready' event...")
+	event := orchestration.CompletionEvent{
+		Status: orchestration.ServiceDirectorReady,
+		Value:  d.architecture.Environment.Name,
+	}
+	eventData, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ready event: %w", err)
+	}
+	result := d.commands.completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
+	_, err = result.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to publish ready event: %w", err)
+	}
+	d.logger.Info().Msg("Successfully published 'service_ready' event.")
+	return nil
+}
+
+// NewServiceDirector is the primary constructor for production use.
 func NewServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
 	opts := []DirectorOption{
@@ -129,18 +212,18 @@ func NewServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.M
 	return newInternalSD(ctx, cfg, arch, directorLogger, opts...)
 }
 
-// NewDirectServiceDirector is the constructor for testing, also using functional options for injection.
-func NewDirectServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, planner *iam.RolePlanner, iamClient iam.IAMClient, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
+// NewDirectServiceDirector is the constructor for testing, allowing dependency injection.
+func NewDirectServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, sm *servicemanager.ServiceManager, iamManager iam.IAMManager, iamClient iam.IAMClient, psClient *pubsub.Client, logger zerolog.Logger) (*Director, error) {
 	directorLogger := logger.With().Str("component", "Director").Logger()
 	opts := []DirectorOption{
 		withServiceManager(sm),
-		withIAM(planner, iamClient),
+		withIAM(iamManager, iamClient),
 		withPubSubCommands(cfg, psClient),
 	}
 	return newInternalSD(ctx, cfg, arch, directorLogger, opts...)
 }
 
-// newInternalSD is a generic constructor that applies a series of options.
+// newInternalSD is the private constructor that applies the functional options.
 func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, directorLogger zerolog.Logger, options ...DirectorOption) (*Director, error) {
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
 	d := &Director{
@@ -166,114 +249,25 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 	return d, nil
 }
 
-// handleSetupCommand is the high-level handler for a setup instruction.
-func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
-	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' command...")
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	setupAndApplyIAM := func(dfName string) error {
-		// Step 1: Create the cloud resources.
-		d.logger.Info().Str("dataflow", dfName).Msg("Setting up resources...")
-		_, err := d.serviceManager.SetupDataflow(ctx, d.architecture, dfName)
-		if err != nil {
-			return fmt.Errorf("resource setup failed for dataflow '%s': %w", dfName, err)
-		}
-		d.logger.Info().Str("dataflow", dfName).Msg("Resource setup complete.")
-
-		// Step 2: Apply IAM policies atomically.
-		d.logger.Info().Str("dataflow", dfName).Msg("Applying IAM policies...")
-		err = d.applyIAMForDataflow(ctx, dfName)
-		if err != nil {
-			return fmt.Errorf("iam application failed for dataflow '%s': %w", dfName, err)
-		}
-		d.logger.Info().Str("dataflow", dfName).Msg("IAM policy application complete.")
-		return nil
-	}
-
-	if dataflowName == "all" || dataflowName == "" {
-		for name := range d.architecture.Dataflows {
-			if err := setupAndApplyIAM(name); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return setupAndApplyIAM(dataflowName)
-}
-
-// applyIAMForDataflow contains the robust, atomic IAM application logic.
-func (d *Director) applyIAMForDataflow(ctx context.Context, dataflowName string) error {
-	dataflow, ok := d.architecture.Dataflows[dataflowName]
-	if !ok {
-		return fmt.Errorf("dataflow '%s' not found", dataflowName)
-	}
-
-	iamPlan, err := d.planner.PlanRolesForApplicationServices(d.architecture)
+// setupAndApplyIAMForDataflow contains the logic for a single dataflow.
+func (d *Director) setupAndApplyIAMForDataflow(ctx context.Context, dfName string) error {
+	d.logger.Info().Str("dataflow", dfName).Msg("Setting up resources...")
+	_, err := d.serviceManager.SetupDataflow(ctx, d.architecture, dfName)
 	if err != nil {
-		return err
+		return fmt.Errorf("resource setup failed for dataflow '%s': %w", dfName, err)
 	}
+	d.logger.Info().Str("dataflow", dfName).Msg("Resource setup complete.")
 
-	saNameToEmail := make(map[string]string)
-	for _, serviceSpec := range dataflow.Services {
-		saEmail, err := d.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
-		if err != nil {
-			return err
-		}
-		saNameToEmail[serviceSpec.ServiceAccount] = saEmail
+	d.logger.Info().Str("dataflow", dfName).Msg("Applying IAM policies...")
+	_, err = d.iamManager.ApplyIAMForDataflow(ctx, d.architecture, dfName)
+	if err != nil {
+		return fmt.Errorf("iam application failed for dataflow '%s': %w", dfName, err)
 	}
-
-	type resourceKey struct{ Type, ID, Location string }
-	resourcePolicies := make(map[resourceKey]map[string][]string)
-
-	for _, binding := range iamPlan {
-		memberEmail, ok := saNameToEmail[binding.ServiceAccount]
-		if !ok {
-			continue // Binding is not for a service in this dataflow.
-		}
-		member := "serviceAccount:" + memberEmail
-		key := resourceKey{Type: binding.ResourceType, ID: binding.ResourceID, Location: binding.ResourceLocation}
-		if _, ok := resourcePolicies[key]; !ok {
-			resourcePolicies[key] = make(map[string][]string)
-		}
-		resourcePolicies[key][binding.Role] = append(resourcePolicies[key][binding.Role], member)
-	}
-
-	for res, policy := range resourcePolicies {
-		policyBinding := iam.PolicyBinding{
-			ResourceType:     res.Type,
-			ResourceID:       res.ID,
-			ResourceLocation: res.Location,
-			MemberRoles:      policy,
-		}
-		if err := d.iamClient.ApplyIAMPolicy(ctx, policyBinding); err != nil {
-			return fmt.Errorf("failed to apply policy for resource '%s': %w", res.ID, err)
-		}
-	}
+	d.logger.Info().Str("dataflow", dfName).Msg("IAM policy application complete.")
 	return nil
 }
 
-// --- (Other methods like listenForCommands, Shutdown, etc. are included below without change) ---
-
-func (d *Director) publishReadyEvent(ctx context.Context) error {
-	d.logger.Info().Msg("Publishing 'service_ready' event...")
-	event := orchestration.CompletionEvent{
-		Status: orchestration.ServiceDirectorReady,
-		Value:  d.architecture.Environment.Name,
-	}
-	eventData, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("failed to marshal ready event: %w", err)
-	}
-	result := d.commands.completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
-	_, err = result.Get(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to publish ready event: %w", err)
-	}
-	d.logger.Info().Msg("Successfully published 'service_ready' event.")
-	return nil
-}
-
+// listenForCommands starts the blocking Pub/Sub message receiver.
 func (d *Director) listenForCommands(ctx context.Context) {
 	d.logger.Info().Msg("Starting to listen for commands...")
 	err := d.commands.commandSubscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -291,9 +285,9 @@ func (d *Director) listenForCommands(ctx context.Context) {
 		case orchestration.Teardown:
 			cmdErr = d.handleTeardownCommand(ctx, cmd.Value)
 		default:
-			d.logger.Warn().Str("instruction", string(cmd.Instruction)).Str("value", cmd.Value).Msg("Received unknown command")
+			d.logger.Warn().Str("instruction", string(cmd.Instruction)).Msg("Received unknown command")
 		}
-		err := d.publishCompletionEvent(ctx, cmd.Value, cmdErr)
+		err := d.publishCompletionEvent(ctx, cmd.Value, cmdErr, nil)
 		if err != nil {
 			d.logger.Error().Err(err).Msg("error publishing completion event")
 		}
@@ -305,8 +299,52 @@ func (d *Director) listenForCommands(ctx context.Context) {
 	}
 }
 
+// publishCompletionEvent sends a message back to the orchestrator, now including
+// the set of IAM policies that were applied on a successful run.
+func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error, appliedPolicies map[string]iam.PolicyBinding) error {
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Publishing completion event...")
+
+	event := CompletionEvent{
+		Status: orchestration.DataflowComplete,
+		Value:  dataflowName,
+	}
+	if commandErr != nil {
+		event.Status = "failure"
+		event.ErrorMessage = commandErr.Error()
+	} else {
+		// On success, attach the map of applied policies to the event.
+		event.AppliedIAM = appliedPolicies
+	}
+
+	eventData, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal completion event: %w", err)
+	}
+
+	result := d.commands.completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
+	_, err = result.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to publish completion event: %w", err)
+	}
+	d.logger.Info().Str("status", string(event.Status)).Msg("Completion event published.")
+	return nil
+}
+
+// Shutdown gracefully closes all client connections.
+func (d *Director) Shutdown(ctx context.Context) {
+	_ = d.BaseServer.Shutdown(ctx)
+	if d.iamClient != nil {
+		_ = d.iamClient.Close()
+	}
+	if d.commands != nil {
+		_ = d.commands.client.Close()
+	}
+}
+
+// --- HTTP Handlers and Pub/Sub Helpers ---
+
 func (d *Director) setupDataflowHandler(w http.ResponseWriter, r *http.Request) {
-	req := OrchestrateRequest{}
+	var req OrchestrateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if !errors.Is(err, errors.New("EOF")) {
 			d.logger.Warn().Err(err).Msg("Failed to unmarshal orchestrate request")
@@ -320,30 +358,33 @@ func (d *Director) setupDataflowHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(fmt.Sprintf("Dataflow '%s' setup successfully triggered.", req.DataflowName)))
+	_, _ = w.Write([]byte("Setup triggered."))
 }
 
-func (d *Director) publishCompletionEvent(ctx context.Context, dataflowName string, commandErr error) error {
-	d.logger.Info().Str("dataflow", dataflowName).Msg("Publishing completion event...")
-	event := orchestration.CompletionEvent{
-		Status: orchestration.DataflowComplete,
-		Value:  dataflowName,
+func (d *Director) teardownHandler(w http.ResponseWriter, r *http.Request) {
+	if err := d.handleTeardownCommand(r.Context(), "all"); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to teardown all dataflows: %v", err), http.StatusInternalServerError)
+		return
 	}
-	if commandErr != nil {
-		event.Status = "failure"
-		event.ErrorMessage = commandErr.Error()
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Teardown triggered."))
+}
+
+func (d *Director) verifyDataflowHandler(w http.ResponseWriter, r *http.Request) {
+	var req VerifyDataflowRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
 	}
-	eventData, marshallErr := json.Marshal(event)
-	if marshallErr != nil {
-		return marshallErr
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	err := d.serviceManager.VerifyDataflow(ctx, d.architecture, req.DataflowName)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Dataflow '%s' verification failed: %v", req.DataflowName, err), http.StatusInternalServerError)
+		return
 	}
-	result := d.commands.completionTopic.Publish(ctx, &pubsub.Message{Data: eventData})
-	msgID, getErr := result.Get(ctx)
-	if getErr != nil {
-		return getErr
-	}
-	d.logger.Info().Str("message_id", msgID).Str("status", string(event.Status)).Msg("Completion event published.")
-	return nil
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Dataflow verified."))
 }
 
 func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName string) error {
@@ -356,56 +397,11 @@ func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName strin
 	return d.serviceManager.TeardownDataflow(ctx, d.architecture, dataflowName)
 }
 
-func (d *Director) Shutdown(ctx context.Context) {
-	_ = d.BaseServer.Shutdown(ctx)
-	if d.iamClient != nil {
-		_ = d.iamClient.Close()
-	}
-	if d.commands != nil {
-		_ = d.commands.client.Close()
-	}
-}
-
-func (d *Director) GetServiceManager() *servicemanager.ServiceManager {
-	return d.serviceManager
-}
-
-func (d *Director) teardownHandler(w http.ResponseWriter, r *http.Request) {
-	if err := d.handleTeardownCommand(r.Context(), "all"); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to teardown all dataflows: %v", err), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("All ephemeral dataflows teardown successfully triggered."))
-}
-
-func (d *Director) verifyDataflowHandler(w http.ResponseWriter, r *http.Request) {
-	var req VerifyDataflowRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	d.logger.Info().Str("dataflow", req.DataflowName).Str("service", req.ServiceName).Msg("Received request to verify dataflow.")
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-	err := d.serviceManager.VerifyDataflow(ctx, d.architecture, req.DataflowName)
-	if err != nil {
-		d.logger.Error().Err(err).Str("dataflow", req.DataflowName).Msg("Dataflow verification failed")
-		http.Error(w, fmt.Sprintf("Dataflow '%s' verification failed: %v", req.DataflowName, err), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(fmt.Sprintf("Dataflow '%s' verified successfully.", req.DataflowName)))
-}
-
 func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string) (*pubsub.Subscription, error) {
 	topic := psClient.Topic(topicID)
 	exists, err := topic.Exists(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("could not check for command topic '%s': %w", topicID, err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("command topic '%s' does not exist; it must be created by the orchestrator", topicID)
+	if err != nil || !exists {
+		return nil, fmt.Errorf("command topic '%s' does not exist", topicID)
 	}
 	sub := psClient.Subscription(subID)
 	exists, err = sub.Exists(ctx)
@@ -434,7 +430,6 @@ func ensureCompletionTopicExists(ctx context.Context, psClient *pubsub.Client, t
 	if !exists {
 		log.Info().Str("topic", topicID).Msg("Completion topic not found, creating it now.")
 		topic, err = psClient.CreateTopic(ctx, topicID)
-
 		if err != nil {
 			return nil, fmt.Errorf("failed to create completion topic '%s': %w", topicID, err)
 		}

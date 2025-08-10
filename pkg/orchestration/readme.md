@@ -4,112 +4,49 @@ The `orchestration` package provides the top-level coordination logic for deploy
 
 ## Overview
 
-This package introduces a powerful and scalable architectural pattern centered around a **Service Director**. Instead of running all infrastructure and deployment logic from a local machine or a single CI/CD job, this package first deploys a central "Service Director" application into your cloud environment. This director then acts as a remote agent, receiving commands via Pub/Sub to manage the lifecycle of other services and resources.
+This package implements a powerful and scalable architectural pattern centered around a **Service Director**. Instead of running all infrastructure and deployment logic from a local machine or a single CI/CD job, this package first deploys a central "Service Director" application into your cloud environment. This director then acts as a remote agent, receiving commands via Pub/Sub to manage the lifecycle of other services and resources.
 
-This decoupled, event-driven approach provides enhanced security, scalability, and operational flexibility.
+This decoupled, event-driven approach provides enhanced security, scalability, and resilience against transient failures.
 
 ### The Conductor Workflow
 
-The `Conductor` is the main, user-facing entry point. It executes a multi-phase workflow to stand up an entire environment. Each phase is a distinct, verifiable step, and the `Conductor` is designed to be flexible, allowing you to run the entire sequence or skip steps for partial updates.
+The `Conductor` is the main, user-facing entry point. It executes a multi-phase workflow to stand up an entire environment. The workflow is designed to be efficient by running long-running tasks in parallel and robust by explicitly waiting for cloud resource propagation.
 
 The standard, end-to-end workflow is:
 
-1.  **Setup Service Director IAM:** The `IAMOrchestrator` plans and applies all necessary service accounts and project-level IAM roles for the central Service Director application.
-2.  **Deploy Service Director:** The `Orchestrator` uses the `deployment` package to build and deploy the Service Director application to Cloud Run. It then waits for the service to become healthy and ready to receive commands.
-3.  **Setup Dataflow Resources:** The `Orchestrator` sends an asynchronous `dataflow-setup` command to the Service Director via a Pub/Sub topic. The live Service Director receives this command, uses its internal `ServiceManager` to provision the necessary cloud resources (topics, buckets, etc.), and publishes a "completion" event back to a different Pub/Sub topic. The `Orchestrator` waits until it receives this event.
-4.  **Apply Dataflow IAM:** Once the resources for a dataflow exist, the `IAMOrchestrator` is invoked again to apply fine-grained IAM policies, connecting the application services to their newly created resources.
-5.  **Deploy Dataflow Services:** Finally, the `Orchestrator` builds and deploys all the application microservices defined within the dataflow.
+1.  **Phase 1: Setup IAM**: The local `Conductor` creates all necessary service account identities (for both the Service Director and the applications). It then enters a polling loop to **wait for these new accounts to propagate** and become visible across all of Google Cloud's systems. This is a critical prerequisite step.
+
+2.  **Phase 2: Parallel Build & Remote Setup**: The `Conductor` starts two long-running operations at the same time:
+    * **Task A (Local Build)**: It builds all the container images for the dataflow applications.
+    * **Task B (Remote Setup)**: It deploys the `ServiceDirector` application to Cloud Run. Once the director is healthy, the `Conductor` commands it to create all necessary cloud resources (e.g., Pub/Sub topics) and **apply the IAM policies** that link the application service accounts to those resources.
+
+3.  **Phase 3: Verify IAM Policy Propagation**: After the `ServiceDirector` signals that its work is complete, the `Conductor` enters another polling loop. This time, it waits for the **IAM policy bindings** (applied by the remote director) to become globally consistent and visible.
+
+4.  **Phase 4: Final Deployment**: Once the container images from Task A are ready and the IAM policies from Phase 3 are verified, the `Conductor` performs the final, quick step of deploying the application services using their pre-built images.
 
 ## Key Components
 
-* **`Conductor`:** The highest-level orchestrator. It manages the sequence of deployment phases and provides the primary `Run()` and `Teardown()` methods. Its behavior is controlled by `ConductorOptions`, which allow phases to be skipped.
-* **`Orchestrator`:** The main "worker" component. It handles the practical tasks of deploying services (using the `deployment` package) and managing the event-driven Pub/Sub communication with the deployed Service Director.
-* **`IAMOrchestrator`:** A specialized "worker" dedicated to IAM. It uses the `iam` package to handle all service account creation and policy bindings for both the Service Director and the application services.
+* **`Conductor`**: The highest-level orchestrator. It manages the sequence of deployment phases, including the parallel execution of builds and remote setup. Its behavior is controlled by `ConductorOptions`, which allow phases to be skipped for partial or targeted deployments.
 
-## Usage
+* **`Orchestrator`**: A specialized "worker" component used by the `Conductor`. It handles the practical tasks of deploying services (using the `deployment` package) and managing the event-driven Pub/Sub communication with the deployed `ServiceDirector`.
 
-The `Conductor` is the intended entry point for most use cases. You initialize it with your architecture, set the options for the phases you want to run, and execute it.
+* **`IAMOrchestrator`**: Another specialized "worker" dedicated to IAM. Its responsibilities are now focused on the identity lifecycle: creating service accounts, managing their project-level roles, and verifying the propagation of both identities and policies.
 
-### Example: Full End-to-End Deployment
+## Testing Strategy
 
-This example runs all five phases to deploy an entire architecture from scratch.
+The orchestration package uses a two-tiered testing strategy to ensure correctness and stability.
 
-```go
-package main
+### 1. Emulator-Based Integration Test (`orchestrator_integration_test.go`)
 
-import (
-	"context"
-	"log"
+This test is designed to be fast and run without a real cloud connection.
+* **Purpose**: To verify the core command-and-reply communication loop between the `Orchestrator` and the `ServiceDirector`.
+* **Mechanism**: It runs the `ServiceDirector` as an **in-memory goroutine** within the test itself. All communication happens via a **Pub/Sub emulator**. All IAM and service management clients are replaced with mocks, isolating the test to its core responsibility.
 
-	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/rs/zerolog"
-)
+### 2. Cloud E2E Integration Test (`orchestrator_dataflow_test.go`)
 
-func main() {
-	// Assume 'arch' is a loaded and hydrated *servicemanager.MicroserviceArchitecture struct
-	var arch *servicemanager.MicroserviceArchitecture 
-    // ... load architecture from YAML files and hydrate it ...
-
-	logger := zerolog.New(os.Stdout)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
-	// 1. Define options for a full run.
-	conductorOptions := orchestration.ConductorOptions{
-		SetupServiceDirectorIAM: true,
-		DeployServiceDirector:   true,
-		SetupDataflowResources:  true,
-		ApplyDataflowIAM:        true,
-		DeployDataflowServices:  true,
-	}
-
-	// 2. Create the Conductor.
-	conductor, err := orchestration.NewConductor(ctx, arch, logger, conductorOptions)
-	if err != nil {
-		log.Fatalf("Failed to create conductor: %v", err)
-	}
-
-    // 3. Defer a full teardown to clean up resources after the run.
-    defer func() {
-        log.Println("--- Starting Teardown ---")
-        if err := conductor.Teardown(context.Background()); err != nil {
-            log.Printf("Teardown failed: %v", err)
-        }
-    }()
-
-	// 4. Execute the entire workflow.
-	if err := conductor.Run(ctx); err != nil {
-		log.Fatalf("Conductor run failed: %v", err)
-	}
-
-	log.Println("Orchestration complete!")
-}
-```
-
-### Example: Deploying a New Dataflow to an Existing Director
-
-The `Conductor`'s flexibility allows you to skip phases. If the Service Director is already running, you can skip its deployment and provide its URL as an override.
-
-```go
-// --- In your main function ---
-
-// The URL of the already-running Service Director
-directorURL := "https://my-service-director-xyz.a.run.app"
-
-// 1. Define options to skip the first two phases and provide the override.
-partialRunOptions := orchestration.ConductorOptions{
-    SetupServiceDirectorIAM: false, // Skip
-    DeployServiceDirector:   false, // Skip
-    DirectorURLOverride:     directorURL, // Provide existing URL
-    SetupDataflowResources:  true,  // Run
-    ApplyDataflowIAM:        true,  // Run
-    DeployDataflowServices:  true,  // Run
-}
-
-// 2. Create and run the Conductor with the new options.
-conductor, err := orchestration.NewConductor(ctx, arch, logger, partialRunOptions)
-// ...
-err = conductor.Run(ctx)
-// ...
-```
+This is the comprehensive, end-to-end test that validates the entire `Conductor` workflow against real Google Cloud services.
+* **Purpose**: To prove that the `Conductor` can successfully orchestrate a full, parallel build-and-deploy of a realistic multi-service application.
+* **Mechanism**:
+    * It uses a **service account pool** (`TestIAMClient`) to manage identities efficiently and avoid creating new service accounts on every test run.
+    * The test **hydrates** its architecture configuration at runtime, injecting the real email addresses of the pooled service accounts before the deployment begins.
+    * It builds and deploys a **real `ServiceDirector` application** from a test-specific `main` package, which is configured to use a self-contained Go module. This module requires a stable, versioned release of the main repository, ensuring the build is isolated and reproducible.

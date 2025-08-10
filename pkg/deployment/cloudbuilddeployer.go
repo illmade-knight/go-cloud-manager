@@ -120,7 +120,7 @@ func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerol
 }
 
 // REFACTOR: This is the original Deploy function, renamed. It provides the simple, sequential workflow.
-func (d *CloudBuildDeployer) Deploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
+func (d *CloudBuildDeployer) BuildAndDeploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting sequential build and deploy workflow...")
 	// The Build step now returns the final image URI.
 	builtImageURI, err := d.Build(ctx, serviceName, spec)

@@ -42,41 +42,43 @@ In your `dataflow.yaml` files, specify the permissions your services need.
 **Example `dataflow.yaml` with IAM definitions:**
 
 ```yaml
+
 name: "data-processing-flow"
-lifecycle:
-  strategy: ephemeral
 
-services:
-  # This service will get roles implicitly from the resource links below.
-  processor-service:
-    name: "processor-service"
-    service_account: "processor-sa"
-    # This dependency will grant 'processor-sa' the 'roles/run.invoker' on 'downstream-service'.
-    dependencies:
-      - "downstream-service"
-    deployment:
-      secret_environment_vars:
-        # This will grant 'processor-sa' the 'roles/secretmanager.secretAccessor' role on 'my-api-key'.
-        - name: API_KEY
-          value_from: "my-api-key"
-
-  # This service has no implicit links, so we grant its role explicitly.
-  viewer-service:
-    name: "viewer-service"
-    service_account: "viewer-sa"
-
-resources:
-  topics:
-    - name: "processing-topic"
-      # This link implicitly grants 'processor-sa' the 'roles/pubsub.publisher' role.
-      producer_service: "processor-service"
-      
-  gcs_buckets:
-    - name: "processed-data-bucket"
-      iam_policy:
-        # This block explicitly grants 'viewer-sa' the 'roles/storage.objectViewer' role.
-        - name: "viewer-service"
-          role: "roles/storage.objectViewer"
+    lifecycle:
+      strategy: ephemeral
+    
+    services:
+      # This service will get roles implicitly from the resource links below.
+      processor-service:
+        name: "processor-service"
+        service_account: "processor-sa"
+        # This dependency will grant 'processor-sa' the 'roles/run.invoker' on 'downstream-service'.
+        dependencies:
+          - "downstream-service"
+        deployment:
+          secret_environment_vars:
+            # This will grant 'processor-sa' the 'roles/secretmanager.secretAccessor' role on 'my-api-key'.
+            - name: API_KEY
+              value_from: "my-api-key"
+    
+      # This service has no implicit links, so we grant its role explicitly.
+      viewer-service:
+        name: "viewer-service"
+        service_account: "viewer-sa"
+    
+    resources:
+      topics:
+        - name: "processing-topic"
+          # This link implicitly grants 'processor-sa' the 'roles/pubsub.publisher' role.
+          producer_service: "processor-service"
+          
+      gcs_buckets:
+        - name: "processed-data-bucket"
+          iam_policy:
+            # This block explicitly grants 'viewer-sa' the 'roles/storage.objectViewer' role.
+            - name: "viewer-service"
+              role: "roles/storage.objectViewer"
 ```
 
 ### Step 2: Write the Go Application
@@ -85,7 +87,7 @@ In your main application, after setting up your resources, instantiate and run t
 
 **`main.go` (continued from `servicemanager` example)**
 
-```go
+```
 package main
 
 import (
@@ -145,7 +147,7 @@ To mitigate IAM API quota issues during integration tests, the package provides 
 
 **Usage in a test:**
 
-```go
+```
 //go:build integration
 
 package iam_test

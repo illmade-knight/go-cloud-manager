@@ -22,7 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// REFACTOR: The mock is upgraded to a "spy" that records calls to ApplyIAMPolicy.
+// mockIAMClient is a "spy" that records calls to ApplyIAMPolicy for verification.
+// It fully implements the iam.IAMClient interface for use in tests.
 type mockIAMClient struct {
 	mu              sync.Mutex
 	AppliedPolicies []iam.PolicyBinding
@@ -33,6 +34,10 @@ func (m *mockIAMClient) ApplyIAMPolicy(ctx context.Context, binding iam.PolicyBi
 	defer m.mu.Unlock()
 	m.AppliedPolicies = append(m.AppliedPolicies, binding)
 	return nil
+}
+
+func (m *mockIAMClient) GetServiceAccount(ctx context.Context, accountEmail string) error {
+	return nil // Simulate success, account exists.
 }
 
 func (m *mockIAMClient) EnsureServiceAccountExists(_ context.Context, accountName string) (string, error) {
@@ -59,7 +64,7 @@ func (m *mockIAMClient) AddMemberToServiceAccountRole(ctx context.Context, servi
 func (m *mockIAMClient) Close() error { return nil }
 
 // TestServiceDirector_Integration verifies that the director correctly processes a 'setup'
-// command, creating resources AND applying the correct IAM policies.
+// command, creating resources AND applying the correct IAM policies via the IAMManager.
 func TestServiceDirector_Integration(t *testing.T) {
 	// --- Arrange ---
 	logger := zerolog.New(zerolog.NewTestWriter(t)).With().Timestamp().Logger()
@@ -82,7 +87,6 @@ func TestServiceDirector_Integration(t *testing.T) {
 	_, err = psClient.CreateTopic(ctx, completionTopicID)
 	require.NoError(t, err)
 
-	// REFACTOR: Define a more realistic architecture so the planner will generate IAM bindings.
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: projectID},
 		Dataflows: map[string]servicemanager.ResourceGroup{
@@ -113,13 +117,16 @@ func TestServiceDirector_Integration(t *testing.T) {
 	}
 
 	mockIamClient := &mockIAMClient{}
-	planner := iam.NewRolePlanner(logger)
+	// REFACTOR: Create the IAMManager, which is now the required dependency.
+	iamManager, err := iam.NewIAMManager(mockIamClient, logger)
+	require.NoError(t, err)
 
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
 	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
-	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, planner, mockIamClient, psClient, logger)
+	// REFACTOR: Pass the IAMManager to the updated constructor.
+	director, err := servicedirector.NewDirectServiceDirector(ctx, directorCfg, arch, sm, iamManager, mockIamClient, psClient, logger)
 	require.NoError(t, err)
 
 	go func() {
@@ -174,7 +181,6 @@ func TestServiceDirector_Integration(t *testing.T) {
 		t.Log("✅ Resource creation verified.")
 	})
 
-	// REFACTOR: Add a new assertion to verify the IAM logic was executed correctly.
 	t.Run("Verify IAM Policy Application", func(t *testing.T) {
 		t.Log("Verifying that the correct IAM policies were applied...")
 		require.Len(t, mockIamClient.AppliedPolicies, 1, "Expected ApplyIAMPolicy to be called once for the topic")
@@ -184,7 +190,6 @@ func TestServiceDirector_Integration(t *testing.T) {
 		require.Equal(t, dataflowTopicToCreate, policyForTopic.ResourceID)
 
 		expectedMember := "serviceAccount:mock-producer-sa@project.iam.gserviceaccount.com"
-		// The planner should grant both publisher and viewer to a producer service.
 		require.Contains(t, policyForTopic.MemberRoles["roles/pubsub.publisher"], expectedMember)
 		require.Contains(t, policyForTopic.MemberRoles["roles/pubsub.viewer"], expectedMember)
 		t.Log("✅ IAM policy application verified.")

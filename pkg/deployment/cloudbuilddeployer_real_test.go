@@ -240,10 +240,10 @@ func TestCloudBuildDeployer_RealIntegration(t *testing.T) {
 
 	// --- Act & Assert ---
 	var serviceURL string
-	t.Run("Act - Deploy Service", func(t *testing.T) {
+	t.Run("Act - BuildAndDeploy Service", func(t *testing.T) {
 		logger.Info().Str("service", serviceName).Str("source", sourcePath).Msg("Deploying service...")
 		var deployErr error
-		serviceURL, deployErr = deployer.Deploy(ctx, serviceName, saEmail, spec)
+		serviceURL, deployErr = deployer.BuildAndDeploy(ctx, serviceName, saEmail, spec)
 		require.NoError(t, deployErr)
 		require.NotEmpty(t, serviceURL)
 		logger.Info().Str("url", serviceURL).Msg("Service deployed successfully.")

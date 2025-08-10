@@ -14,6 +14,8 @@ import (
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // IAMOrchestrator is responsible for the high-level orchestration of all IAM policies for an architecture.
@@ -27,7 +29,6 @@ type IAMOrchestrator struct {
 }
 
 // NewIAMOrchestrator creates a new orchestrator focused solely on IAM.
-// REFACTOR: The constructor no longer creates an IAMManager and now accepts client options.
 func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, clientOpts ...option.ClientOption) (*IAMOrchestrator, error) {
 	var iamClient iam.IAMClient
 	var err error
@@ -60,9 +61,7 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 	}, nil
 }
 
-// REFACTOR: This new method replaces the old ApplyIAMForDataflow. Its sole responsibility
-// is to create the necessary service accounts ahead of time, so the remote ServiceDirector
-// can then apply policies to them.
+// EnsureDataflowSAsExist creates the necessary service accounts for a dataflow.
 func (o *IAMOrchestrator) EnsureDataflowSAsExist(ctx context.Context, dataflowName string) (map[string]string, error) {
 	dataflow, ok := o.arch.Dataflows[dataflowName]
 	if !ok {
@@ -84,12 +83,39 @@ func (o *IAMOrchestrator) EnsureDataflowSAsExist(ctx context.Context, dataflowNa
 	return serviceEmails, nil
 }
 
-// VerifyIAMForDataflow polls the IAM policies for all services in a dataflow
-// until they reflect the planned state or a timeout is reached.
-// REFACTOR: This function's signature is updated to accept a configurable timeout.
-func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName string, verificationTimeout time.Duration) error {
-	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying IAM policy propagation...")
+// PollForSAExistence waits for a newly created service account to propagate.
+func (o *IAMOrchestrator) PollForSAExistence(ctx context.Context, accountEmail string, timeout time.Duration) error {
+	const pollInterval = 5 * time.Second
 
+	o.logger.Debug().Str("email", accountEmail).Msg("Starting poll for SA existence...")
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			return fmt.Errorf("timed out waiting for service account '%s' to propagate", accountEmail)
+		case <-ticker.C:
+			err := o.iamClient.GetServiceAccount(timeoutCtx, accountEmail)
+			if err == nil {
+				o.logger.Debug().Str("email", accountEmail).Msg("SA found.")
+				return nil
+			}
+			if status.Code(err) != codes.NotFound {
+				return fmt.Errorf("unexpected error while polling for SA '%s': %w", accountEmail, err)
+			}
+			o.logger.Debug().Str("email", accountEmail).Msg("SA not yet propagated, still waiting...")
+		}
+	}
+}
+
+// VerifyIAMForDataflow polls IAM policies until they reflect the planned state.
+// It now correctly accepts the map of pre-established service account emails.
+func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string, verificationTimeout time.Duration) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying IAM policy propagation...")
 	iamPlan, err := o.planner.PlanRolesForApplicationServices(o.arch)
 	if err != nil {
 		return fmt.Errorf("failed to generate IAM plan for verification: %w", err)
@@ -107,16 +133,16 @@ func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName
 			continue
 		}
 
-		saEmail, err := o.iamClient.EnsureServiceAccountExists(ctx, serviceSpec.ServiceAccount)
-		if err != nil {
-			return fmt.Errorf("failed to get SA email for '%s' during verification: %w", serviceName, err)
+		// Use the correct, pre-allocated email from the map provided by the Conductor.
+		saEmail, ok := saEmails[serviceName]
+		if !ok {
+			return fmt.Errorf("could not find service account email for '%s' during verification", serviceName)
 		}
 		member := "serviceAccount:" + saEmail
-		o.logger.Info().Str("service", serviceName).Int("bindings", len(serviceBindings)).Msg("Concurrently polling for all IAM bindings...")
 
+		o.logger.Info().Str("service", serviceName).Int("bindings", len(serviceBindings)).Msg("Concurrently polling for all IAM bindings...")
 		var wg sync.WaitGroup
 		errs := make(chan error, len(serviceBindings))
-
 		for _, binding := range serviceBindings {
 			wg.Add(1)
 			go func(b iam.IAMBinding) {
@@ -126,7 +152,6 @@ func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName
 				}
 			}(binding)
 		}
-
 		wg.Wait()
 		close(errs)
 
@@ -144,19 +169,15 @@ func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName
 	return nil
 }
 
-// pollForBinding is a private helper to poll a single IAM binding.
-// REFACTOR: This function now uses the timeout passed down from the Conductor.
+// pollForBinding polls a single IAM binding until it is found or a timeout occurs.
 func (o *IAMOrchestrator) pollForBinding(ctx context.Context, binding iam.IAMBinding, member string, timeout time.Duration) error {
 	const pollInterval = 5 * time.Second
-
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	o.logger.Debug().Str("member", member).Str("role", binding.Role).Str("resource", binding.ResourceID).Msg("Starting poll for binding...")
-
 	for {
 		select {
 		case <-timeoutCtx.Done():
@@ -180,12 +201,10 @@ func (o *IAMOrchestrator) pollForBinding(ctx context.Context, binding iam.IAMBin
 func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[string]string, error) {
 	o.logger.Info().Msg("Starting ServiceDirector IAM setup...")
 	serviceEmails := make(map[string]string)
-
 	requiredRoles, err := o.planner.PlanRolesForServiceDirector(o.arch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to plan IAM roles for ServiceDirector: %w", err)
 	}
-
 	serviceName := o.arch.ServiceManagerSpec.Name
 	saName := o.arch.ServiceManagerSpec.ServiceAccount
 	if saName == "" {
@@ -198,7 +217,6 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	o.logger.Info().Str("email", saEmail).Msg("ServiceDirector service account is ready.")
 	o.createdServiceAccountEmails = append(o.createdServiceAccountEmails, saEmail)
 	serviceEmails[serviceName] = saEmail
-
 	member := "serviceAccount:" + saEmail
 	for _, role := range requiredRoles {
 		o.logger.Info().Str("role", role).Str("member", member).Msg("Granting project-level role to ServiceDirector SA.")
@@ -207,7 +225,6 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 			return nil, fmt.Errorf("failed to grant project role '%s' to ServiceDirector SA: %w", role, err)
 		}
 	}
-
 	projectNumber, err := o.GetProjectNumber(ctx, o.arch.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project number: %w", err)
@@ -217,29 +234,25 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("failed to grant 'actAs' permission to Cloud Build SA: %w", err)
 	}
-
 	o.logger.Info().Msg("ServiceDirector IAM setup complete.")
 	return serviceEmails, nil
 }
 
-// Teardown cleans up all service accounts created during the orchestration run.
+// Teardown cleans up service accounts created during the orchestration run.
 func (o *IAMOrchestrator) Teardown(ctx context.Context) error {
 	o.logger.Info().Int("created_count", len(o.createdServiceAccountEmails)).Msg("Starting IAMOrchestrator cleanup...")
-
 	for _, email := range o.createdServiceAccountEmails {
 		err := o.iamClient.DeleteServiceAccount(ctx, email)
 		if err != nil {
 			o.logger.Error().Err(err).Str("email", email).Msg("Failed during service account cleanup")
 		}
 	}
-
 	if o.iamClient != nil {
 		err := o.iamClient.Close()
 		if err != nil {
 			o.logger.Error().Err(err).Msg("Failed to close IAM client")
 		}
 	}
-
 	return nil
 }
 
@@ -250,10 +263,7 @@ func (o *IAMOrchestrator) GetProjectNumber(ctx context.Context, projectID string
 		return "", fmt.Errorf("resourcemanager.NewProjectsClient: %w", err)
 	}
 	defer func() { _ = c.Close() }()
-
-	req := &resourcemanagerpb.GetProjectRequest{
-		Name: fmt.Sprintf("projects/%s", projectID),
-	}
+	req := &resourcemanagerpb.GetProjectRequest{Name: fmt.Sprintf("projects/%s", projectID)}
 	project, err := c.GetProject(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("GetProject: %w", err)

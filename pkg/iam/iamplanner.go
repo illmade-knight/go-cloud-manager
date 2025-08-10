@@ -8,7 +8,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// REFACTOR: The IAMBinding struct now includes the ServiceAccount (the "who").
+// IAMBinding struct for creating a single IAM binding linked to a service account.
 type IAMBinding struct {
 	ServiceAccount   string
 	ResourceType     string
@@ -41,6 +41,7 @@ func NewRolePlanner(logger zerolog.Logger) *RolePlanner {
 // PlanRolesForServiceDirector remains unchanged.
 func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.MicroserviceArchitecture) ([]string, error) {
 	p.logger.Info().Str("architecture", arch.Environment.Name).Msg("Planning required IAM roles for ServiceDirector...")
+
 	requiredRoles := make(map[string]struct{})
 	for _, dataflow := range arch.Dataflows {
 		resources := dataflow.Resources
@@ -53,6 +54,14 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 		if len(resources.BigQueryDatasets) > 0 || len(resources.BigQueryTables) > 0 {
 			requiredRoles["roles/bigquery.admin"] = struct{}{}
 		}
+
+		// REFACTOR: If any dataflow defines application services, the ServiceDirector
+		// will be responsible for ensuring their service accounts exist. Therefore,
+		// it needs permission to create and manage service accounts.
+		if len(dataflow.Services) > 0 {
+			requiredRoles["roles/iam.serviceAccountAdmin"] = struct{}{}
+		}
+
 		for _, service := range dataflow.Services {
 			if service.Deployment != nil && len(service.Deployment.SecretEnvironmentVars) > 0 {
 				requiredRoles["roles/secretmanager.admin"] = struct{}{}
@@ -60,10 +69,12 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 			}
 		}
 	}
+
 	rolesSlice := make([]string, 0, len(requiredRoles))
 	for role := range requiredRoles {
 		rolesSlice = append(rolesSlice, role)
 	}
+
 	p.logger.Info().Strs("roles", rolesSlice).Msg("ServiceDirector IAM role plan complete.")
 	return rolesSlice, nil
 }
@@ -89,7 +100,7 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	return finalPlan, nil
 }
 
-// REFACTOR: All planning helpers are updated to add the ServiceAccount to the binding
+// planDataResourceLinkRoles: All planning helpers are updated to add the ServiceAccount to the binding
 // and to call the updated addBindingToPlan helper.
 func (p *RolePlanner) planDataResourceLinkRoles(dataflow servicemanager.ResourceGroup, plan *[]IAMBinding, mu *sync.Mutex) {
 	for _, bucket := range dataflow.Resources.GCSBuckets {

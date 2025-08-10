@@ -89,7 +89,7 @@ func TestCloudBuildDeployer_Deploy_Success(t *testing.T) {
 	mockRunner.On("CreateOrUpdate", ctx, serviceName, saEmail, mock.Anything).Return(&run.GoogleCloudRunV2Service{Uri: expectedURL}, nil).Once()
 
 	// --- Act ---
-	url, err := deployer.Deploy(ctx, serviceName, saEmail, spec)
+	url, err := deployer.BuildAndDeploy(ctx, serviceName, saEmail, spec)
 
 	// --- Assert ---
 	require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestCloudBuildDeployer_Deploy_BuildFails(t *testing.T) {
 	mockBuilder.On("TriggerBuildAndWait", ctx, mock.Anything, mock.Anything).Return(buildError)
 
 	// --- Act ---
-	_, err := deployer.Deploy(ctx, "test-service", "sa@email.com", servicemanager.DeploymentSpec{SourcePath: "/src", ImageRepo: "repo", Region: "region"})
+	_, err := deployer.BuildAndDeploy(ctx, "test-service", "sa@email.com", servicemanager.DeploymentSpec{SourcePath: "/src", ImageRepo: "repo", Region: "region"})
 
 	// --- Assert ---
 	require.Error(t, err)
