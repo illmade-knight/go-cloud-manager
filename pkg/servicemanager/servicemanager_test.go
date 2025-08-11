@@ -14,10 +14,12 @@ import (
 )
 
 // setupServiceManagerTest creates a ServiceManager with mock sub-managers for testing.
-func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *MockMessagingManager, *MockStorageManager, *MockBigQueryManager, *servicemanager.MicroserviceArchitecture) {
+// REFACTOR_NOTE: Updated to include a mock Firestore manager and resources.
+func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *MockMessagingManager, *MockStorageManager, *MockBigQueryManager, *MockFirestoreManager, *servicemanager.MicroserviceArchitecture) {
 	mockMsg := new(MockMessagingManager)
 	mockStore := new(MockStorageManager)
 	mockBq := new(MockBigQueryManager)
+	mockFs := new(MockFirestoreManager)
 
 	// Create a sample architecture with two dataflows, one ephemeral and one permanent.
 	arch := &servicemanager.MicroserviceArchitecture{
@@ -25,7 +27,8 @@ func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *Moc
 			"dataflow1": {
 				Name: "dataflow1",
 				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: "df1-topic"}}},
+					Topics:             []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: "df1-topic"}}},
+					FirestoreDatabases: []servicemanager.FirestoreDatabase{{CloudResource: servicemanager.CloudResource{Name: "df1-db"}}},
 				},
 				Lifecycle: &servicemanager.LifecyclePolicy{Strategy: servicemanager.LifecycleStrategyEphemeral},
 			},
@@ -39,23 +42,24 @@ func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *Moc
 		},
 	}
 
-	manager, err := servicemanager.NewServiceManagerFromManagers(mockMsg, mockStore, mockBq, nil, zerolog.Nop())
+	manager, err := servicemanager.NewServiceManagerFromManagers(mockMsg, mockStore, mockBq, mockFs, nil, zerolog.Nop())
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
-	return manager, mockMsg, mockStore, mockBq, arch
+	return manager, mockMsg, mockStore, mockBq, mockFs, arch
 }
 
 func TestServiceManager_SetupAll(t *testing.T) {
-	manager, mockMsg, mockStore, mockBq, arch := setupServiceManagerTest(t)
+	manager, mockMsg, mockStore, mockBq, mockFs, arch := setupServiceManagerTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	// Mock the sub-manager calls.
 	// We expect CreateResources to be called for each of the two dataflows.
 	mockMsg.On("CreateResources", ctx, mock.Anything).Return([]servicemanager.ProvisionedTopic{}, []servicemanager.ProvisionedSubscription{}, nil).Twice()
 	mockStore.On("CreateResources", ctx, mock.Anything).Return([]servicemanager.ProvisionedGCSBucket{}, nil).Twice()
 	mockBq.On("CreateResources", ctx, mock.Anything).Return([]servicemanager.ProvisionedBigQueryTable{}, []servicemanager.ProvisionedBigQueryDataset{}, nil).Twice()
+	mockFs.On("CreateResources", ctx, mock.Anything).Return([]servicemanager.ProvisionedFirestoreDatabase{}, nil).Twice()
 
 	// Action
 	_, err := manager.SetupAll(ctx, arch)
@@ -65,12 +69,13 @@ func TestServiceManager_SetupAll(t *testing.T) {
 	mockMsg.AssertExpectations(t)
 	mockStore.AssertExpectations(t)
 	mockBq.AssertExpectations(t)
+	mockFs.AssertExpectations(t)
 }
 
 func TestServiceManager_TeardownAll(t *testing.T) {
-	manager, mockMsg, mockStore, mockBq, arch := setupServiceManagerTest(t)
+	manager, mockMsg, mockStore, mockBq, mockFs, arch := setupServiceManagerTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	// Mock the sub-manager calls. Teardown should only be called ONCE, for the ephemeral dataflow ("dataflow1").
 	// The permanent "dataflow2" should be skipped.
@@ -78,6 +83,7 @@ func TestServiceManager_TeardownAll(t *testing.T) {
 	mockMsg.On("Teardown", ctx, df1Resources).Return(nil).Once()
 	mockStore.On("Teardown", ctx, df1Resources).Return(nil).Once()
 	mockBq.On("Teardown", ctx, df1Resources).Return(nil).Once()
+	mockFs.On("Teardown", ctx, df1Resources).Return(nil).Once()
 
 	// Action
 	err := manager.TeardownAll(ctx, arch)
@@ -87,12 +93,13 @@ func TestServiceManager_TeardownAll(t *testing.T) {
 	mockMsg.AssertExpectations(t)
 	mockStore.AssertExpectations(t)
 	mockBq.AssertExpectations(t)
+	mockFs.AssertExpectations(t)
 }
 
 func TestServiceManager_SetupDataflow_Failure(t *testing.T) {
-	manager, mockMsg, mockStore, mockBq, arch := setupServiceManagerTest(t)
+	manager, mockMsg, mockStore, mockBq, mockFs, arch := setupServiceManagerTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	storageErr := errors.New("bucket already exists and is owned by another project")
 
 	// Mock two successes and one failure for the "dataflow1" call.
@@ -100,6 +107,7 @@ func TestServiceManager_SetupDataflow_Failure(t *testing.T) {
 	mockMsg.On("CreateResources", ctx, df1Resources).Return([]servicemanager.ProvisionedTopic{}, []servicemanager.ProvisionedSubscription{}, nil).Once()
 	mockStore.On("CreateResources", ctx, df1Resources).Return([]servicemanager.ProvisionedGCSBucket{}, storageErr).Once() // This one fails.
 	mockBq.On("CreateResources", ctx, df1Resources).Return([]servicemanager.ProvisionedBigQueryTable{}, []servicemanager.ProvisionedBigQueryDataset{}, nil).Once()
+	mockFs.On("CreateResources", ctx, df1Resources).Return([]servicemanager.ProvisionedFirestoreDatabase{}, nil).Once()
 
 	// Action
 	_, err := manager.SetupDataflow(ctx, arch, "dataflow1")
@@ -111,12 +119,13 @@ func TestServiceManager_SetupDataflow_Failure(t *testing.T) {
 	mockMsg.AssertExpectations(t)
 	mockStore.AssertExpectations(t)
 	mockBq.AssertExpectations(t)
+	mockFs.AssertExpectations(t)
 }
 
 func TestServiceManager_TeardownDataflow_Skipped(t *testing.T) {
-	manager, mockMsg, mockStore, mockBq, arch := setupServiceManagerTest(t)
+	manager, mockMsg, mockStore, mockBq, mockFs, arch := setupServiceManagerTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	// Action: Try to tear down "dataflow2", which is marked as permanent.
 	err := manager.TeardownDataflow(ctx, arch, "dataflow2")
@@ -127,4 +136,5 @@ func TestServiceManager_TeardownDataflow_Skipped(t *testing.T) {
 	mockMsg.AssertNotCalled(t, "Teardown", mock.Anything, mock.Anything)
 	mockStore.AssertNotCalled(t, "Teardown", mock.Anything, mock.Anything)
 	mockBq.AssertNotCalled(t, "Teardown", mock.Anything, mock.Anything)
+	mockFs.AssertNotCalled(t, "Teardown", mock.Anything, mock.Anything)
 }

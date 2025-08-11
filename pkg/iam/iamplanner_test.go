@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// REFACTOR: This new helper filters the flat slice of bindings for a specific service account.
+// findBindingsForSA is a helper that filters the flat slice of bindings for a specific service account.
 func findBindingsForSA(plan []iam.IAMBinding, saName string) []iam.IAMBinding {
 	var results []iam.IAMBinding
 	for _, binding := range plan {
@@ -22,7 +22,7 @@ func findBindingsForSA(plan []iam.IAMBinding, saName string) []iam.IAMBinding {
 }
 
 func TestPlanRolesForApplicationServices(t *testing.T) {
-	// ARRANGE: (Architecture is unchanged)
+	// ARRANGE:
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
 		Dataflows: map[string]servicemanager.ResourceGroup{
@@ -34,6 +34,8 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 					"invoker-service":    {Name: "invoker-service", ServiceAccount: "invoker-sa", Dependencies: []string{"publisher-service"}},
 					"gcs-writer-service": {Name: "gcs-writer-service", ServiceAccount: "gcs-writer-sa"},
 					"bq-reader-service":  {Name: "bq-reader-service", ServiceAccount: "bq-reader-sa"},
+					"fs-writer-service":  {Name: "fs-writer-service", ServiceAccount: "fs-writer-sa"},
+					"fs-reader-service":  {Name: "fs-reader-service", ServiceAccount: "fs-reader-sa"},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics:        []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: "data-topic"}, ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"}}},
@@ -43,6 +45,12 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 						CloudResource: servicemanager.CloudResource{Name: "events-table"},
 						Dataset:       "analytics-dataset",
 						Consumers:     []servicemanager.ServiceMapping{{Name: "bq-reader-service"}},
+					}},
+					// UPDATE: Add a Firestore DB with a producer and consumer to the test case.
+					FirestoreDatabases: []servicemanager.FirestoreDatabase{{
+						CloudResource: servicemanager.CloudResource{Name: "user-profiles-db"},
+						Producers:     []servicemanager.ServiceMapping{{Name: "fs-writer-service"}},
+						Consumers:     []servicemanager.ServiceMapping{{Name: "fs-reader-service"}},
 					}},
 				},
 			},
@@ -56,7 +64,7 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 
-	// ASSERT: REFACTOR: Assertions are updated to filter the plan slice.
+	// ASSERT:
 	t.Run("Publisher gets Publisher and Viewer roles", func(t *testing.T) {
 		bindings := findBindingsForSA(plan, "publisher-sa")
 		require.Len(t, bindings, 2)
@@ -102,6 +110,21 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 		bindings := findBindingsForSA(plan, "bq-reader-sa")
 		require.Len(t, bindings, 1)
 		expectedReader := iam.IAMBinding{ServiceAccount: "bq-reader-sa", ResourceType: "bigquery_table", ResourceID: "analytics-dataset:events-table", Role: "roles/bigquery.dataViewer"}
+		assert.Contains(t, bindings, expectedReader)
+	})
+
+	// UPDATE: New test cases to verify the Firestore role planning logic.
+	t.Run("Firestore writer gets Datastore User role", func(t *testing.T) {
+		bindings := findBindingsForSA(plan, "fs-writer-sa")
+		require.Len(t, bindings, 1)
+		expectedWriter := iam.IAMBinding{ServiceAccount: "fs-writer-sa", ResourceType: "project", ResourceID: "fs-writer-service", Role: "roles/datastore.user"}
+		assert.Contains(t, bindings, expectedWriter)
+	})
+
+	t.Run("Firestore reader gets Datastore Viewer role", func(t *testing.T) {
+		bindings := findBindingsForSA(plan, "fs-reader-sa")
+		require.Len(t, bindings, 1)
+		expectedReader := iam.IAMBinding{ServiceAccount: "fs-reader-sa", ResourceType: "project", ResourceID: "fs-reader-service", Role: "roles/datastore.viewer"}
 		assert.Contains(t, bindings, expectedReader)
 	})
 }

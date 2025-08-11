@@ -2,6 +2,7 @@ package servicemanager_test
 
 import (
 	"context"
+
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/stretchr/testify/mock"
 )
@@ -44,5 +45,18 @@ func (m *MockBigQueryManager) Teardown(ctx context.Context, resources serviceman
 	return m.Called(ctx, resources).Error(0)
 }
 func (m *MockBigQueryManager) Verify(ctx context.Context, resources servicemanager.CloudResourcesSpec) error {
+	return m.Called(ctx, resources).Error(0)
+}
+
+type MockFirestoreManager struct{ mock.Mock }
+
+func (m *MockFirestoreManager) CreateResources(ctx context.Context, resources servicemanager.CloudResourcesSpec) ([]servicemanager.ProvisionedFirestoreDatabase, error) {
+	args := m.Called(ctx, resources)
+	return args.Get(0).([]servicemanager.ProvisionedFirestoreDatabase), args.Error(1)
+}
+func (m *MockFirestoreManager) Teardown(ctx context.Context, resources servicemanager.CloudResourcesSpec) error {
+	return m.Called(ctx, resources).Error(0)
+}
+func (m *MockFirestoreManager) Verify(ctx context.Context, resources servicemanager.CloudResourcesSpec) error {
 	return m.Called(ctx, resources).Error(0)
 }

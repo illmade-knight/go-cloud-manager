@@ -27,6 +27,13 @@ func TestHydrateArchitecture(t *testing.T) {
 					CloudResource:   servicemanager.CloudResource{Name: "events-topic"},
 					ProducerService: &servicemanager.ServiceMapping{Name: "my-service", Env: "EVENTS_TOPIC_ID"},
 				}},
+				// NEW_CODE: Added a Firestore collection to test its hydration.
+				FirestoreCollections: []servicemanager.FirestoreCollection{{
+					CloudResource: servicemanager.CloudResource{Name: "users-collection"},
+					Producers: []servicemanager.ServiceMapping{
+						{Name: "my-service", Env: "USERS_COLLECTION_NAME"},
+					},
+				}},
 			},
 		}},
 	}
@@ -43,6 +50,8 @@ func TestHydrateArchitecture(t *testing.T) {
 	assert.Equal(t, "europe-west1", spec.Region)
 	assert.True(t, strings.HasPrefix(spec.Image, "europe-west1-docker.pkg.dev/test-project/default-repo/my-service:"))
 	assert.Equal(t, "events-topic", spec.EnvironmentVars["EVENTS_TOPIC_ID"])
+	// NEW_CODE: Assert that the collection name was injected as an environment variable.
+	assert.Equal(t, "users-collection", spec.EnvironmentVars["USERS_COLLECTION_NAME"])
 }
 
 // TestHydrateTestArchitecture validates the testing hydration path with a runID.
@@ -84,7 +93,7 @@ func TestHydrateTestArchitecture(t *testing.T) {
 	assert.Equal(t, hydratedTopicName, arch.Dataflows["test-flow"].Resources.Topics[0].Name)
 	assert.Equal(t, hydratedSvcName, arch.Dataflows["test-flow"].Resources.Topics[0].ProducerService.Name, "ProducerService link should be updated")
 
-	// NEW: Assert that the service account names were also hydrated
+	// Assert that the service account names were also hydrated
 	assert.Equal(t, "sm-sa-xyz123", arch.ServiceManagerSpec.ServiceAccount)
 	assert.Equal(t, "my-sa-xyz123", hydratedSvc.ServiceAccount)
 

@@ -4,25 +4,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"google.golang.org/api/option"
 
-	"cloud.google.com/go/iam"
 	"cloud.google.com/go/storage"
 )
 
-// gcsBucketHandle is an interface that abstracts the methods from *storage.BucketHandle
-// that our adapter uses. This is the key to allowing mocks to be used in testing.
+// gcsBucketHandle is an internal interface that abstracts the methods we need from
+// *storage.BucketHandle. This is the key to allowing mocks to be used in testing.
+// REFACTOR_NOTE: The IAM() method has been correctly removed from this interface.
 type gcsBucketHandle interface {
 	Attrs(ctx context.Context) (*storage.BucketAttrs, error)
 	Create(ctx context.Context, projectID string, attrs *storage.BucketAttrs) error
 	Update(ctx context.Context, attrs storage.BucketAttrsToUpdate) (*storage.BucketAttrs, error)
 	Delete(ctx context.Context) error
-	IAM() *iam.Handle
 }
 
-// --- Conversion Functions ---
+// REFACTOR_NOTE: This new unexported struct is the bridge that makes the REAL
+// *storage.BucketHandle satisfy our internal gcsBucketHandle interface.
+type realGCSBucketHandle struct {
+	handle *storage.BucketHandle
+}
 
-// fromGCSBucketAttrs converts GCS-specific bucket attributes to our generic BucketAttributes struct.
+func (r *realGCSBucketHandle) Attrs(ctx context.Context) (*storage.BucketAttrs, error) {
+	return r.handle.Attrs(ctx)
+}
+func (r *realGCSBucketHandle) Create(ctx context.Context, projectID string, attrs *storage.BucketAttrs) error {
+	return r.handle.Create(ctx, projectID, attrs)
+}
+func (r *realGCSBucketHandle) Update(ctx context.Context, attrs storage.BucketAttrsToUpdate) (*storage.BucketAttrs, error) {
+	return r.handle.Update(ctx, attrs)
+}
+func (r *realGCSBucketHandle) Delete(ctx context.Context) error {
+	return r.handle.Delete(ctx)
+}
+
+// --- Conversion Functions (Unchanged) ---
 func fromGCSBucketAttrs(gcsAttrs *storage.BucketAttrs) *BucketAttributes {
 	if gcsAttrs == nil {
 		return nil
@@ -45,8 +62,6 @@ func fromGCSBucketAttrs(gcsAttrs *storage.BucketAttrs) *BucketAttributes {
 	}
 	return attrs
 }
-
-// toGCSBucketAttrs converts our generic BucketAttributes struct to a GCS-specific one for creation.
 func toGCSBucketAttrs(attrs *BucketAttributes) *storage.BucketAttrs {
 	if attrs == nil {
 		return nil
@@ -71,23 +86,15 @@ func toGCSBucketAttrs(attrs *BucketAttributes) *storage.BucketAttrs {
 	}
 	return gcsAttrs
 }
-
-// toGCSBucketAttrsToUpdate converts our generic update struct to a GCS-specific one.
-// This is more complex than a simple conversion because it needs to handle label updates
-// by explicitly deleting labels that are present in the old config but not the new one.
 func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *storage.BucketAttrs) storage.BucketAttrsToUpdate {
 	gcsUpdate := storage.BucketAttrsToUpdate{}
-
 	if attrs.StorageClass != nil {
 		gcsUpdate.StorageClass = *attrs.StorageClass
 	}
-
 	if attrs.Labels != nil {
-		// Set new or updated labels.
 		for k, v := range attrs.Labels {
 			gcsUpdate.SetLabel(k, v)
 		}
-		// If there was an existing config, check for labels that need to be removed.
 		if existingGCSAttrs != nil && existingGCSAttrs.Labels != nil {
 			for k := range existingGCSAttrs.Labels {
 				if _, existsInNewConfig := attrs.Labels[k]; !existsInNewConfig {
@@ -112,9 +119,7 @@ func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *
 	return gcsUpdate
 }
 
-// --- GCS Iterator Adapter ---
-
-// gcsBucketIteratorAdapter wraps a *storage.BucketIterator to conform to our BucketIterator interface.
+// --- GCS Iterator Adapter (Unchanged) ---
 type gcsBucketIteratorAdapter struct {
 	it *storage.BucketIterator
 }
@@ -122,14 +127,14 @@ type gcsBucketIteratorAdapter struct {
 func (a *gcsBucketIteratorAdapter) Next() (*BucketAttributes, error) {
 	gcsAttrs, err := a.it.Next()
 	if err != nil {
-		return nil, err // Pass on the error, including iterator.Done
+		return nil, err
 	}
 	return fromGCSBucketAttrs(gcsAttrs), nil
 }
 
 // --- GCS Handle/Client Adapters ---
 
-// gcsBucketHandleAdapter wraps a GCS bucket handle (real or mock) to conform to our StorageBucketHandle interface.
+// gcsBucketHandleAdapter now correctly holds the internal interface again, restoring testability.
 type gcsBucketHandleAdapter struct {
 	bucket gcsBucketHandle
 }
@@ -148,7 +153,6 @@ func (a *gcsBucketHandleAdapter) Create(ctx context.Context, projectID string, a
 }
 
 func (a *gcsBucketHandleAdapter) Update(ctx context.Context, attrs BucketAttributesToUpdate) (*BucketAttributes, error) {
-	// To correctly calculate the diff for labels, we need the current attributes.
 	existingGCSAttrs, err := a.bucket.Attrs(ctx)
 	if err != nil && !errors.Is(err, storage.ErrBucketNotExist) {
 		return nil, fmt.Errorf("failed to get existing attributes before update: %w", err)
@@ -166,17 +170,15 @@ func (a *gcsBucketHandleAdapter) Delete(ctx context.Context) error {
 	return a.bucket.Delete(ctx)
 }
 
-func (a *gcsBucketHandleAdapter) IAM() *iam.Handle {
-	return a.bucket.IAM()
-}
-
 // gcsClientAdapter wraps a *storage.Client to conform to our StorageClient interface.
 type gcsClientAdapter struct {
 	client *storage.Client
 }
 
 func (a *gcsClientAdapter) Bucket(name string) StorageBucketHandle {
-	return &gcsBucketHandleAdapter{bucket: a.client.Bucket(name)}
+	// REFACTOR_NOTE: This now correctly wraps the real handle in our two adapter layers.
+	realHandle := &realGCSBucketHandle{handle: a.client.Bucket(name)}
+	return &gcsBucketHandleAdapter{bucket: realHandle}
 }
 
 func (a *gcsClientAdapter) Buckets(ctx context.Context, projectID string) BucketIterator {

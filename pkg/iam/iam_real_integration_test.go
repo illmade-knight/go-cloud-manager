@@ -6,15 +6,14 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/pubsub"
-	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/auth"
@@ -62,23 +61,22 @@ func ensureTestCloudRunService(t *testing.T, ctx context.Context, projectID, loc
 }
 
 // TestIAMManager_FullFlow performs a full, end-to-end integration test of the IAMManager.
-// It creates real prerequisite resources (Topic, Secret, etc.), uses the TestIAMClient pool
-// to get a service account, applies a comprehensive IAM plan, and then verifies that
-// all policies were correctly applied to the real resources.
+// It creates real prerequisite resources, uses the IAM client to apply a comprehensive
+// IAM plan, and then verifies that all policies were correctly applied.
 func TestIAMManager_FullFlow(t *testing.T) {
 	// --- Arrange ---
 	projectID := auth.CheckGCPAuth(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	logger := zerolog.New(os.Stderr).With().Timestamp().Str("test", "TestIAMManager_FullFlow").Logger()
 
-	runID := time.Now().UnixNano()
-	testTopicName := fmt.Sprintf("test-topic-for-iam-%d", runID)
-	testSecretName := fmt.Sprintf("test-secret-for-iam-%d", runID)
-	testDatasetName := fmt.Sprintf("test_dataset_for_iam_%d", runID)
-	testSaPrefix := "it-iam"
-	targetServiceName := fmt.Sprintf("target-service-%d", runID)
+	runID := uuid.New().String()[:8]
+	testTopicName := fmt.Sprintf("test-topic-for-iam-%s", runID)
+	testSecretName := fmt.Sprintf("test-secret-for-iam-%s", runID)
+	testDatasetName := fmt.Sprintf("test_dataset_for_iam_%s", runID)
+	testTableName := fmt.Sprintf("test_table_for_iam_%s", runID)
+	targetServiceName := fmt.Sprintf("target-service-%s", runID)
 	const testLocation = "europe-west1"
 
 	// 1. Create prerequisite resources for the test to apply IAM policies to.
@@ -92,7 +90,7 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	secretClient, err := secretmanager.NewClient(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = secretClient.Close() })
-	secret, err := servicemanager.EnsureSecretExistsWithValue(ctx, secretClient, projectID, testSecretName, "test-data")
+	_, err = servicemanager.EnsureSecretExistsWithValue(ctx, secretClient, projectID, testSecretName, "test-data")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		req := &secretmanagerpb.DeleteSecretRequest{Name: fmt.Sprintf("projects/%s/secrets/%s", projectID, testSecretName)}
@@ -104,105 +102,139 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	t.Cleanup(func() { _ = bqClient.Close() })
 	err = bqClient.Dataset(testDatasetName).Create(ctx, &bigquery.DatasetMetadata{Location: "EU"})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = bqClient.Dataset(testDatasetName).Delete(context.Background()) })
+	err = bqClient.Dataset(testDatasetName).Table(testTableName).Create(ctx, &bigquery.TableMetadata{Location: "EU"})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = bqClient.Dataset(testDatasetName).Table(testTableName).Delete(ctx)
+		_ = bqClient.Dataset(testDatasetName).Delete(context.Background())
+	})
 
 	ensureTestCloudRunService(t, ctx, projectID, testLocation, targetServiceName)
+	// NOTE: We assume a Firestore database already exists in the test project in NATIVE mode.
+	// This test does not create it, only sets permissions for it.
+	t.Cleanup(func() {
+		t.Logf("!!! MANUAL CLEANUP REMINDER for project %s: Please ensure the Firestore database is removed if it was created for this test.", projectID)
+	})
 
-	// 2. Initialize the IAM manager with the pooling test client.
-	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, testSaPrefix)
+	// 2. Define an architecture that uses all these resources.
+	testServiceSA := fmt.Sprintf("iam-test-sa-%s", runID)
+	arch := &servicemanager.MicroserviceArchitecture{
+		Environment: servicemanager.Environment{ProjectID: projectID, Region: testLocation},
+		Dataflows: map[string]servicemanager.ResourceGroup{
+			"full-iam-flow": {
+				Services: map[string]servicemanager.ServiceSpec{
+					"iam-test-service": {
+						Name:           "iam-test-service",
+						ServiceAccount: testServiceSA,
+						Dependencies:   []string{targetServiceName},
+						Deployment:     &servicemanager.DeploymentSpec{SecretEnvironmentVars: []servicemanager.SecretEnvVar{{ValueFrom: testSecretName}}},
+					},
+				},
+				Resources: servicemanager.CloudResourcesSpec{
+					Topics: []servicemanager.TopicConfig{
+						{CloudResource: servicemanager.CloudResource{Name: testTopicName},
+							ProducerService: &servicemanager.ServiceMapping{Name: "iam-test-service"},
+						},
+					},
+					BigQueryTables: []servicemanager.BigQueryTable{
+						{
+							CloudResource: servicemanager.CloudResource{Name: testTableName},
+							Dataset:       testDatasetName,
+							Producers:     []servicemanager.ServiceMapping{{Name: "iam-test-service"}},
+						},
+					},
+					// UPDATE: Add a Firestore database with a producer to the architecture.
+					FirestoreDatabases: []servicemanager.FirestoreDatabase{{
+						CloudResource: servicemanager.CloudResource{Name: "default-db"},
+						Producers:     []servicemanager.ServiceMapping{{Name: "iam-test-service"}},
+					}},
+				},
+			},
+		},
+	}
+
+	// 3. Initialize the IAM manager and orchestrator.
+	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = iamClient.Close() })
 
-	t.Run("Assert - Verify Policies", func(t *testing.T) {
-		t.Log("Verifying the IAM policies were set correctly...")
-		require.Eventually(t, func() bool {
-			// Verify Pub/Sub policy
-			topicPolicy, err := topic.IAM().Policy(ctx)
-			if err != nil {
-				t.Logf("Attempt failed to get topic IAM policy: %v", err)
-				return false
-			}
-			foundPubSubBinding := false
-			for _, member := range topicPolicy.Members("roles/pubsub.publisher") {
-				if strings.HasPrefix(member, "serviceAccount:"+testSaPrefix) {
-					foundPubSubBinding = true
-					break
-				}
-			}
-			if !foundPubSubBinding {
-				t.Log("Attempt failed: Pub/Sub binding not found.")
-				return false
-			}
+	iamManager, err := iam.NewIAMManager(iamClient, logger)
+	require.NoError(t, err)
 
-			// Verify Secret Manager policy
-			secretName := strings.Split(secret.Name, "/versions/")[0]
-			secretPolicy, err := secretClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: secretName})
-			if err != nil {
-				t.Logf("Attempt failed to get secret IAM policy: %v", err)
-				return false
-			}
-			foundSecretBinding := false
-			for _, binding := range secretPolicy.Bindings {
-				if binding.Role == "roles/secretmanager.secretAccessor" {
-					for _, member := range binding.Members {
-						if strings.HasPrefix(member, "serviceAccount:"+testSaPrefix) {
-							foundSecretBinding = true
-							break
-						}
-					}
-				}
-			}
-			if !foundSecretBinding {
-				t.Log("Attempt failed: Secret binding not found.")
-				return false
-			}
-
-			// Verify Cloud Run policy
-			runService, err := run.NewService(ctx)
-			require.NoError(t, err)
-			fullSvcName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, testLocation, targetServiceName)
-			runPolicy, err := runService.Projects.Locations.Services.GetIamPolicy(fullSvcName).Do()
-			if err != nil {
-				t.Logf("Attempt failed to get Cloud Run IAM policy: %v", err)
-				return false
-			}
-			foundRunBinding := false
-			for _, binding := range runPolicy.Bindings {
-				if binding.Role == "roles/run.invoker" {
-					for _, member := range binding.Members {
-						if strings.HasPrefix(member, "serviceAccount:"+testSaPrefix) {
-							foundRunBinding = true
-							break
-						}
-					}
-				}
-			}
-			if !foundRunBinding {
-				t.Log("Attempt failed: Cloud Run binding not found.")
-				return false
-			}
-
-			// Verify BigQuery dataset policy
-			meta, err := bqClient.Dataset(testDatasetName).Metadata(ctx)
-			if err != nil {
-				t.Logf("Attempt failed to get BQ dataset metadata: %v", err)
-				return false
-			}
-			foundBQBinding := false
-			for _, entry := range meta.Access {
-				if entry.Role == bigquery.WriterRole && strings.Contains(entry.Entity, testSaPrefix) {
-					foundBQBinding = true
-					break
-				}
-			}
-			if !foundBQBinding {
-				t.Log("Attempt failed: BigQuery binding not found.")
-				return false
-			}
-
-			return true
-		}, 60*time.Second, 5*time.Second, "IAM policies did not propagate in time")
-
-		t.Log("✅ Verification successful.")
+	// UPDATE: This new block creates the SA and waits for it to propagate BEFORE
+	// we try to apply policies that use it. This solves the race condition.
+	t.Logf("Ensuring service account '%s' exists and has propagated...", testServiceSA)
+	saEmail, err := iamClient.EnsureServiceAccountExists(ctx, testServiceSA)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// This will delete the SA at the very end of the test.
+		_ = iamClient.DeleteServiceAccount(context.Background(), saEmail)
 	})
+
+	require.Eventually(t, func() bool {
+		err := iamClient.GetServiceAccount(ctx, saEmail)
+		if err != nil {
+			t.Logf("SA propagation check failed: %v, retrying...", err)
+		}
+		return err == nil
+	}, 2*time.Minute, 5*time.Second, "Service account did not propagate in time")
+	t.Log("Service account has propagated.")
+
+	// --- Act ---
+	t.Log("Applying IAM policies for the dataflow...")
+	appliedPolicies, err := iamManager.ApplyIAMForDataflow(ctx, arch, "full-iam-flow")
+	require.NoError(t, err)
+	require.NotEmpty(t, appliedPolicies)
+
+	// --- Assert ---
+	t.Log("Verifying the IAM policies were set correctly (polling for propagation)...")
+
+	member := "serviceAccount:" + saEmail
+
+	projectIAM, err := iam.NewGoogleIAMProjectClient(ctx, projectID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = projectIAM.Close() })
+
+	require.Eventually(t, func() bool {
+		// Verify Pub/Sub policy
+		hasPubSub, err := iamClient.CheckResourceIAMBinding(ctx, iam.IAMBinding{ResourceType: "pubsub_topic", ResourceID: testTopicName, Role: "roles/pubsub.publisher"}, member)
+		if err != nil || !hasPubSub {
+			t.Logf("Polling for Pub/Sub... Found: %v, Err: %v", hasPubSub, err)
+			return false
+		}
+
+		// Verify Secret Manager policy
+		hasSecret, err := iamClient.CheckResourceIAMBinding(ctx, iam.IAMBinding{ResourceType: "secret", ResourceID: testSecretName, Role: "roles/secretmanager.secretAccessor"}, member)
+		if err != nil || !hasSecret {
+			t.Logf("Polling for Secret... Found: %v, Err: %v", hasSecret, err)
+			return false
+		}
+
+		// Verify Cloud Run policy
+		hasRun, err := iamClient.CheckResourceIAMBinding(ctx, iam.IAMBinding{ResourceType: "cloudrun_service", ResourceID: targetServiceName, Role: "roles/run.invoker", ResourceLocation: testLocation}, member)
+		if err != nil || !hasRun {
+			t.Logf("Polling for Cloud Run... Found: %v, Err: %v", hasRun, err)
+			return false
+		}
+
+		// Verify BigQuery table policy
+		bqResourceID := fmt.Sprintf("%s:%s", testDatasetName, testTableName)
+		hasBQ, err := iamClient.CheckResourceIAMBinding(ctx, iam.IAMBinding{ResourceType: "bigquery_table", ResourceID: bqResourceID, Role: "roles/bigquery.dataEditor"}, member)
+		if err != nil || !hasBQ {
+			t.Logf("Polling for BigQuery... Found: %v, Err: %v", hasBQ, err)
+			return false
+		}
+
+		// UPDATE: Verify the new project-level Firestore policy.
+		// Firestore in fact uses a project level IAM - and we set these in IAMOrchestrator instead of here
+		//hasFirestore, err := projectIAM.CheckProjectIAMBinding(ctx, member, "roles/datastore.user")
+		//if err != nil || !hasFirestore {
+		//	t.Logf("Polling for Firestore... Found: %v, Err: %v", hasFirestore, err)
+		//	return false
+		//}
+
+		return true // All checks passed
+	}, 2*time.Minute, 5*time.Second, "IAM policies did not propagate in time")
+
+	t.Log("✅ Verification successful. All IAM policies have propagated correctly.")
 }

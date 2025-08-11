@@ -24,3 +24,9 @@ type IStorageManager interface {
 	IManager
 	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedGCSBucket, error)
 }
+
+// IFirestoreManager defines the interface for a FirestoreManager.
+type IFirestoreManager interface {
+	IManager
+	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedFirestoreDatabase, error)
+}

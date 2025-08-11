@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"cloud.google.com/go/iam"
 	"cloud.google.com/go/storage"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/iterator"
@@ -22,7 +21,7 @@ type mockGCSBucketHandle struct {
 	createFn func(ctx context.Context, projectID string, attrs *storage.BucketAttrs) error
 	updateFn func(ctx context.Context, attrs storage.BucketAttrsToUpdate) (*storage.BucketAttrs, error)
 	deleteFn func(ctx context.Context) error
-	iamFn    func() *iam.Handle
+	// REFACTOR_NOTE: The iamFn field is removed as the IAM() method is no longer on the interface.
 }
 
 // The following methods implement the gcsBucketHandle interface for the mock.
@@ -52,13 +51,6 @@ func (m *mockGCSBucketHandle) Delete(ctx context.Context) error {
 		return m.deleteFn(ctx)
 	}
 	return errors.New("delete not implemented in mock")
-}
-
-func (m *mockGCSBucketHandle) IAM() *iam.Handle {
-	if m.iamFn != nil {
-		return m.iamFn()
-	}
-	return nil
 }
 
 // mockBucketIterator is a mock implementation of the BucketIterator for testing.
@@ -153,7 +145,7 @@ func TestToGCSBucketAttrs(t *testing.T) {
 // TestGCSBucketHandleAdapter_Update verifies the adapter's update logic.
 func TestGCSBucketHandleAdapter_Update(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	var capturedUpdateAttrs storage.BucketAttrsToUpdate
 	updateCalled := false

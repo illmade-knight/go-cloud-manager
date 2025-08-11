@@ -38,7 +38,7 @@ func NewRolePlanner(logger zerolog.Logger) *RolePlanner {
 	}
 }
 
-// PlanRolesForServiceDirector remains unchanged.
+// PlanRolesForServiceDirector plans the necessary administrative roles for the orchestrator.
 func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.MicroserviceArchitecture) ([]string, error) {
 	p.logger.Info().Str("architecture", arch.Environment.Name).Msg("Planning required IAM roles for ServiceDirector...")
 
@@ -54,20 +54,19 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 		if len(resources.BigQueryDatasets) > 0 || len(resources.BigQueryTables) > 0 {
 			requiredRoles["roles/bigquery.admin"] = struct{}{}
 		}
-
-		// If any dataflow defines application services, the ServiceDirector
-		// will be responsible for ensuring their service accounts exist. Therefore,
-		// it needs permission to create and manage service accounts.
+		if len(resources.FirestoreDatabases) > 0 {
+			// NOTE: The 'datastore.owner' role is required for the orchestrator to be
+			// able to create the Firestore database instance itself.
+			requiredRoles["roles/datastore.owner"] = struct{}{}
+		}
 		if len(dataflow.Services) > 0 {
 			requiredRoles["roles/iam.serviceAccountAdmin"] = struct{}{}
 		}
-
 		for _, service := range dataflow.Services {
 			if service.Deployment != nil && len(service.Deployment.SecretEnvironmentVars) > 0 {
 				requiredRoles["roles/secretmanager.admin"] = struct{}{}
 				break
 			}
-
 			if len(service.Dependencies) > 0 {
 				requiredRoles["roles/run.admin"] = struct{}{}
 			}
@@ -83,7 +82,7 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 	return rolesSlice, nil
 }
 
-// PlanRolesForApplicationServices This function returns a flat slice of all bindings
+// PlanRolesForApplicationServices returns a flat slice of all bindings for application services.
 func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.MicroserviceArchitecture) ([]IAMBinding, error) {
 	p.logger.Info().Str("architecture", arch.Environment.Name).Msg("Planning required IAM roles for all application services...")
 
@@ -104,7 +103,7 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	return finalPlan, nil
 }
 
-// planDataResourceLinkRoles: All planning helpers add the ServiceAccount to the binding and call the addBindingToPlan helper.
+// planDataResourceLinkRoles plans roles based on producer/consumer links for data resources.
 func (p *RolePlanner) planDataResourceLinkRoles(dataflow servicemanager.ResourceGroup, plan *[]IAMBinding, mu *sync.Mutex) {
 	for _, bucket := range dataflow.Resources.GCSBuckets {
 		for _, producer := range bucket.Producers {
@@ -136,8 +135,34 @@ func (p *RolePlanner) planDataResourceLinkRoles(dataflow servicemanager.Resource
 			}
 		}
 	}
+
+	// UPDATE: This new block adds IAM planning for Firestore. It reads the
+	// producer/consumer fields and creates the appropriate role bindings.
+	for _, db := range dataflow.Resources.FirestoreDatabases {
+		// NOTE: Unlike other resources, Firestore roles are granted at the project
+		// level, so the ResourceID for the binding is not used in the same way,
+		// but we set it for consistency in the plan.
+		const firestoreResourceID = "(default)"
+		for _, producer := range db.Producers {
+			if service, ok := dataflow.Services[producer.Name]; ok {
+				// The 'datastore.user' role grants read and write permissions.
+				binding := IAMBinding{ServiceAccount: service.ServiceAccount, ResourceType: "project",
+					ResourceID: dataflow.Services[producer.Name].Name, Role: "roles/datastore.user"}
+
+				addBindingToPlan(binding, plan, mu)
+			}
+		}
+		for _, consumer := range db.Consumers {
+			if service, ok := dataflow.Services[consumer.Name]; ok {
+				// The 'datastore.viewer' role grants read-only permissions.
+				binding := IAMBinding{ServiceAccount: service.ServiceAccount, ResourceType: "project", ResourceID: dataflow.Services[consumer.Name].Name, Role: "roles/datastore.viewer"}
+				addBindingToPlan(binding, plan, mu)
+			}
+		}
+	}
 }
 
+// planPubSubLinkRoles plans roles based on producer/consumer links for messaging.
 func (p *RolePlanner) planPubSubLinkRoles(dataflow servicemanager.ResourceGroup, plan *[]IAMBinding, mu *sync.Mutex) {
 	for _, topic := range dataflow.Resources.Topics {
 		if topic.ProducerService != nil {
@@ -164,6 +189,7 @@ func (p *RolePlanner) planPubSubLinkRoles(dataflow servicemanager.ResourceGroup,
 	}
 }
 
+// planDependencyRoles plans the 'run.invoker' role for service-to-service communication.
 func (p *RolePlanner) planDependencyRoles(arch *servicemanager.MicroserviceArchitecture, serviceName string, serviceSpec servicemanager.ServiceSpec, plan *[]IAMBinding, mu *sync.Mutex) {
 	if len(serviceSpec.Dependencies) > 0 {
 		for _, dependencyName := range serviceSpec.Dependencies {
@@ -180,6 +206,7 @@ func (p *RolePlanner) planDependencyRoles(arch *servicemanager.MicroserviceArchi
 	}
 }
 
+// planResourceUsageRoles plans roles for secrets and from explicit IAM policies.
 func (p *RolePlanner) planResourceUsageRoles(serviceName string, serviceSpec servicemanager.ServiceSpec, resources servicemanager.CloudResourcesSpec, plan *[]IAMBinding, mu *sync.Mutex) {
 	scanResourcesForExplicitPolicies(serviceName, serviceSpec.ServiceAccount, resources, plan, mu)
 
@@ -193,19 +220,53 @@ func (p *RolePlanner) planResourceUsageRoles(serviceName string, serviceSpec ser
 	}
 }
 
+// scanResourcesForExplicitPolicies processes the 'iam_access_policy' fields in the YAML.
 func scanResourcesForExplicitPolicies(serviceName, serviceAccount string, resources servicemanager.CloudResourcesSpec, plan *[]IAMBinding, mu *sync.Mutex) {
+	// Helper to reduce repetition
+	addPolicyToPlan := func(resourceType, resourceID, role string) {
+		binding := IAMBinding{ServiceAccount: serviceAccount, ResourceType: resourceType, ResourceID: resourceID, Role: role}
+		addBindingToPlan(binding, plan, mu)
+	}
+
 	for _, topic := range resources.Topics {
 		for _, policy := range topic.IAMPolicy {
 			if policy.Name == serviceName {
-				binding := IAMBinding{ServiceAccount: serviceAccount, ResourceType: "pubsub_topic", ResourceID: topic.Name, Role: policy.Role}
-				addBindingToPlan(binding, plan, mu)
+				addPolicyToPlan("pubsub_topic", topic.Name, policy.Role)
 			}
 		}
 	}
-	// ... (repeat for other resource types) ...
+
+	for _, sub := range resources.Subscriptions {
+		for _, policy := range sub.IAMPolicy {
+			if policy.Name == serviceName {
+				addPolicyToPlan("pubsub_subscription", sub.Name, policy.Role)
+			}
+		}
+	}
+	for _, bucket := range resources.GCSBuckets {
+		for _, policy := range bucket.IAMPolicy {
+			if policy.Name == serviceName {
+				addPolicyToPlan("gcs_bucket", bucket.Name, policy.Role)
+			}
+		}
+	}
+	for _, dataset := range resources.BigQueryDatasets {
+		for _, policy := range dataset.IAMPolicy {
+			if policy.Name == serviceName {
+				addPolicyToPlan("bigquery_dataset", dataset.Name, policy.Role)
+			}
+		}
+	}
+	for _, db := range resources.FirestoreDatabases {
+		for _, policy := range db.IAMPolicy {
+			if policy.Name == serviceName {
+				// Firestore IAM roles are project-level.
+				addPolicyToPlan("project", serviceName, policy.Role)
+			}
+		}
+	}
 }
 
-// REFACTOR: This helper is updated to append to a slice pointer.
 func addBindingToPlan(binding IAMBinding, plan *[]IAMBinding, mu *sync.Mutex) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -213,7 +274,6 @@ func addBindingToPlan(binding IAMBinding, plan *[]IAMBinding, mu *sync.Mutex) {
 }
 
 func findServiceRegion(arch *servicemanager.MicroserviceArchitecture, serviceName string) string {
-	// ... (implementation is unchanged) ...
 	if arch.ServiceManagerSpec.Name == serviceName && arch.ServiceManagerSpec.Deployment != nil {
 		if arch.ServiceManagerSpec.Deployment.Region != "" {
 			return arch.ServiceManagerSpec.Deployment.Region

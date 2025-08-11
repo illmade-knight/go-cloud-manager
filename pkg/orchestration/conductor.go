@@ -117,7 +117,7 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	if !c.options.SetupIAM {
 		return nil
 	}
-	c.logger.Info().Msg("Executing Phase 1: Setting up all service accounts...")
+	c.logger.Info().Msg("Executing Phase 1: Setting up all service accounts and project-level IAM...")
 	sdSaEmails, err := c.iamOrch.SetupServiceDirectorIAM(ctx)
 	if err != nil {
 		return err
@@ -125,17 +125,22 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	for k, v := range sdSaEmails {
 		c.serviceAccountEmails[k] = v
 	}
+
 	var allAppSaEmails []string
+	var allDataflowEmails = make(map[string]map[string]string)
+
 	for dataflowName := range c.arch.Dataflows {
 		dfSaEmails, err := c.iamOrch.EnsureDataflowSAsExist(ctx, dataflowName)
 		if err != nil {
 			return fmt.Errorf("failed during SA setup for dataflow '%s': %w", dataflowName, err)
 		}
+		allDataflowEmails[dataflowName] = dfSaEmails
 		for k, v := range dfSaEmails {
 			c.serviceAccountEmails[k] = v
 			allAppSaEmails = append(allAppSaEmails, v)
 		}
 	}
+
 	c.logger.Info().Int("count", len(allAppSaEmails)).Msg("Verifying propagation of newly created service accounts...")
 	for _, email := range allAppSaEmails {
 		err := c.iamOrch.PollForSAExistence(ctx, email, c.options.SAPollTimeout)
@@ -143,7 +148,18 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 			return fmt.Errorf("failed while waiting for SA '%s' to propagate: %w", email, err)
 		}
 	}
-	c.logger.Info().Msg("Phase 1: All service accounts are created and have propagated.")
+	c.logger.Info().Msg("All service accounts have propagated.")
+
+	// NEW_CODE: After SAs exist, apply the project-level IAM roles for them.
+	c.logger.Info().Msg("Applying project-level IAM roles for dataflows...")
+	for dataflowName, saEmails := range allDataflowEmails {
+		err := c.iamOrch.ApplyProjectLevelIAMForDataflow(ctx, dataflowName, saEmails)
+		if err != nil {
+			return fmt.Errorf("failed during project-level IAM setup for dataflow '%s': %w", dataflowName, err)
+		}
+	}
+
+	c.logger.Info().Msg("Phase 1: All service accounts and project-level IAM are set up.")
 	return nil
 }
 

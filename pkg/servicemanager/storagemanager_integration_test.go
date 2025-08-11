@@ -3,16 +3,17 @@
 package servicemanager_test
 
 import (
-	"cloud.google.com/go/storage"
 	"context"
+	"testing"
+	"time"
+
+	"cloud.google.com/go/storage"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
-	"time"
 )
 
 // TestStorageManager_Integration tests the manager against a live GCS emulator,

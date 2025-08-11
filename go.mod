@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/artifactregistry v1.17.1
 	cloud.google.com/go/bigquery v1.69.0
 	cloud.google.com/go/cloudbuild v1.22.3
+	cloud.google.com/go/firestore v1.18.0
 	cloud.google.com/go/iam v1.5.2
 	cloud.google.com/go/longrunning v0.6.7
 	cloud.google.com/go/monitoring v1.24.2

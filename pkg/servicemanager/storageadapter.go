@@ -1,8 +1,8 @@
 package servicemanager
 
 import (
-	"cloud.google.com/go/iam"
 	"context"
+
 	"google.golang.org/api/iterator" // For the Done error
 )
 
@@ -32,7 +32,9 @@ type StorageBucketHandle interface {
 	Create(ctx context.Context, projectID string, attrs *BucketAttributes) error
 	Update(ctx context.Context, attrs BucketAttributesToUpdate) (*BucketAttributes, error)
 	Delete(ctx context.Context) error
-	IAM() *iam.Handle // Note: This is GCS-specific and would need abstraction for other providers.
+	// REFACTOR_NOTE: The IAM() method has been removed. This is the key change
+	// in our refactoring to centralize all IAM logic within the `iam` package,
+	// making the `servicemanager` responsible only for resource lifecycle.
 }
 
 // BucketIterator defines a generic interface for iterating over storage buckets.

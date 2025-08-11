@@ -61,6 +61,7 @@ type GoogleIAMClient struct {
 	storageClient          *storage.Client
 	secretsClient          *secretmanager.Client
 	runService             *run.Service
+	projectIAMClient       *GoogleIAMProjectClient
 	artifactRegistryClient *artifactregistry.Client
 }
 
@@ -98,6 +99,10 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 	if err != nil {
 		return nil, fmt.Errorf("failed to create artifactregistry client: %w", err)
 	}
+	gipClient, err := NewGoogleIAMProjectClient(ctx, projectID, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Google IAM project client: %w", err)
+	}
 	return &GoogleIAMClient{
 		projectID:              projectID,
 		iamAdminClient:         adminClient,
@@ -107,6 +112,7 @@ func NewGoogleIAMClient(ctx context.Context, projectID string, opts ...option.Cl
 		secretsClient:          secretsClient,
 		runService:             runService,
 		artifactRegistryClient: arClient,
+		projectIAMClient:       gipClient,
 	}, nil
 }
 
@@ -156,6 +162,8 @@ func (c *GoogleIAMClient) GetServiceAccount(ctx context.Context, accountEmail st
 func (c *GoogleIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBinding) error {
 	var handle iamHandle
 	switch binding.ResourceType {
+	case "project":
+		return nil
 	case "pubsub_topic":
 		handle = c.pubsubClient.Topic(binding.ResourceID).IAM()
 	case "pubsub_subscription":
@@ -284,9 +292,27 @@ func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding I
 	for i := 0; i < maxRetries; i++ {
 		var policy *iam.Policy
 		var err error
+		var found bool // Used for cases that don't return a policy object.
 		switch binding.ResourceType {
+		case "project":
+			found, err = c.projectIAMClient.CheckProjectIAMBinding(ctx, member, binding.Role)
+			if err == nil {
+				return found, nil // Return immediately on success.
+			}
+		case "secret":
+			resourceName := fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID)
+			rawPolicy, getErr := c.secretsClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
+			if getErr != nil {
+				err = getErr // Assign to the outer err variable to be handled by the retry loop.
+			} else {
+				// If we got the policy, wrap it in the helper type.
+				policy = &iam.Policy{InternalProto: rawPolicy}
+			}
 		case "bigquery_dataset":
-			return c.bigqueryAdminClient.CheckDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+			found, err = c.bigqueryAdminClient.CheckDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
+			if err == nil {
+				return found, nil // Return immediately on success.
+			}
 		case "bigquery_table":
 			ids := strings.Split(binding.ResourceID, ":")
 			if len(ids) != 2 {

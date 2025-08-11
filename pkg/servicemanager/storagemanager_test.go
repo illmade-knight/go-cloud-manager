@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"cloud.google.com/go/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -37,13 +36,9 @@ func (m *MockStorageBucketHandle) Update(ctx context.Context, attrs servicemanag
 func (m *MockStorageBucketHandle) Delete(ctx context.Context) error {
 	return m.Called(ctx).Error(0)
 }
-func (m *MockStorageBucketHandle) IAM() *iam.Handle {
-	args := m.Called()
-	if args.Get(0) == nil {
-		return nil
-	}
-	return args.Get(0).(*iam.Handle)
-}
+
+// REFACTOR_NOTE: The mock IAM() method has been removed to match the updated interface.
+// func (m *MockStorageBucketHandle) IAM() *iam.Handle { ... }
 
 type MockStorageClient struct{ mock.Mock }
 
@@ -95,7 +90,7 @@ func TestNewStorageManager(t *testing.T) {
 func TestStorageManager_CreateResources(t *testing.T) {
 	t.Run("Success - Create New", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
@@ -118,7 +113,7 @@ func TestStorageManager_CreateResources(t *testing.T) {
 
 	t.Run("Success - Update Existing", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
@@ -141,7 +136,7 @@ func TestStorageManager_CreateResources(t *testing.T) {
 
 	t.Run("Partial Failure - One Fails to Create", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 		createErr := errors.New("invalid bucket name")
@@ -169,7 +164,7 @@ func TestStorageManager_CreateResources(t *testing.T) {
 func TestStorageManager_Teardown(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
@@ -191,7 +186,7 @@ func TestStorageManager_Teardown(t *testing.T) {
 
 	t.Run("Teardown Protection Enabled", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 		resources.GCSBuckets[0].TeardownProtection = true
@@ -210,7 +205,7 @@ func TestStorageManager_Teardown(t *testing.T) {
 
 	t.Run("Failure - Bucket Not Empty", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 		notEmptyErr := errors.New("googleapi: Error 409: The bucket you tried to delete is not empty")
@@ -236,7 +231,7 @@ func TestStorageManager_Teardown(t *testing.T) {
 func TestStorageManager_Verify(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 
@@ -256,7 +251,7 @@ func TestStorageManager_Verify(t *testing.T) {
 
 	t.Run("Failure - One Bucket Missing", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-		defer cancel()
+		t.Cleanup(cancel)
 		manager, mockClient := setupStorageManagerTest(t)
 		resources := getTestStorageResources()
 

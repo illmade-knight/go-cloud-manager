@@ -3,17 +3,18 @@
 package servicemanager_test
 
 import (
-	"cloud.google.com/go/bigquery"
 	"context"
 	"fmt"
+	"testing"
+	"time"
+
+	"cloud.google.com/go/bigquery"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
-	"time"
 )
 
 // TestBigQueryManager_Integration tests the manager's full lifecycle (Create, Verify, Teardown)
@@ -21,7 +22,10 @@ import (
 func TestBigQueryManager_Integration(t *testing.T) {
 	// --- ARRANGE: Set up context, configuration, and clients ---
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	// REFACTOR_NOTE: Using t.Cleanup ensures that the context's cancel function is
+	// called automatically when the test (and all its subtests) completes. This is
+	// more robust than using a defer statement.
+	t.Cleanup(cancel)
 
 	projectID := "bq-it-project"
 	runID := uuid.New().String()[:8]

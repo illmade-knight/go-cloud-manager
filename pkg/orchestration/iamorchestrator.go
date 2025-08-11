@@ -23,7 +23,7 @@ type IAMOrchestrator struct {
 	arch                        *servicemanager.MicroserviceArchitecture
 	logger                      zerolog.Logger
 	iamClient                   iam.IAMClient
-	iamProjectManager           *iam.IAMProjectManager
+	iamProjectManager           *iam.GoogleIAMProjectClient
 	planner                     *iam.RolePlanner
 	createdServiceAccountEmails []string
 }
@@ -46,7 +46,7 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 		return nil, fmt.Errorf("failed to create iamClient for orchestrator: %w", err)
 	}
 
-	iamProjectManager, err := iam.NewIAMProjectManager(ctx, arch.ProjectID, clientOpts...)
+	iamProjectManager, err := iam.NewGoogleIAMProjectClient(ctx, arch.ProjectID, clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iam project manager: %w", err)
 	}
@@ -110,6 +110,57 @@ func (o *IAMOrchestrator) PollForSAExistence(ctx context.Context, accountEmail s
 			o.logger.Debug().Str("email", accountEmail).Msg("SA not yet propagated, still waiting...")
 		}
 	}
+}
+
+// ApplyProjectLevelIAMForDataflow plans and applies all project-level IAM roles for a dataflow.
+func (o *IAMOrchestrator) ApplyProjectLevelIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Planning and applying project-level IAM roles.")
+
+	iamPlan, err := o.planner.PlanRolesForApplicationServices(o.arch)
+	if err != nil {
+		return fmt.Errorf("failed to generate IAM plan for dataflow '%s': %w", dataflowName, err)
+	}
+
+	// Filter for only project-level bindings.
+	var projectBindings []iam.IAMBinding
+	for _, binding := range iamPlan {
+		if binding.ResourceType == "project" {
+			projectBindings = append(projectBindings, binding)
+		}
+	}
+
+	if len(projectBindings) == 0 {
+		o.logger.Info().Str("dataflow", dataflowName).Msg("No project-level IAM bindings to apply.")
+		return nil
+	}
+
+	// Get the logical-name-to-email mapping for all SAs in the dataflow.
+	dataflow, _ := o.arch.Dataflows[dataflowName]
+	logicalNameToEmail := make(map[string]string)
+	for serviceName, serviceSpec := range dataflow.Services {
+		email, ok := saEmails[serviceName]
+		if !ok {
+			return fmt.Errorf("consistency error: could not find email for service '%s' needed for IAM binding", serviceName)
+		}
+		logicalNameToEmail[serviceSpec.ServiceAccount] = email
+	}
+
+	// Apply each project-level binding.
+	for _, binding := range projectBindings {
+		saEmail, ok := logicalNameToEmail[binding.ServiceAccount]
+		if !ok {
+			return fmt.Errorf("could not find service account email for logical SA name '%s'", binding.ServiceAccount)
+		}
+		member := "serviceAccount:" + saEmail
+		o.logger.Info().Str("member", member).Str("role", binding.Role).Msg("Applying project-level IAM role")
+		err := o.iamProjectManager.GrantFirestoreProjectRole(ctx, member, binding.Role)
+		if err != nil {
+			return err
+		}
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Successfully applied project-level IAM roles.")
+	return nil
 }
 
 // VerifyIAMForDataflow polls IAM policies until they reflect the planned state.

@@ -172,11 +172,13 @@ type CloudResource struct {
 
 // CloudResourcesSpec is a container for all the cloud resources defined in a ResourceGroup.
 type CloudResourcesSpec struct {
-	Topics           []TopicConfig        `yaml:"topics"`
-	Subscriptions    []SubscriptionConfig `yaml:"subscriptions"`
-	BigQueryDatasets []BigQueryDataset    `yaml:"bigquery_datasets"`
-	BigQueryTables   []BigQueryTable      `yaml:"bigquery_tables"`
-	GCSBuckets       []GCSBucket          `yaml:"gcs_buckets"`
+	Topics               []TopicConfig         `yaml:"topics"`
+	Subscriptions        []SubscriptionConfig  `yaml:"subscriptions"`
+	BigQueryDatasets     []BigQueryDataset     `yaml:"bigquery_datasets"`
+	BigQueryTables       []BigQueryTable       `yaml:"bigquery_tables"`
+	GCSBuckets           []GCSBucket           `yaml:"gcs_buckets"`
+	FirestoreDatabases   []FirestoreDatabase   `yaml:"firestore_databases,omitempty"`
+	FirestoreCollections []FirestoreCollection `yaml:"firestore_collections,omitempty"`
 }
 
 // TopicConfig defines the configuration for a Pub/Sub topic.
@@ -221,41 +223,6 @@ type BigQueryDataset struct {
 	CloudResource `yaml:",inline"`
 	// Location is the geographic location of the dataset (e.g., "US", "EU").
 	Location string `yaml:"location,omitempty"`
-}
-
-// BigQueryTable defines the configuration for a BigQuery table.
-type BigQueryTable struct {
-	CloudResource `yaml:",inline"`
-	Consumers     []ServiceMapping `yaml:"consumers,omitempty"`
-	Producers     []ServiceMapping `yaml:"producers,omitempty"`
-	// Dataset is the name of the parent BigQuery dataset.
-	Dataset string `yaml:"dataset"`
-	// SchemaType is a key that maps to a Go struct registered with the ServiceManager.
-	// The manager uses this to infer the table schema.
-	SchemaType string `yaml:"schema_type"`
-	// SchemaImportPath is a reserved field for future reflection-based schema lookups.
-	SchemaImportPath string `yaml:"schema_import_path"`
-	// TimePartitioningField is the column used to partition the table by time.
-	TimePartitioningField string `yaml:"time_partitioning_field,omitempty"`
-	// TimePartitioningType is the granularity of the time partitioning (e.g., "DAY", "HOUR").
-	TimePartitioningType string `yaml:"time_partitioning_type,omitempty"`
-	// ClusteringFields are the columns used to cluster data within partitions for faster queries.
-	ClusteringFields []string `yaml:"clustering_fields,omitempty"`
-	// Expiration defines how long the table's data is kept. (e.g., "90d").
-	Expiration Duration `yaml:"expiration,omitempty"`
-}
-
-// GCSBucket defines the configuration for a Google Cloud Storage bucket.
-type GCSBucket struct {
-	CloudResource `yaml:",inline"`
-	Consumers     []ServiceMapping `yaml:"consumers,omitempty"`
-	Producers     []ServiceMapping `yaml:"consumers,omitempty"`
-	// Location is the geographic location of the bucket (e.g., "US-CENTRAL1").
-	Location string `yaml:"location,omitempty"`
-	// StorageClass is the default storage class for objects in the bucket (e.g., "STANDARD", "NEARLINE").
-	StorageClass string `yaml:"storage_class,omitempty"`
-	// VersioningEnabled, if true, keeps a history of objects in the bucket.
-	VersioningEnabled bool `yaml:"versioning_enabled,omitempty"`
 }
 
 // LifecycleRule combines an action and a condition for resource lifecycle management (e.g., GCS objects).
@@ -323,11 +290,12 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // ProvisionedResources contains details of all resources created by a setup operation.
 // This struct is used to pass information between resource creation and IAM policy application steps.
 type ProvisionedResources struct {
-	Topics           []ProvisionedTopic
-	Subscriptions    []ProvisionedSubscription
-	GCSBuckets       []ProvisionedGCSBucket
-	BigQueryDatasets []ProvisionedBigQueryDataset
-	BigQueryTables   []ProvisionedBigQueryTable
+	Topics             []ProvisionedTopic
+	Subscriptions      []ProvisionedSubscription
+	GCSBuckets         []ProvisionedGCSBucket
+	BigQueryDatasets   []ProvisionedBigQueryDataset
+	BigQueryTables     []ProvisionedBigQueryTable
+	FirestoreDatabases []ProvisionedFirestoreDatabase
 }
 
 // ProvisionedTopic holds details of a created topic.
@@ -356,4 +324,88 @@ type ProvisionedBigQueryDataset struct {
 type ProvisionedBigQueryTable struct {
 	Dataset string
 	Name    string
+}
+
+// ProvisionedFirestoreDatabase holds details of a created Firestore database.
+type ProvisionedFirestoreDatabase struct {
+	Name string
+}
+
+// FirestoreDatabaseType defines the mode of the Firestore database.
+type FirestoreDatabaseType string
+
+const (
+	// FirestoreModeNative is the standard, recommended Firestore mode.
+	FirestoreModeNative FirestoreDatabaseType = "NATIVE"
+	// FirestoreModeDatastore is the Datastore compatibility mode for legacy applications.
+	FirestoreModeDatastore FirestoreDatabaseType = "DATASTORE_MODE"
+)
+
+type BigQueryTable struct {
+	CloudResource `yaml:",inline"`
+	// Consumers lists the services that read from this table.
+	// IAM: This implicitly grants the service account the 'roles/bigquery.dataViewer' role.
+	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	// Producers lists the services that write to this table.
+	// IAM: This implicitly grants the service account the 'roles/bigquery.dataEditor' role.
+	Producers []ServiceMapping `yaml:"producers,omitempty"`
+	// Dataset is the name of the parent BigQuery dataset.
+	Dataset string `yaml:"dataset"`
+	// SchemaType is a key that maps to a Go struct registered with the ServiceManager.
+	// The manager uses this to infer the table schema.
+	SchemaType string `yaml:"schema_type"`
+	// SchemaImportPath is a reserved field for future reflection-based schema lookups.
+	SchemaImportPath string `yaml:"schema_import_path"`
+	// TimePartitioningField is the column used to partition the table by time.
+	TimePartitioningField string `yaml:"time_partitioning_field,omitempty"`
+	// TimePartitioningType is the granularity of the time partitioning (e.g., "DAY", "HOUR").
+	TimePartitioningType string `yaml:"time_partitioning_type,omitempty"`
+	// ClusteringFields are the columns used to cluster data within partitions for faster queries.
+	ClusteringFields []string `yaml:"clustering_fields,omitempty"`
+	// Expiration defines how long the table's data is kept. (e.g., "90d").
+	Expiration Duration `yaml:"expiration,omitempty"`
+}
+
+// GCSBucket defines the configuration for a Google Cloud Storage bucket.
+type GCSBucket struct {
+	CloudResource `yaml:",inline"`
+	// Consumers lists the services that read from this bucket.
+	// IAM: This implicitly grants the service account the 'roles/storage.objectViewer' role.
+	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	// Producers lists the services that write to this bucket.
+	// IAM: This implicitly grants the service account the 'roles/storage.objectAdmin' role.
+	Producers []ServiceMapping `yaml:"producers,omitempty"`
+	// Location is the geographic location of the bucket (e.g., "US-CENTRAL1").
+	Location string `yaml:"location,omitempty"`
+	// StorageClass is the default storage class for objects in the bucket (e.g., "STANDARD", "NEARLINE").
+	StorageClass string `yaml:"storage_class,omitempty"`
+	// VersioningEnabled, if true, keeps a history of objects in the bucket.
+	VersioningEnabled bool `yaml:"versioning_enabled,omitempty"`
+}
+
+// FirestoreDatabase defines the configuration for a Cloud Firestore database.
+type FirestoreDatabase struct {
+	CloudResource `yaml:",inline"`
+	// LocationID specifies the multi-region or region for the database (e.g., "eur3", "nam5").
+	LocationID string `yaml:"location_id"`
+	// Type specifies the database mode, either NATIVE or DATASTORE_MODE.
+	Type FirestoreDatabaseType `yaml:"type"`
+	// Consumers lists the services that read from this database.
+	// IAM: This implicitly grants the service account the 'roles/datastore.viewer' role.
+	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	// Producers lists the services that write to this database.
+	// IAM: This implicitly grants the service account the 'roles/datastore.user' role.
+	Producers []ServiceMapping `yaml:"producers,omitempty"`
+}
+
+type FirestoreCollection struct {
+	CloudResource `yaml:",inline"`
+	// Consumers lists the services that read from this collection.
+	// IAM: collections do not have IAM so this is used for Hydration etc
+	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	// Producers lists the services that write to this collection.
+	// IAM: collections do not have IAM so this is used for Hydration etc
+	Producers []ServiceMapping `yaml:"producers,omitempty"`
+	// FirestoreDatabase is the name of the parent Firestore database.
+	FirestoreDatabase string `yaml:"database"`
 }

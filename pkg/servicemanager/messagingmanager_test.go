@@ -238,6 +238,7 @@ func TestMessagingManager_Teardown_PartialFailure(t *testing.T) {
 	err := manager.Teardown(ctx, resources)
 
 	// Assert
+	assert.NotNil(t, err)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete topic test-topic-1")
 	assert.Contains(t, err.Error(), deleteErr.Error())

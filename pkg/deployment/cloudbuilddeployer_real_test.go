@@ -60,8 +60,8 @@ func ensureCloudBuildPermissions(t *testing.T, ctx context.Context, projectID st
 		"roles/iam.serviceAccountUser",
 	}
 
-	// 3. Use the IAMProjectManager to grant the roles.
-	projectManager, err := iam.NewIAMProjectManager(ctx, projectID)
+	// 3. Use the GoogleIAMProjectClient to grant the roles.
+	projectManager, err := iam.NewGoogleIAMProjectClient(ctx, projectID)
 	require.NoError(t, err)
 	defer func() {
 		_ = projectManager.Close()

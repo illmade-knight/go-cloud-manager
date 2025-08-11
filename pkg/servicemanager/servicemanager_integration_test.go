@@ -28,13 +28,14 @@ func init() {
 // to set up and tear down an entire architecture against live emulators.
 func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 	// --- ARRANGE: Set up context, configuration, and clients ---
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	t.Cleanup(cancel)
 
 	projectID := "sm-it-project"
 	runID := uuid.New().String()[:8]
 	df1Topic := fmt.Sprintf("df1-topic-%s", runID)
 	df1Bucket := fmt.Sprintf("df1-bucket-%s", runID)
+	df1Firestore := fmt.Sprintf("df1-db-%s", runID)
 	df2Dataset := fmt.Sprintf("df2_dataset_%s", runID)
 	df2Table := fmt.Sprintf("df2_table_%s", runID)
 
@@ -47,6 +48,12 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics:     []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: df1Topic}}},
 					GCSBuckets: []servicemanager.GCSBucket{{CloudResource: servicemanager.CloudResource{Name: df1Bucket}, Location: "US"}},
+					// NEW_CODE: Added a Firestore database to the ephemeral dataflow.
+					FirestoreDatabases: []servicemanager.FirestoreDatabase{{
+						CloudResource: servicemanager.CloudResource{Name: df1Firestore},
+						LocationID:    "nam5",
+						Type:          servicemanager.FirestoreModeNative,
+					}},
 				},
 			},
 			"reporting-pipeline": {
@@ -65,24 +72,36 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 	}
 
 	t.Log("Setting up emulators...")
+	// GCS
 	gcsConfig := emulators.GetDefaultGCSConfig(projectID, "")
 	gcsConnection := emulators.SetupGCSEmulator(t, ctx, gcsConfig)
 	gcsClient, err := servicemanager.CreateGoogleGCSClient(ctx, gcsConnection.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = gcsClient.Close() })
 
+	// Pub/Sub
 	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
 	psClient, err := servicemanager.CreateGoogleMessagingClient(ctx, projectID, psConnection.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
 
+	// BigQuery
 	bqConnection := emulators.SetupBigQueryEmulator(t, ctx, emulators.GetDefaultBigQueryConfig(projectID, nil, nil))
 	bqClient, err := servicemanager.CreateGoogleBigQueryClient(ctx, projectID, bqConnection.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bqClient.Close() })
 
+	// NEW_CODE: Setup Firestore emulator and its client.
+	fsConfig := emulators.GetDefaultFirestoreConfig(projectID)
+	fsConnection := emulators.SetupFirestoreEmulator(t, ctx, fsConfig)
+	fsTestAdapter := &firestoreEmulatorClientAdapter{
+		projectID: projectID,
+		opts:      fsConnection.ClientOptions,
+	}
+
 	logger := zerolog.New(zerolog.NewConsoleWriter())
-	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, arch.Environment, nil, logger)
+	// NEW_CODE: Pass the new Firestore test adapter to the ServiceManager constructor.
+	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, fsTestAdapter, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
 	// --- ACT & ASSERT: Execute and verify each lifecycle phase ---
@@ -96,19 +115,15 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 		assert.Len(t, provisioned.GCSBuckets, 1)
 		assert.Len(t, provisioned.BigQueryDatasets, 1)
 		assert.Len(t, provisioned.BigQueryTables, 1)
+		assert.Len(t, provisioned.FirestoreDatabases, 1) // NEW_CODE: Verify Firestore DB was provisioned.
 		t.Log("--- SetupAll finished successfully ---")
 
 		t.Log("--- Verifying resource existence in emulators ---")
-		_, err = gcsClient.Bucket(df1Bucket).Attrs(ctx)
-		assert.NoError(t, err, "Ephemeral GCS bucket should exist after setup")
-		topicExists, err := psClient.Topic(df1Topic).Exists(ctx)
-		assert.NoError(t, err)
-		assert.True(t, topicExists, "Ephemeral Pub/Sub topic should exist after setup")
+		err = sm.VerifyDataflow(ctx, arch, "telemetry-pipeline")
+		assert.NoError(t, err, "Ephemeral dataflow resources should exist after setup")
+		err = sm.VerifyDataflow(ctx, arch, "reporting-pipeline")
+		assert.NoError(t, err, "Permanent dataflow resources should exist after setup")
 
-		_, err = bqClient.Dataset(df2Dataset).Metadata(ctx)
-		assert.NoError(t, err, "Permanent BigQuery dataset should exist after setup")
-		_, err = bqClient.Dataset(df2Dataset).Table(df2Table).Metadata(ctx)
-		assert.NoError(t, err, "Permanent BigQuery table should exist after setup")
 		t.Log("--- Verification successful, all resources exist ---")
 	})
 
@@ -119,18 +134,18 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 		t.Log("--- TeardownAll finished successfully ---")
 
 		t.Log("--- Verifying resource state after teardown ---")
-		// Verify Dataflow 1 (ephemeral) resources are DELETED
-		_, err := gcsClient.Bucket(df1Bucket).Attrs(ctx)
-		assert.Error(t, err, "Ephemeral GCS bucket should NOT exist after teardown")
-		topicExists, err := psClient.Topic(df1Topic).Exists(ctx)
-		assert.NoError(t, err)
-		assert.False(t, topicExists, "Ephemeral Pub/Sub topic should NOT exist after teardown")
+		// Verify Dataflow 1 (ephemeral) resources are DELETED (or skipped in Firestore's case)
+		err := sm.VerifyDataflow(ctx, arch, "telemetry-pipeline")
+		// Expect an error because GCS and Pub/Sub resources were deleted.
+		// The Firestore verification will pass because its teardown is a no-op.
+		assert.Error(t, err, "Ephemeral dataflow verification should fail after teardown")
+		assert.Contains(t, err.Error(), "bucket 'df1-bucket-s' not found", "Expected GCS bucket to be deleted") // Check a substring of the bucket name
+		assert.Contains(t, err.Error(), "topic 'df1-topic' not found", "Expected Topic to be deleted")
+		assert.NotContains(t, err.Error(), "firestore", "Firestore verification should not fail")
 
 		// Verify Dataflow 2 (permanent) resources STILL EXIST
-		_, err = bqClient.Dataset(df2Dataset).Metadata(ctx)
+		err = sm.VerifyDataflow(ctx, arch, "reporting-pipeline")
 		assert.NoError(t, err, "Permanent BigQuery dataset SHOULD STILL exist after teardown")
-		_, err = bqClient.Dataset(df2Dataset).Table(df2Table).Metadata(ctx)
-		assert.NoError(t, err, "Permanent BigQuery table SHOULD STILL exist after teardown")
 		t.Log("--- Deletion verification successful ---")
 	})
 }

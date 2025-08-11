@@ -16,7 +16,8 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo string
 	if arch == nil {
 		return errors.New("cannot hydrate a nil architecture")
 	}
-	if err := arch.Validate(); err != nil {
+	err := arch.Validate()
+	if err != nil {
 		return fmt.Errorf("architecture validation failed: %w", err)
 	}
 
@@ -43,7 +44,8 @@ func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, r
 	if arch == nil {
 		return nil, errors.New("cannot hydrate a nil architecture")
 	}
-	if err := arch.Validate(); err != nil {
+	err := arch.Validate()
+	if err != nil {
 		return nil, fmt.Errorf("architecture validation failed: %w", err)
 	}
 
@@ -157,6 +159,19 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 			for _, consumer := range bucket.Consumers {
 				if service, ok := dataflow.Services[consumer.Name]; ok {
 					injectEnvVar(service.Deployment, consumer.Env, bucket.Name, "READ_BUCKET")
+				}
+			}
+		}
+		// NEW_CODE: Add hydration for Firestore collections.
+		for _, collection := range dataflow.Resources.FirestoreCollections {
+			for _, producer := range collection.Producers {
+				if service, ok := dataflow.Services[producer.Name]; ok {
+					injectEnvVar(service.Deployment, producer.Env, collection.Name, "WRITE_COLLECTION")
+				}
+			}
+			for _, consumer := range collection.Consumers {
+				if service, ok := dataflow.Services[consumer.Name]; ok {
+					injectEnvVar(service.Deployment, consumer.Env, collection.Name, "READ_COLLECTION")
 				}
 			}
 		}

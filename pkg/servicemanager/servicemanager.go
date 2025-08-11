@@ -71,7 +71,7 @@ func verifySchemaRegistry(tables []BigQueryTable) error {
 		if table.SchemaType != "" {
 			_, ok := registeredSchemas[table.SchemaType]
 			if !ok {
-				return fmt.Errorf("unknown schema type '%s' for table '%s'. Is it registered via an init() function?", table.SchemaType, table.Name)
+				return fmt.Errorf("unknown schema type '%s' for table '%s'. Is it registered via an init() function", table.SchemaType, table.Name)
 			}
 		}
 	}
@@ -85,6 +85,8 @@ const (
 	MessagingResourceType ResourceType = "messaging"
 	StorageResourceType   ResourceType = "storage"
 	BigQueryResourceType  ResourceType = "bigquery"
+	// NEW_CODE: Adding a resource type for the new Firestore manager.
+	FirestoreResourceType ResourceType = "firestore"
 )
 
 // ServiceManager coordinates all resource-specific operations by delegating to specialized managers.
@@ -105,7 +107,8 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 		managers: make(map[ResourceType]IManager),
 	}
 
-	needsMessaging, needsStorage, needsBigQuery := scanArchitectureForResources(arch)
+	// NEW_CODE: Updated to scan for Firestore resources as well.
+	needsMessaging, needsStorage, needsBigQuery, needsFirestore := scanArchitectureForResources(arch)
 	var err error
 
 	if needsMessaging {
@@ -147,12 +150,27 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 		}
 	}
 
+	// NEW_CODE: If Firestore resources are defined in the config, initialize the FirestoreManager.
+	if needsFirestore {
+		sm.logger.Info().Msg("Firestore resources found, initializing FirestoreManager.")
+		var firestoreClient DocumentStoreClient
+		firestoreClient, err = CreateGoogleFirestoreClient(ctx, arch.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		sm.managers[FirestoreResourceType], err = NewFirestoreManager(firestoreClient, logger, arch.Environment)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return sm, nil
 }
 
 // NewServiceManagerFromClients creates a ServiceManager with pre-configured clients.
 // This constructor is primarily used for testing with mocks or emulators.
-func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, environment Environment, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+// NEW_CODE: Added the Firestore client (dsc) to the signature.
+func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, dsc DocumentStoreClient, environment Environment, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	sm := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
 		writer:   writer,
@@ -178,13 +196,21 @@ func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQCli
 			return nil, fmt.Errorf("failed to create BigQuery manager from client: %w", err)
 		}
 	}
+	// NEW_CODE: Add Firestore manager from its client.
+	if dsc != nil {
+		sm.managers[FirestoreResourceType], err = NewFirestoreManager(dsc, logger, environment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Firestore manager from client: %w", err)
+		}
+	}
 
 	return sm, nil
 }
 
 // NewServiceManagerFromManagers creates a ServiceManager with pre-configured manager instances.
 // This constructor is primarily used for unit testing the ServiceManager's orchestration logic.
-func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+// NEW_CODE: Added the Firestore manager (fsm) to the signature.
+func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, fsm IFirestoreManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	svcMgr := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
 		writer:   writer,
@@ -198,6 +224,10 @@ func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm
 	}
 	if bqm != nil {
 		svcMgr.managers[BigQueryResourceType] = bqm
+	}
+	// NEW_CODE: Add the Firestore manager instance.
+	if fsm != nil {
+		svcMgr.managers[FirestoreResourceType] = fsm
 	}
 	return svcMgr, nil
 }
@@ -268,6 +298,22 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 			mu.Lock()
 			provisioned.BigQueryTables = provTables
 			provisioned.BigQueryDatasets = provDatasets
+			mu.Unlock()
+		}()
+	}
+
+	// NEW_CODE: Concurrently create Firestore resources if the manager exists.
+	if mgr, ok := sm.managers[FirestoreResourceType]; ok {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			provDBs, err := mgr.(IFirestoreManager).CreateResources(ctx, targetDataflow.Resources)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			mu.Lock()
+			provisioned.FirestoreDatabases = provDBs
 			mu.Unlock()
 		}()
 	}
@@ -354,12 +400,14 @@ func (sm *ServiceManager) SetupAll(ctx context.Context, arch *MicroserviceArchit
 				errChan <- fmt.Errorf("failed to setup dataflow '%s': %w", name, err)
 				return
 			}
+			// NEW_CODE: Aggregate provisioned Firestore databases.
 			mu.Lock()
 			allProvResources.Topics = append(allProvResources.Topics, provRes.Topics...)
 			allProvResources.Subscriptions = append(allProvResources.Subscriptions, provRes.Subscriptions...)
 			allProvResources.GCSBuckets = append(allProvResources.GCSBuckets, provRes.GCSBuckets...)
 			allProvResources.BigQueryDatasets = append(allProvResources.BigQueryDatasets, provRes.BigQueryDatasets...)
 			allProvResources.BigQueryTables = append(allProvResources.BigQueryTables, provRes.BigQueryTables...)
+			allProvResources.FirestoreDatabases = append(allProvResources.FirestoreDatabases, provRes.FirestoreDatabases...)
 			mu.Unlock()
 		}(dfName)
 	}
@@ -402,7 +450,8 @@ func (sm *ServiceManager) TeardownAll(ctx context.Context, arch *MicroserviceArc
 
 // scanArchitectureForResources is a helper that inspects the entire architecture to see
 // which types of resources are present, so that only the necessary sub-managers are initialized.
-func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessaging bool, needsStorage bool, needsBigQuery bool) {
+// NEW_CODE: The function now returns a boolean indicating if Firestore resources are present.
+func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessaging bool, needsStorage bool, needsBigQuery bool, needsFirestore bool) {
 	for _, df := range arch.Dataflows {
 		if len(df.Resources.Topics) > 0 || len(df.Resources.Subscriptions) > 0 {
 			needsMessaging = true
@@ -412,6 +461,10 @@ func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessagin
 		}
 		if len(df.Resources.BigQueryDatasets) > 0 || len(df.Resources.BigQueryTables) > 0 {
 			needsBigQuery = true
+		}
+		// NEW_CODE: Check for Firestore database definitions.
+		if len(df.Resources.FirestoreDatabases) > 0 {
+			needsFirestore = true
 		}
 	}
 	return
