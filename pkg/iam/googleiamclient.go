@@ -148,7 +148,11 @@ func (c *GoogleIAMClient) GetServiceAccount(ctx context.Context, accountEmail st
 	return err
 }
 
-// ApplyIAMPolicy sets the complete IAM policy for a resource, replacing any existing policy.
+// ApplyIAMPolicy sets the IAM policy for a resource.
+// For most resources, this atomically REPLACES the entire policy with the provided one.
+// REFACTOR: For Cloud Run services, this operation is ADDITIVE to avoid removing
+// essential default permissions. It adds the specified members and roles without
+// affecting existing ones.
 func (c *GoogleIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBinding) error {
 	var handle iamHandle
 	switch binding.ResourceType {
@@ -169,6 +173,18 @@ func (c *GoogleIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBind
 			client:     c.secretsClient,
 			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
 		}
+	case "cloudrun_service":
+		// This case is intentionally additive. We loop through the desired bindings
+		// and add them one by one, preserving existing default IAM policies.
+		for role, members := range binding.MemberRoles {
+			for _, member := range members {
+				err := c.addCloudRunServiceIAMBinding(ctx, binding.ResourceLocation, binding.ResourceID, role, member)
+				if err != nil {
+					return fmt.Errorf("failed to add Cloud Run binding for member '%s' with role '%s': %w", member, role, err)
+				}
+			}
+		}
+		return nil // Return early as we've completed the additive operation.
 	default:
 		return fmt.Errorf("ApplyIAMPolicy is not implemented for resource type: %s", binding.ResourceType)
 	}
@@ -281,9 +297,31 @@ func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding I
 			policy, err = c.pubsubClient.Topic(binding.ResourceID).IAM().Policy(ctx)
 		case "pubsub_subscription":
 			policy, err = c.pubsubClient.Subscription(binding.ResourceID).IAM().Policy(ctx)
+		case "cloudrun_service":
+			// REFACTOR: Implemented check for Cloud Run service IAM.
+			if binding.ResourceLocation == "" {
+				return false, fmt.Errorf("location is required for Cloud Run service IAM check")
+			}
+			fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, binding.ResourceLocation, binding.ResourceID)
+			runPolicy, getErr := c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
+			if getErr != nil {
+				err = getErr
+			} else {
+				for _, b := range runPolicy.Bindings {
+					if b.Role == binding.Role {
+						for _, m := range b.Members {
+							if m == member {
+								return true, nil
+							}
+						}
+					}
+				}
+				return false, nil
+			}
 		default:
 			return false, fmt.Errorf("unsupported resource type for IAM check: %s", binding.ResourceType)
 		}
+
 		if err == nil {
 			return policy.HasRole(member, iam.RoleName(binding.Role)), nil
 		}
@@ -323,6 +361,7 @@ func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding 
 			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
 		}
 	case "cloudrun_service":
+		// REFACTOR: Wired up the existing removal logic.
 		return c.removeCloudRunServiceIAMBinding(ctx, binding.ResourceLocation, binding.ResourceID, binding.Role, member)
 	default:
 		return fmt.Errorf("unsupported resource type for IAM binding removal: %s", binding.ResourceType)
@@ -342,8 +381,7 @@ func (c *GoogleIAMClient) DeleteServiceAccount(ctx context.Context, accountName 
 	return nil
 }
 
-// REFACTOR: This function's original, correct logic is restored.
-// It performs a Get-Modify-Set cycle directly on the iamAdminClient for a service account resource.
+// AddMemberToServiceAccountRole adds a member to a role on a service account's IAM policy.
 func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, serviceAccountEmail, member, role string) error {
 	resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", c.projectID, serviceAccountEmail)
 
@@ -351,7 +389,6 @@ func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, ser
 	var lastErr error
 
 	for i := 0; i < maxRetries; i++ {
-		// Step 1: Get the low-level protobuf policy object.
 		policy, err := c.iamAdminClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
 		if err != nil {
 			return fmt.Errorf("failed to get IAM policy for SA %s: %w", serviceAccountEmail, err)
@@ -363,10 +400,9 @@ func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, ser
 			Policy:   policy,
 		})
 
-		// Step 4: Check for success or a retriable error.
 		if err == nil {
 			log.Info().Str("member", member).Str("role", role).Str("on_sa", serviceAccountEmail).Msg("Successfully added IAM binding to service account.")
-			return nil // Success!
+			return nil
 		}
 		lastErr = err
 
@@ -376,7 +412,7 @@ func (c *GoogleIAMClient) AddMemberToServiceAccountRole(ctx context.Context, ser
 				Int("attempt", i+1).
 				Str("sa", serviceAccountEmail).
 				Msg("Concurrent modification detected while setting SA IAM policy. Retrying...")
-			time.Sleep(time.Duration(i*100+50) * time.Millisecond) // Exponential backoff with jitter
+			time.Sleep(time.Duration(i*100+50) * time.Millisecond)
 			continue
 		}
 

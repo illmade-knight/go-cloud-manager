@@ -5,6 +5,7 @@ package iam_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,9 @@ import (
 	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-test/auth"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/api/run/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -65,7 +68,9 @@ func getProjectNumber(t *testing.T, ctx context.Context, projectID string) strin
 		if err != nil {
 			return err
 		}
-		defer c.Close()
+		defer func() {
+			_ = c.Close()
+		}()
 		req := &resourcemanagerpb.GetProjectRequest{Name: fmt.Sprintf("projects/%s", projectID)}
 		project, err := c.GetProject(ctx, req)
 		if err != nil {
@@ -78,6 +83,140 @@ func getProjectNumber(t *testing.T, ctx context.Context, projectID string) strin
 	return projectNumber
 }
 
+// TestApplyIAMPolicy_CloudRun_AdditiveUpdate verifies that ApplyIAMPolicy is additive for Cloud Run services.
+func TestApplyIAMPolicy_CloudRun_AdditiveUpdate(t *testing.T) {
+	// --- Arrange ---
+	projectID := auth.CheckGCPAuth(t)
+	region := "us-central1"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// REFACTOR: Use the TestIAMClient to lease from a pool of service accounts.
+	// This avoids creating new SAs on every run and respects GCP quotas.
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	iamClient, err := iam.NewTestIAMClient(ctx, projectID, logger, "it-") // "it-" for "integration-test"
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = iamClient.Close() })
+
+	runService, err := run.NewService(ctx)
+	require.NoError(t, err)
+
+	// 1. Lease a temporary Service Account from the pool to be granted the invoker role.
+	// REFACTOR: The name is now a short, valid-length logical name. The TestIAMClient
+	// handles leasing or creating an actual SA with a valid name.
+	logicalInvokerSaName := fmt.Sprintf("invoker-%d", time.Now().Unix())
+	invokerSaEmail, err := iamClient.EnsureServiceAccountExists(ctx, logicalInvokerSaName)
+	require.NoError(t, err)
+
+	// The TestIAMClient's overridden DeleteServiceAccount will return the SA to the pool instead of deleting it.
+	t.Cleanup(func() {
+		err := iamClient.DeleteServiceAccount(context.Background(), invokerSaEmail)
+		if err != nil {
+			t.Logf("Failed to return service account %s to pool: %v", invokerSaEmail, err)
+		}
+	})
+	t.Logf("Leased temporary invoker SA: %s", invokerSaEmail)
+
+	// 2. Create a dummy Cloud Run service to apply the policy to.
+	serviceName := fmt.Sprintf("test-iam-target-svc-%d", time.Now().Unix())
+	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+
+	createOp, err := runService.Projects.Locations.Services.Create(parent, &run.GoogleCloudRunV2Service{
+		Template: &run.GoogleCloudRunV2RevisionTemplate{
+			Containers: []*run.GoogleCloudRunV2Container{
+				{Image: "us-docker.pkg.dev/cloudrun/container/hello"},
+			},
+		},
+	}).ServiceId(serviceName).Do()
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		// Use a background context for cleanup in case the test context is cancelled.
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer bgCancel()
+		deleteOp, err := runService.Projects.Locations.Services.Delete(fullServiceName).Context(bgCtx).Do()
+		if err != nil {
+			if status.Code(err) != codes.NotFound {
+				t.Logf("Failed to start cleanup for Cloud Run service %s: %v", serviceName, err)
+			}
+			return
+		}
+		// Wait for deletion to complete.
+		for !deleteOp.Done {
+			select {
+			case <-bgCtx.Done():
+				t.Logf("Cleanup timed out for Cloud Run service %s", serviceName)
+				return
+			case <-time.After(2 * time.Second):
+				deleteOp, _ = runService.Projects.Locations.Operations.Get(deleteOp.Name).Context(bgCtx).Do()
+			}
+		}
+		t.Logf("Cleaned up Cloud Run service: %s", serviceName)
+	})
+
+	// Wait for the service creation operation to complete.
+	t.Logf("Waiting for Cloud Run service '%s' to be created...", serviceName)
+	for !createOp.Done {
+		select {
+		case <-ctx.Done():
+			t.Fatal("Test timed out waiting for Cloud Run service creation")
+		case <-time.After(2 * time.Second):
+			createOp, err = runService.Projects.Locations.Operations.Get(createOp.Name).Do()
+			require.NoError(t, err)
+		}
+	}
+	t.Logf("✅ Cloud Run service '%s' created.", serviceName)
+
+	// 3. Define the desired IAM policy binding.
+	member := "serviceAccount:" + invokerSaEmail
+	role := "roles/run.invoker"
+	desiredPolicy := iam.PolicyBinding{
+		ResourceType:     "cloudrun_service",
+		ResourceID:       serviceName,
+		ResourceLocation: region,
+		MemberRoles: map[string][]string{
+			role: {member},
+		},
+	}
+
+	// --- Act ---
+	t.Logf("Applying additive policy to Cloud Run service with role '%s' for member '%s'...", role, member)
+	err = iamClient.ApplyIAMPolicy(ctx, desiredPolicy)
+	require.NoError(t, err)
+
+	// --- Assert ---
+	t.Log("Verifying IAM binding existence (polling)...")
+	checkBinding := iam.IAMBinding{ResourceType: "cloudrun_service", ResourceID: serviceName, Role: role, ResourceLocation: region}
+	require.Eventually(t, func() bool {
+		found, err := iamClient.CheckResourceIAMBinding(ctx, checkBinding, member)
+		if err != nil && !isRetriableError(err) {
+			t.Logf("Non-retriable error during check: %v", err)
+			return false
+		}
+		return found
+	}, 2*time.Minute, 5*time.Second, "IAM binding for Cloud Run invoker did not propagate in time")
+
+	t.Log("✅ Cloud Run invoker role verified.")
+
+	// --- Act & Assert 2: Removal ---
+	t.Logf("Removing role '%s' from member '%s'...", role, member)
+	err = iamClient.RemoveResourceIAMBinding(ctx, checkBinding, member)
+	require.NoError(t, err)
+
+	t.Log("Verifying binding removal (polling)...")
+	require.Eventually(t, func() bool {
+		found, err := iamClient.CheckResourceIAMBinding(ctx, checkBinding, member)
+		if err != nil && !isRetriableError(err) {
+			t.Logf("Non-retriable error during check: %v", err)
+			return false
+		}
+		return !found
+	}, 2*time.Minute, 5*time.Second, "IAM binding for Cloud Run invoker was not removed in time")
+
+	t.Log("✅ Cloud Run invoker role removal verified.")
+}
+
 // TestApplyIAMPolicy_AtomicUpdate verifies that the ApplyIAMPolicy method
 // correctly overwrites the entire policy on a resource.
 func TestApplyIAMPolicy_AtomicUpdate(t *testing.T) {
@@ -87,6 +226,7 @@ func TestApplyIAMPolicy_AtomicUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
+	// Use the real client for this test to ensure atomic overwrite behavior is tested directly.
 	iamClient, err := iam.NewGoogleIAMClient(ctx, projectID)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = iamClient.Close() })

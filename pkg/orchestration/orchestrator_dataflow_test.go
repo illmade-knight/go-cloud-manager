@@ -88,6 +88,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 					subName: {
 						Name:           subName,
 						ServiceAccount: subServiceAccount,
+						Dependencies:   []string{sdName},
 						Deployment: &servicemanager.DeploymentSpec{
 							SourcePath:          sourcePath,
 							BuildableModulePath: subBuildPath,
@@ -96,6 +97,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 					pubName: {
 						Name:           pubName,
 						ServiceAccount: pubServiceAccount,
+						Dependencies:   []string{sdName},
 						Deployment: &servicemanager.DeploymentSpec{
 							SourcePath:          sourcePath,
 							BuildableModulePath: pubBuildPath,

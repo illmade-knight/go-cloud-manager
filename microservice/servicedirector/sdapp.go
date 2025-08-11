@@ -175,7 +175,9 @@ func NewServiceDirector(ctx context.Context, cfg *Config, arch *servicemanager.M
 	opts := []DirectorOption{
 		withServiceManager(nil),
 		withIAM(nil, nil),
-		withPubSubCommands(cfg, nil),
+	}
+	if cfg.Commands != nil {
+		opts = append(opts, withPubSubCommands(cfg, nil))
 	}
 	return newInternalSD(ctx, cfg, arch, directorLogger, opts...)
 }

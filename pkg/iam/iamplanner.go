@@ -55,7 +55,7 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 			requiredRoles["roles/bigquery.admin"] = struct{}{}
 		}
 
-		// REFACTOR: If any dataflow defines application services, the ServiceDirector
+		// If any dataflow defines application services, the ServiceDirector
 		// will be responsible for ensuring their service accounts exist. Therefore,
 		// it needs permission to create and manage service accounts.
 		if len(dataflow.Services) > 0 {
@@ -79,7 +79,7 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 	return rolesSlice, nil
 }
 
-// REFACTOR: This function now returns a flat slice of all bindings, rather than a map.
+// PlanRolesForApplicationServices This function returns a flat slice of all bindings
 func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.MicroserviceArchitecture) ([]IAMBinding, error) {
 	p.logger.Info().Str("architecture", arch.Environment.Name).Msg("Planning required IAM roles for all application services...")
 
@@ -100,8 +100,7 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	return finalPlan, nil
 }
 
-// planDataResourceLinkRoles: All planning helpers are updated to add the ServiceAccount to the binding
-// and to call the updated addBindingToPlan helper.
+// planDataResourceLinkRoles: All planning helpers add the ServiceAccount to the binding and call the addBindingToPlan helper.
 func (p *RolePlanner) planDataResourceLinkRoles(dataflow servicemanager.ResourceGroup, plan *[]IAMBinding, mu *sync.Mutex) {
 	for _, bucket := range dataflow.Resources.GCSBuckets {
 		for _, producer := range bucket.Producers {
