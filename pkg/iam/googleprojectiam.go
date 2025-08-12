@@ -70,7 +70,6 @@ func (m *GoogleIAMProjectClient) CheckProjectIAMBinding(ctx context.Context, mem
 
 // AddProjectIAMBinding grants a role to a member at the project level.
 // It uses the standard "get-modify-set" pattern to ensure that existing bindings are preserved.
-// This operation is idempotent; if the member already has the role, no changes are made.
 func (m *GoogleIAMProjectClient) AddProjectIAMBinding(ctx context.Context, member, role string) error {
 	// 1. Get the current IAM policy for the project.
 	req := &iampb.GetIamPolicyRequest{
@@ -81,7 +80,7 @@ func (m *GoogleIAMProjectClient) AddProjectIAMBinding(ctx context.Context, membe
 		return fmt.Errorf("failed to get project IAM policy: %w", err)
 	}
 
-	// 2. Add the new member to the specified role in the policy object.
+	// 2. Find the binding for the specified role, or create it if it doesn't exist.
 	var bindingToModify *iampb.Binding
 	for _, b := range policy.Bindings {
 		if b.Role == role {
@@ -89,29 +88,27 @@ func (m *GoogleIAMProjectClient) AddProjectIAMBinding(ctx context.Context, membe
 			break
 		}
 	}
-
 	if bindingToModify == nil {
-		// If no binding for this role exists, create a new one.
-		bindingToModify = &iampb.Binding{Role: role, Members: []string{member}}
+		bindingToModify = &iampb.Binding{Role: role}
 		policy.Bindings = append(policy.Bindings, bindingToModify)
-	} else {
-		// If the binding exists, check if the member is already present.
-		memberExists := false
-		for _, m := range bindingToModify.Members {
-			if m == member {
-				memberExists = true
-				break
-			}
-		}
-		if !memberExists {
-			bindingToModify.Members = append(bindingToModify.Members, member)
-		} else {
-			log.Info().Str("member", member).Str("role", role).Msg("Member already has project-level role, no changes needed.")
-			return nil
+	}
+
+	memberExists := false
+	for _, m := range bindingToModify.Members {
+		if m == member {
+			memberExists = true
+			break
 		}
 	}
 
-	// 3. Set the updated policy back on the project.
+	if memberExists {
+		log.Info().Str("member", member).Str("role", role).Msg("Member already has project-level role, no changes needed.")
+		// Even if we think it exists, we continue to the SetIamPolicy call to be certain.
+	} else {
+		bindingToModify.Members = append(bindingToModify.Members, member)
+	}
+
+	// 4. Set the updated policy back on the project.
 	setReq := &iampb.SetIamPolicyRequest{
 		Resource: fmt.Sprintf("projects/%s", m.projectID),
 		Policy:   policy,
