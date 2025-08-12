@@ -15,26 +15,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// PrepareServiceDirectorSource hydrates the architecture, marshals it to YAML,
-// and copies the resulting services.yaml file into the ServiceDirector's
-// source code directory so it can be included in the build.
+// PrepareServiceDirectorSource marshals the arch to YAML and copies the resulting services.yaml file
+// into the ServiceDirector's source code directory so it can be included in the build.
 func PrepareServiceDirectorSource(arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) error {
-	// Step 1: Hydrate the architecture using the production-safe method.
-	// This fills in defaults and injects environment variables.
-	logger.Info().Msg("Hydrating architecture for deployment...")
-	err := servicemanager.HydrateArchitecture(arch, "cloud-deploy", logger)
-	if err != nil {
-		return fmt.Errorf("failed to hydrate architecture: %w", err)
-	}
-	logger.Info().Msg("✅ Architecture hydrated successfully.")
-
-	// Step 2: Marshal the fully-hydrated architecture into a YAML file.
+	// Step 1: Marshal the fully-hydrated architecture into a YAML file.
 	yamlBytes, err := yaml.Marshal(arch)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hydrated architecture to YAML: %w", err)
 	}
 
-	// Step 3: Write the YAML file to the ServiceDirector's source directory.
+	// Step 2: Write the YAML file to the ServiceDirector's source directory.
 	if arch.ServiceManagerSpec.Deployment == nil || arch.ServiceManagerSpec.Deployment.BuildableModulePath == "" {
 		return errors.New("ServiceManagerSpec.Deployment.BuildableModulePath is not defined")
 	}
