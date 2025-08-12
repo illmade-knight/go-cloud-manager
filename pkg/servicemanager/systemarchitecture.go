@@ -190,7 +190,7 @@ type TopicConfig struct {
 }
 
 type ServiceMapping struct {
-	Name string `yaml:"service"`
+	Name string `yaml:"name"`
 	Env  string `yaml:"env"`
 }
 

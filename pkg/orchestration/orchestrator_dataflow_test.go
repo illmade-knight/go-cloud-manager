@@ -107,18 +107,32 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: tracerTopicName},
-							ProducerService: &servicemanager.ServiceMapping{Name: pubName, Env: "TOPIC_ID"},
+							CloudResource: servicemanager.CloudResource{
+								Name: tracerTopicName,
+							},
+							ProducerService: &servicemanager.ServiceMapping{
+								Name: pubName,
+								Env:  "TOPIC_ID",
+							},
 						},
 						{
-							CloudResource:   servicemanager.CloudResource{Name: verifyTopicName},
-							ProducerService: &servicemanager.ServiceMapping{Name: subName, Env: "VERIFY_TOPIC_ID"},
+							CloudResource: servicemanager.CloudResource{
+								Name: verifyTopicName,
+							},
+							ProducerService: &servicemanager.ServiceMapping{
+								Name: subName, Env: "VERIFY_TOPIC_ID",
+							},
 						},
 					},
 					Subscriptions: []servicemanager.SubscriptionConfig{{
-						CloudResource:   servicemanager.CloudResource{Name: tracerSubName},
-						Topic:           tracerTopicName,
-						ConsumerService: &servicemanager.ServiceMapping{Name: subName, Env: "SUBSCRIPTION_ID"},
+						CloudResource: servicemanager.CloudResource{
+							Name: tracerSubName,
+						},
+						Topic: tracerTopicName,
+						ConsumerService: &servicemanager.ServiceMapping{
+							Name: subName,
+							Env:  "SUBSCRIPTION_ID",
+						},
 					}},
 				},
 			},
@@ -130,6 +144,9 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = iamClient.Close() })
 
+	//
+	// This performs the same role as PrepareServiceDirectorSource in a production deployment
+	//
 	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
 	require.NoError(t, err)
 
@@ -158,6 +175,10 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	err = os.WriteFile(embeddedYamlPath, yamlBytes, 0644)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.Remove(embeddedYamlPath) })
+
+	//
+	// OK we've finished replicating the PrepareServiceDirectorSource logic for the test environment
+	//
 
 	// 4. Pre-create test resources.
 	t.Log("Pre-creating test resources...")
