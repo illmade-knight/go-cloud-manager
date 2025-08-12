@@ -538,11 +538,12 @@ func (c *GoogleIAMClient) AddArtifactRegistryRepositoryIAMBinding(ctx context.Co
 		bindingToModify = &iampb.Binding{Role: role, Members: []string{}}
 		policy.Bindings = append(policy.Bindings, bindingToModify)
 	}
-	for _, m := range bindingToModify.Members {
-		if m == member {
-			return nil
-		}
-	}
+	// policy is idempotent so a check is unnecessary
+	//for _, m := range bindingToModify.Members {
+	//	if m == member {
+	//		return nil
+	//	}
+	//}
 	bindingToModify.Members = append(bindingToModify.Members, member)
 	_, err = c.artifactRegistryClient.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
 		Resource: repoResource,

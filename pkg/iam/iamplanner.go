@@ -65,7 +65,6 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 		for _, service := range dataflow.Services {
 			if service.Deployment != nil && len(service.Deployment.SecretEnvironmentVars) > 0 {
 				requiredRoles["roles/secretmanager.admin"] = struct{}{}
-				break
 			}
 			if len(service.Dependencies) > 0 {
 				requiredRoles["roles/run.admin"] = struct{}{}
