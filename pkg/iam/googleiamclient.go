@@ -286,6 +286,80 @@ func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAM
 	return fmt.Errorf("failed to add IAM binding after %d retries: %w", maxRetries, lastErr)
 }
 
+func (c *GoogleIAMClient) addCloudRunServiceIAMBinding(ctx context.Context, location, serviceID, role, member string) error {
+	if location == "" {
+		return fmt.Errorf("location is required for Cloud Run service IAM binding")
+	}
+	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, location, serviceID)
+
+	const maxRetries = 12
+	const retryDelay = 5 * time.Second
+	var policy *run.GoogleIamV1Policy
+	var lastErr error
+
+	// REFACTOR: Added a retry loop to handle the propagation delay of a new Cloud Run service.
+	// The IAM backend can return a 403 error if it doesn't recognize the new service
+	// resource yet, even if the caller has the correct permissions.
+	for i := 0; i < maxRetries; i++ {
+		var getErr error
+		policy, getErr = c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
+		if getErr == nil {
+			lastErr = nil // Clear the error on a successful attempt.
+			break         // Successfully got the policy, so we can exit the loop.
+		}
+
+		lastErr = getErr // Save the latest error for logging if all retries fail.
+
+		// Check if the error is the specific "Permission Denied" that indicates a propagation delay.
+		st, ok := status.FromError(getErr)
+		if ok && st.Code() == codes.PermissionDenied {
+			log.Warn().
+				Str("service", serviceID).
+				Int("attempt", i+1).
+				Int("max_attempts", maxRetries).
+				Msg("Getting Cloud Run IAM policy failed with 403, likely a propagation delay. Retrying...")
+			time.Sleep(retryDelay)
+			continue // Go to the next iteration of the loop.
+		}
+
+		// For any other type of error, fail immediately as it's unexpected.
+		return fmt.Errorf("failed to get IAM policy for Cloud Run service %s with non-retriable error: %w", serviceID, getErr)
+	}
+
+	// If all retries failed, the loop will complete and lastErr will not be nil.
+	if lastErr != nil {
+		return fmt.Errorf("failed to get IAM policy for Cloud Run service %s after %d retries: %w", serviceID, maxRetries, lastErr)
+	}
+
+	// Original logic to modify and set the policy
+	var bindingToModify *run.GoogleIamV1Binding
+	for _, b := range policy.Bindings {
+		if b.Role == role {
+			bindingToModify = b
+			break
+		}
+	}
+
+	if bindingToModify == nil {
+		bindingToModify = &run.GoogleIamV1Binding{Role: role}
+		policy.Bindings = append(policy.Bindings, bindingToModify)
+	}
+
+	for _, m := range bindingToModify.Members {
+		if m == member {
+			return nil // Member already exists in the role, no changes needed.
+		}
+	}
+	bindingToModify.Members = append(bindingToModify.Members, member)
+
+	setPolicyRequest := &run.GoogleIamV1SetIamPolicyRequest{Policy: policy}
+	_, err := c.runService.Projects.Locations.Services.SetIamPolicy(fullServiceName, setPolicyRequest).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("failed to set IAM policy for Cloud Run service %s: %w", serviceID, err)
+	}
+	return nil
+}
+
 func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding IAMBinding, member string) (bool, error) {
 	const maxRetries = 5
 	var lastErr error
@@ -584,40 +658,6 @@ func removeStandardIAMBinding(ctx context.Context, handle iamHandle, role, membe
 		return fmt.Errorf("failed to set policy for removal: %w", err)
 	}
 	return fmt.Errorf("failed to remove IAM binding after %d retries: %w", maxRetries, lastErr)
-}
-
-func (c *GoogleIAMClient) addCloudRunServiceIAMBinding(ctx context.Context, location, serviceID, role, member string) error {
-	if location == "" {
-		return fmt.Errorf("location is required for Cloud Run service IAM binding")
-	}
-	fullServiceName := fmt.Sprintf("projects/%s/locations/%s/services/%s", c.projectID, location, serviceID)
-	policy, err := c.runService.Projects.Locations.Services.GetIamPolicy(fullServiceName).Context(ctx).Do()
-	if err != nil {
-		return fmt.Errorf("failed to get IAM policy for Cloud Run service %s: %w", serviceID, err)
-	}
-	var bindingToModify *run.GoogleIamV1Binding
-	for _, b := range policy.Bindings {
-		if b.Role == role {
-			bindingToModify = b
-			break
-		}
-	}
-	if bindingToModify == nil {
-		bindingToModify = &run.GoogleIamV1Binding{Role: role}
-		policy.Bindings = append(policy.Bindings, bindingToModify)
-	}
-	for _, m := range bindingToModify.Members {
-		if m == member {
-			return nil
-		}
-	}
-	bindingToModify.Members = append(bindingToModify.Members, member)
-	setPolicyRequest := &run.GoogleIamV1SetIamPolicyRequest{Policy: policy}
-	_, err = c.runService.Projects.Locations.Services.SetIamPolicy(fullServiceName, setPolicyRequest).Context(ctx).Do()
-	if err != nil {
-		return fmt.Errorf("failed to set IAM policy for Cloud Run service %s: %w", serviceID, err)
-	}
-	return nil
 }
 
 func (c *GoogleIAMClient) removeCloudRunServiceIAMBinding(ctx context.Context, location, serviceID, role, member string) error {
