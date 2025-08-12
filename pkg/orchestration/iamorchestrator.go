@@ -42,6 +42,7 @@ func NewIAMOrchestrator(ctx context.Context, arch *servicemanager.MicroserviceAr
 	} else {
 		iamClient, err = iam.NewGoogleIAMClient(ctx, arch.ProjectID, clientOpts...)
 	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iamClient for orchestrator: %w", err)
 	}
@@ -83,7 +84,7 @@ func (o *IAMOrchestrator) EnsureDataflowSAsExist(ctx context.Context, dataflowNa
 	return serviceEmails, nil
 }
 
-// PollForSAExistence waits for a newly created service account to propagate.
+// PollForSAExistence waits for a newly created service account to propagate throughout Google Cloud.
 func (o *IAMOrchestrator) PollForSAExistence(ctx context.Context, accountEmail string, timeout time.Duration) error {
 	const pollInterval = 5 * time.Second
 
@@ -112,7 +113,8 @@ func (o *IAMOrchestrator) PollForSAExistence(ctx context.Context, accountEmail s
 	}
 }
 
-// ApplyProjectLevelIAMForDataflow plans and applies all project-level IAM roles for a dataflow.
+// ApplyProjectLevelIAMForDataflow plans and applies all project-level IAM roles for a dataflow's services.
+// Note: This function only applies the roles; it does not wait for them to propagate.
 func (o *IAMOrchestrator) ApplyProjectLevelIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Planning and applying project-level IAM roles.")
 
@@ -149,7 +151,8 @@ func (o *IAMOrchestrator) ApplyProjectLevelIAMForDataflow(ctx context.Context, d
 	for _, binding := range projectBindings {
 		saEmail, ok := logicalNameToEmail[binding.ServiceAccount]
 		if !ok {
-			return fmt.Errorf("could not find service account email for logical SA name '%s'", binding.ServiceAccount)
+			// This can happen if a binding is for a service not in this specific dataflow, which is valid.
+			continue
 		}
 		member := "serviceAccount:" + saEmail
 		o.logger.Info().Str("member", member).Str("role", binding.Role).Msg("Applying project-level IAM role")
@@ -163,10 +166,81 @@ func (o *IAMOrchestrator) ApplyProjectLevelIAMForDataflow(ctx context.Context, d
 	return nil
 }
 
-// VerifyIAMForDataflow polls IAM policies until they reflect the planned state.
-// It now correctly accepts the map of pre-established service account emails.
-func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string, verificationTimeout time.Duration) error {
-	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying IAM policy propagation...")
+// REFACTOR: This new function separates the verification of project-level IAM from resource-level IAM.
+// It will be called by the Conductor during the initial IAM setup phase to fail fast.
+//
+// VerifyProjectLevelIAMForDataflow polls project-level IAM policies until they reflect the planned state.
+func (o *IAMOrchestrator) VerifyProjectLevelIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string, verificationTimeout time.Duration) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying PROJECT-LEVEL IAM policy propagation...")
+	iamPlan, err := o.planner.PlanRolesForApplicationServices(o.arch)
+	if err != nil {
+		return fmt.Errorf("failed to generate IAM plan for verification: %w", err)
+	}
+
+	var projectBindings []iam.IAMBinding
+	for _, binding := range iamPlan {
+		if binding.ResourceType == "project" {
+			projectBindings = append(projectBindings, binding)
+		}
+	}
+
+	if len(projectBindings) == 0 {
+		o.logger.Info().Str("dataflow", dataflowName).Msg("No project-level IAM bindings to verify.")
+		return nil
+	}
+
+	// Concurrently poll for all project-level bindings across all services in the dataflow.
+	var wg sync.WaitGroup
+	errs := make(chan error, len(projectBindings))
+
+	// Get the logical-name-to-email mapping for all SAs in the dataflow.
+	dataflow, _ := o.arch.Dataflows[dataflowName]
+	logicalNameToEmail := make(map[string]string)
+	for serviceName, serviceSpec := range dataflow.Services {
+		email, ok := saEmails[serviceName]
+		if !ok {
+			return fmt.Errorf("consistency error: could not find email for service '%s' needed for IAM verification", serviceName)
+		}
+		logicalNameToEmail[serviceSpec.ServiceAccount] = email
+	}
+
+	for _, binding := range projectBindings {
+		saEmail, ok := logicalNameToEmail[binding.ServiceAccount]
+		if !ok {
+			// This binding is not for a service in this dataflow, so we skip it.
+			continue
+		}
+		member := "serviceAccount:" + saEmail
+
+		wg.Add(1)
+		go func(b iam.IAMBinding) {
+			defer wg.Done()
+			if err := o.pollForBinding(ctx, b, member, verificationTimeout); err != nil {
+				errs <- err
+			}
+		}(binding)
+	}
+	wg.Wait()
+	close(errs)
+
+	var verificationErrors []string
+	for err := range errs {
+		verificationErrors = append(verificationErrors, err.Error())
+	}
+	if len(verificationErrors) > 0 {
+		return fmt.Errorf("project-level IAM verification failed for dataflow '%s': %s", dataflowName, strings.Join(verificationErrors, "; "))
+	}
+
+	o.logger.Info().Str("dataflow", dataflowName).Msg("✅ Successfully verified all PROJECT-LEVEL IAM policies.")
+	return nil
+}
+
+// REFACTOR: This new function handles verification for resource-level IAM, which can only happen
+// after the ServiceDirector has created the underlying resources (e.g., topics, subscriptions).
+//
+// VerifyResourceLevelIAMForDataflow polls resource-level IAM policies until they reflect the planned state.
+func (o *IAMOrchestrator) VerifyResourceLevelIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string, verificationTimeout time.Duration) error {
+	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying RESOURCE-LEVEL IAM policy propagation...")
 	iamPlan, err := o.planner.PlanRolesForApplicationServices(o.arch)
 	if err != nil {
 		return fmt.Errorf("failed to generate IAM plan for verification: %w", err)
@@ -174,27 +248,27 @@ func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName
 
 	dataflow, _ := o.arch.Dataflows[dataflowName]
 	for serviceName, serviceSpec := range dataflow.Services {
-		var serviceBindings []iam.IAMBinding
+		// Filter for resource-level bindings relevant to this specific service.
+		var serviceResourceBindings []iam.IAMBinding
 		for _, binding := range iamPlan {
-			if binding.ServiceAccount == serviceSpec.ServiceAccount {
-				serviceBindings = append(serviceBindings, binding)
+			if binding.ServiceAccount == serviceSpec.ServiceAccount && binding.ResourceType != "project" {
+				serviceResourceBindings = append(serviceResourceBindings, binding)
 			}
 		}
-		if len(serviceBindings) == 0 {
+		if len(serviceResourceBindings) == 0 {
 			continue
 		}
 
-		// Use the correct, pre-allocated email from the map provided by the Conductor.
 		saEmail, ok := saEmails[serviceName]
 		if !ok {
 			return fmt.Errorf("could not find service account email for '%s' during verification", serviceName)
 		}
 		member := "serviceAccount:" + saEmail
 
-		o.logger.Info().Str("service", serviceName).Int("bindings", len(serviceBindings)).Msg("Concurrently polling for all IAM bindings...")
+		o.logger.Info().Str("service", serviceName).Int("bindings", len(serviceResourceBindings)).Msg("Concurrently polling for all RESOURCE-LEVEL IAM bindings...")
 		var wg sync.WaitGroup
-		errs := make(chan error, len(serviceBindings))
-		for _, binding := range serviceBindings {
+		errs := make(chan error, len(serviceResourceBindings))
+		for _, binding := range serviceResourceBindings {
 			wg.Add(1)
 			go func(b iam.IAMBinding) {
 				defer wg.Done()
@@ -211,12 +285,12 @@ func (o *IAMOrchestrator) VerifyIAMForDataflow(ctx context.Context, dataflowName
 			verificationErrors = append(verificationErrors, err.Error())
 		}
 		if len(verificationErrors) > 0 {
-			return fmt.Errorf("verification failed for service '%s': %s", serviceName, strings.Join(verificationErrors, "; "))
+			return fmt.Errorf("resource-level IAM verification failed for service '%s': %s", serviceName, strings.Join(verificationErrors, "; "))
 		}
-		o.logger.Info().Str("service", serviceName).Msg("All bindings verified successfully.")
+		o.logger.Info().Str("service", serviceName).Msg("All resource-level bindings verified successfully.")
 	}
 
-	o.logger.Info().Str("dataflow", dataflowName).Msg("✅ Successfully verified all IAM policies.")
+	o.logger.Info().Str("dataflow", dataflowName).Msg("✅ Successfully verified all RESOURCE-LEVEL IAM policies.")
 	return nil
 }
 
@@ -248,7 +322,7 @@ func (o *IAMOrchestrator) pollForBinding(ctx context.Context, binding iam.IAMBin
 	}
 }
 
-// SetupServiceDirectorIAM ensures the ServiceDirector's service account exists and grants it project-level roles.
+// SetupServiceDirectorIAM ensures the ServiceDirector's SA exists and grants it necessary project-level roles.
 func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[string]string, error) {
 	o.logger.Info().Msg("Starting ServiceDirector IAM setup...")
 	serviceEmails := make(map[string]string)
@@ -261,6 +335,7 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	if saName == "" {
 		saName = serviceName + "-sa"
 	}
+
 	saEmail, err := o.iamClient.EnsureServiceAccountExists(ctx, saName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure ServiceDirector SA exists: %w", err)
@@ -268,6 +343,7 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	o.logger.Info().Str("email", saEmail).Msg("ServiceDirector service account is ready.")
 	o.createdServiceAccountEmails = append(o.createdServiceAccountEmails, saEmail)
 	serviceEmails[serviceName] = saEmail
+
 	member := "serviceAccount:" + saEmail
 	for _, role := range requiredRoles {
 		o.logger.Info().Str("role", role).Str("member", member).Msg("Granting project-level role to ServiceDirector SA.")
@@ -285,8 +361,62 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("failed to grant 'actAs' permission to Cloud Build SA: %w", err)
 	}
-	o.logger.Info().Msg("ServiceDirector IAM setup complete.")
+
+	o.logger.Info().Msg("ServiceDirector IAM grant phase complete.")
 	return serviceEmails, nil
+}
+
+// REFACTOR: This new function is called by the Conductor to fix a race condition. It ensures
+// that the roles granted to the Service Director have fully propagated before the Conductor
+// attempts to deploy it.
+//
+// VerifyServiceDirectorIAM polls the project-level IAM policies for the ServiceDirector until they are effective.
+func (o *IAMOrchestrator) VerifyServiceDirectorIAM(ctx context.Context, saEmails map[string]string, verificationTimeout time.Duration) error {
+	o.logger.Info().Msg("Verifying ServiceDirector project-level IAM policy propagation...")
+	requiredRoles, err := o.planner.PlanRolesForServiceDirector(o.arch)
+	if err != nil {
+		return fmt.Errorf("failed to plan IAM roles for ServiceDirector verification: %w", err)
+	}
+
+	serviceName := o.arch.ServiceManagerSpec.Name
+	saEmail, ok := saEmails[serviceName]
+	if !ok {
+		return fmt.Errorf("could not find SA email for ServiceDirector '%s' during verification", serviceName)
+	}
+	member := "serviceAccount:" + saEmail
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(requiredRoles))
+	o.logger.Info().Int("bindings", len(requiredRoles)).Msg("Concurrently polling for all ServiceDirector IAM bindings...")
+
+	for _, role := range requiredRoles {
+		binding := iam.IAMBinding{
+			ResourceType: "project",
+			ResourceID:   o.arch.ProjectID,
+			Role:         role,
+			// ServiceAccount field isn't needed by pollForBinding, which just uses the `member` string.
+		}
+		wg.Add(1)
+		go func(b iam.IAMBinding) {
+			defer wg.Done()
+			if err := o.pollForBinding(ctx, b, member, verificationTimeout); err != nil {
+				errs <- err
+			}
+		}(binding)
+	}
+	wg.Wait()
+	close(errs)
+
+	var verificationErrors []string
+	for err := range errs {
+		verificationErrors = append(verificationErrors, err.Error())
+	}
+	if len(verificationErrors) > 0 {
+		return fmt.Errorf("ServiceDirector IAM verification failed: %s", strings.Join(verificationErrors, "; "))
+	}
+
+	o.logger.Info().Msg("✅ Successfully verified all ServiceDirector project-level IAM policies.")
+	return nil
 }
 
 // Teardown cleans up service accounts created during the orchestration run.
@@ -314,10 +444,12 @@ func (o *IAMOrchestrator) GetProjectNumber(ctx context.Context, projectID string
 		return "", fmt.Errorf("resourcemanager.NewProjectsClient: %w", err)
 	}
 	defer func() { _ = c.Close() }()
+
 	req := &resourcemanagerpb.GetProjectRequest{Name: fmt.Sprintf("projects/%s", projectID)}
 	project, err := c.GetProject(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("GetProject: %w", err)
 	}
+
 	return strings.TrimPrefix(project.Name, "projects/"), nil
 }

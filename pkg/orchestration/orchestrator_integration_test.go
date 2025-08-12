@@ -124,7 +124,7 @@ func TestOrchestratorCommandFlow(t *testing.T) {
 	}
 
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
-	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, arch.Environment, nil, logger)
+	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
 	mockIamClient := &mockIAMClient{}

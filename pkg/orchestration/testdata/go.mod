@@ -12,7 +12,7 @@ go 1.23.0
 require (
 	cloud.google.com/go/pubsub v1.50.0
 	github.com/google/uuid v1.6.0
-	github.com/illmade-knight/go-cloud-manager v0.2.6-beta
+	github.com/illmade-knight/go-cloud-manager v0.2.7-beta
 	github.com/rs/zerolog v1.34.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -26,6 +26,7 @@ require (
 	cloud.google.com/go/bigquery v1.69.0 // indirect
 	cloud.google.com/go/cloudbuild v1.22.3 // indirect
 	cloud.google.com/go/compute/metadata v0.7.0 // indirect
+	cloud.google.com/go/firestore v1.18.0 // indirect
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
 	cloud.google.com/go/monitoring v1.24.2 // indirect

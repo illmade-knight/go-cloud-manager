@@ -268,25 +268,6 @@ const (
 	ServiceAccount IAMAccessType = "service-account"
 )
 
-// Duration is a custom type that wraps time.Duration to implement yaml.Unmarshaler,
-// allowing human-readable strings like "15s" or "2h" to be parsed directly from YAML.
-type Duration time.Duration
-
-// UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
-	var s string
-	decodeErr := value.Decode(&s)
-	if decodeErr != nil {
-		return decodeErr
-	}
-	parsed, err := time.ParseDuration(s)
-	if err != nil {
-		return err
-	}
-	*d = Duration(parsed)
-	return nil
-}
-
 // ProvisionedResources contains details of all resources created by a setup operation.
 // This struct is used to pass information between resource creation and IAM policy application steps.
 type ProvisionedResources struct {
@@ -408,4 +389,23 @@ type FirestoreCollection struct {
 	Producers []ServiceMapping `yaml:"producers,omitempty"`
 	// FirestoreDatabase is the name of the parent Firestore database.
 	FirestoreDatabase string `yaml:"database"`
+}
+
+// Duration is a custom type that wraps time.Duration to implement yaml.Unmarshaler,
+// allowing human-readable strings like "15s" or "2h" to be parsed directly from YAML.
+type Duration time.Duration
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	decodeErr := value.Decode(&s)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d = Duration(parsed)
+	return nil
 }

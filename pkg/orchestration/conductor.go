@@ -39,7 +39,6 @@ type Conductor struct {
 }
 
 // NewConductor creates and initializes a new Conductor with specific options.
-// This is the correct constructor that you provided.
 func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, opts ConductorOptions) (*Conductor, error) {
 	prerequisitesClient, err := prerequisites.NewGoogleServiceAPIClient(ctx, logger)
 	if err != nil {
@@ -75,7 +74,7 @@ func (c *Conductor) Run(ctx context.Context) error {
 	if err := c.checkPrerequisites(ctx); err != nil {
 		return err
 	}
-	// Phase 1: Create all service accounts and wait for them to propagate.
+	// Phase 1: Create all service accounts and project-level IAM, then verify propagation immediately.
 	if err := c.setupIAMPhase(ctx); err != nil {
 		return err
 	}
@@ -88,8 +87,9 @@ func (c *Conductor) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Phase 4: Now that remote setup is complete, verify IAM policy propagation.
-	if err := c.verificationPhase(ctx, completionEvents); err != nil {
+	// REFACTOR: This phase is now more specific.
+	// Phase 4: Now that remote setup is complete, verify resource-level IAM policy propagation.
+	if err := c.verifyResourceLevelIAMPhase(ctx, completionEvents); err != nil {
 		return err
 	}
 	// Phase 5: Now that everything is verified, deploy the final application services.
@@ -113,6 +113,8 @@ func (c *Conductor) checkPrerequisites(ctx context.Context) error {
 	return nil
 }
 
+// REFACTOR: This phase has been updated to include immediate verification of all project-level IAM.
+// This makes the process more robust by failing faster and fixing a race condition with the ServiceDirector.
 func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	if !c.options.SetupIAM {
 		return nil
@@ -121,6 +123,11 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	sdSaEmails, err := c.iamOrch.SetupServiceDirectorIAM(ctx)
 	if err != nil {
 		return err
+	}
+	// Immediately verify ServiceDirector IAM to prevent race conditions on deployment.
+	err = c.iamOrch.VerifyServiceDirectorIAM(ctx, sdSaEmails, c.options.PolicyPollTimeout)
+	if err != nil {
+		return fmt.Errorf("failed during ServiceDirector IAM verification: %w", err)
 	}
 	for k, v := range sdSaEmails {
 		c.serviceAccountEmails[k] = v
@@ -143,23 +150,27 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 
 	c.logger.Info().Int("count", len(allAppSaEmails)).Msg("Verifying propagation of newly created service accounts...")
 	for _, email := range allAppSaEmails {
-		err := c.iamOrch.PollForSAExistence(ctx, email, c.options.SAPollTimeout)
+		err = c.iamOrch.PollForSAExistence(ctx, email, c.options.SAPollTimeout)
 		if err != nil {
 			return fmt.Errorf("failed while waiting for SA '%s' to propagate: %w", email, err)
 		}
 	}
 	c.logger.Info().Msg("All service accounts have propagated.")
 
-	// NEW_CODE: After SAs exist, apply the project-level IAM roles for them.
-	c.logger.Info().Msg("Applying project-level IAM roles for dataflows...")
+	c.logger.Info().Msg("Applying and verifying project-level IAM roles for dataflows...")
 	for dataflowName, saEmails := range allDataflowEmails {
-		err := c.iamOrch.ApplyProjectLevelIAMForDataflow(ctx, dataflowName, saEmails)
+		err = c.iamOrch.ApplyProjectLevelIAMForDataflow(ctx, dataflowName, saEmails)
 		if err != nil {
-			return fmt.Errorf("failed during project-level IAM setup for dataflow '%s': %w", dataflowName, err)
+			return fmt.Errorf("failed during project-level IAM application for dataflow '%s': %w", dataflowName, err)
+		}
+		// Immediately verify the project-level IAM for this dataflow.
+		err = c.iamOrch.VerifyProjectLevelIAMForDataflow(ctx, dataflowName, saEmails, c.options.PolicyPollTimeout)
+		if err != nil {
+			return fmt.Errorf("failed during project-level IAM verification for dataflow '%s': %w", dataflowName, err)
 		}
 	}
 
-	c.logger.Info().Msg("Phase 1: All service accounts and project-level IAM are set up.")
+	c.logger.Info().Msg("Phase 1: All service accounts and project-level IAM are set up and verified.")
 	return nil
 }
 
@@ -260,23 +271,27 @@ func (c *Conductor) triggerRemoteSetup(ctx context.Context) (map[string]Completi
 	return completionEvents, nil
 }
 
-func (c *Conductor) verificationPhase(ctx context.Context, actualEvents map[string]CompletionEvent) error {
+// REFACTOR: This function has been renamed from verificationPhase and now only verifies
+// resource-level IAM policies, as project-level policies were already verified in Phase 1.
+func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context, actualEvents map[string]CompletionEvent) error {
 	if !c.options.VerifyDataflowIAM {
 		return nil
 	}
-	c.logger.Info().Msg("Executing Phase 4: Verifying dataflow IAM policy propagation...")
+	c.logger.Info().Msg("Executing Phase 4: Verifying dataflow RESOURCE-LEVEL IAM policy propagation...")
 
 	// This is a simplified comparison logic. A real implementation would need a deep-equals on the policy maps.
 	// For this refactor, we are trusting the remote director and proceeding to poll.
 	c.logger.Info().Msg("Trusting remote plan; proceeding to poll for propagation.")
 
 	for dataflowName := range c.arch.Dataflows {
-		err := c.iamOrch.VerifyIAMForDataflow(ctx, dataflowName, c.serviceAccountEmails, c.options.PolicyPollTimeout)
+		// Pass the combined map of all service account emails.
+		// The verification function will select the ones it needs for this dataflow.
+		err := c.iamOrch.VerifyResourceLevelIAMForDataflow(ctx, dataflowName, c.serviceAccountEmails, c.options.PolicyPollTimeout)
 		if err != nil {
-			return fmt.Errorf("failed during IAM verification for dataflow '%s': %w", dataflowName, err)
+			return fmt.Errorf("failed during resource-level IAM verification for dataflow '%s': %w", dataflowName, err)
 		}
 	}
-	c.logger.Info().Msg("Phase 4: Dataflow IAM verification complete.")
+	c.logger.Info().Msg("Phase 4: Dataflow resource-level IAM verification complete.")
 	return nil
 }
 
