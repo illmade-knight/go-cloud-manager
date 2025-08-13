@@ -1,0 +1,9 @@
+topics:
+    - name: tracer-topic-936573da
+      producer_service:
+        name: tracer-publisher-936573da
+        env: TRACER_TOPIC_ID
+subscriptions: []
+bigquery_datasets: []
+bigquery_tables: []
+gcs_buckets: []

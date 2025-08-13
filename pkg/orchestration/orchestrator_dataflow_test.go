@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,39 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+// In orchestrator_dataflow_test.go
+
+// preflightServiceConfigs generates the service-specific YAML files and then
+// runs a validation command (e.g., `go test`) in each service's source
+// directory to ensure the generated config is valid and readable.
+func preflightServiceConfigs(t *testing.T, arch *servicemanager.MicroserviceArchitecture) {
+	t.Helper()
+
+	// 2. Iterate through each service and run its local tests.
+	// The service's own unit/integration tests should include a test
+	// that loads and validates its `resources.yaml`.
+	t.Log("Running local preflight validation for each service...")
+	for _, df := range arch.Dataflows {
+		for _, service := range df.Services {
+			if service.Deployment == nil {
+				continue
+			}
+			serviceDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
+
+			t.Logf("Validating service in directory: %s", serviceDir)
+
+			// Here we assume `go test` in the service's directory is sufficient
+			// to validate its ability to load the config.
+			cmd := exec.Command("go", "test", "./...")
+			cmd.Dir = serviceDir
+			output, err := cmd.CombinedOutput()
+			require.NoError(t, err, "Preflight validation failed for service '%s'. Output:\n%s", service.Name, string(output))
+		}
+
+	}
+	t.Log("✅ All services passed local preflight validation.")
+}
 
 // TestConductor_Dataflow_CloudIntegration is the final end-to-end cloud integration test for the Conductor.
 //
@@ -112,7 +146,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 							},
 							ProducerService: &servicemanager.ServiceMapping{
 								Name: pubName,
-								Env:  "TOPIC_ID",
+								Env:  "TRACER_TOPIC_ID",
 							},
 						},
 						{
@@ -131,7 +165,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 						Topic: tracerTopicName,
 						ConsumerService: &servicemanager.ServiceMapping{
 							Name: subName,
-							Env:  "SUBSCRIPTION_ID",
+							Env:  "TRACER_SUB_ID",
 						},
 					}},
 				},
@@ -149,6 +183,14 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	//
 	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
 	require.NoError(t, err)
+
+	// advanced preflight validation
+	t.Log("Generating service-specific YAML configurations...")
+	_, err = orchestration.GenerateServiceConfigs(arch, true)
+	require.NoError(t, err)
+
+	// 3. NEW: Run the local preflight check before any cloud deployment.
+	preflightServiceConfigs(t, arch)
 
 	leasedSDEmail, err := iamClient.EnsureServiceAccountExists(ctx, arch.ServiceManagerSpec.ServiceAccount)
 	require.NoError(t, err)

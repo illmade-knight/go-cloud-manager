@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed" // Required for go:embed
 	"fmt"
 	"net/http"
 	"os"
@@ -11,10 +12,14 @@ import (
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
 )
 
-// config holds all the application configuration.
-type config struct {
+//go:embed resources.yaml
+var resourcesYAML []byte
+
+// serviceConfig holds all the application configuration.
+type serviceConfig struct {
 	ProjectID           string
 	TopicID             string
 	Port                string
@@ -23,10 +28,30 @@ type config struct {
 	AutoPublishCount    int
 }
 
-// getEnv reads and parses configuration from environment variables.
-func getEnv() (config, error) {
-	cfg := config{
-		// Default values
+// resourceConfig defines the minimal struct to unmarshal the service-specific YAML.
+type resourceConfig struct {
+	Topics []struct {
+		Name string `yaml:"name"`
+	} `yaml:"topics"`
+}
+
+// getEnv reads and parses configuration from environment variables and the embedded YAML.
+func getEnv(logger zerolog.Logger) (serviceConfig, error) {
+	// --- 1. Load resource links from embedded YAML ---
+	var resources resourceConfig
+	err := yaml.Unmarshal(resourcesYAML, &resources)
+	if err != nil {
+		return serviceConfig{}, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
+	}
+	if len(resources.Topics) != 1 {
+		return serviceConfig{}, fmt.Errorf("configuration error: expected exactly 1 topic in resources.yaml, found %d", len(resources.Topics))
+	}
+
+	// --- 2. Load runtime config from environment variables ---
+	cfg := serviceConfig{
+		// Set resource IDs from YAML
+		TopicID: resources.Topics[0].Name,
+		// Set default values for runtime vars
 		Port:                "8080",
 		AutoPublishEnabled:  true,
 		AutoPublishInterval: 20 * time.Second,
@@ -34,17 +59,16 @@ func getEnv() (config, error) {
 	}
 
 	cfg.ProjectID = os.Getenv("PROJECT_ID")
-	cfg.TopicID = os.Getenv("TOPIC_ID")
-	if cfg.ProjectID == "" || cfg.TopicID == "" {
-		return cfg, fmt.Errorf("missing required environment variables (PROJECT_ID, TOPIC_ID)")
+	if cfg.ProjectID == "" {
+		return cfg, fmt.Errorf("missing required environment variable: PROJECT_ID")
 	}
 
 	if port := os.Getenv("PORT"); port != "" {
 		cfg.Port = port
 	}
 
-	if enabledStr := os.Getenv("AUTO_PUBLISH_ENABLED"); enabledStr == "true" || enabledStr == "1" {
-		cfg.AutoPublishEnabled = true
+	if enabledStr := os.Getenv("AUTO_PUBLISH_ENABLED"); enabledStr != "" {
+		cfg.AutoPublishEnabled = (enabledStr == "true" || enabledStr == "1")
 	}
 
 	if intervalStr := os.Getenv("AUTO_PUBLISH_INTERVAL"); intervalStr != "" {
@@ -69,7 +93,7 @@ func getEnv() (config, error) {
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-publisher").Logger()
 
-	cfg, err := getEnv()
+	cfg, err := getEnv(logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration error")
 	}
@@ -84,19 +108,6 @@ func main() {
 	}()
 
 	topic := client.Topic(cfg.TopicID)
-	logger.Info().Str("topic", topic.ID()).Msg("Checking topic existence and IAM policy...")
-	exists, err := topic.Exists(ctx)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to check for topic")
-	}
-	if !exists {
-		logger.Fatal().Msg("Topic does not exist")
-	}
-	policy, err := topic.IAM().Policy(ctx)
-	if err != nil {
-		return
-	}
-	logger.Info().Str("topic", topic.ID()).Interface("policy", policy.Roles()).Msg("Topic exists and has IAM policy:")
 
 	// --- Auto-Publisher (IoT Simulation) ---
 	if cfg.AutoPublishEnabled {
@@ -141,8 +152,6 @@ func startAutoPublisher(ctx context.Context, logger zerolog.Logger, topic *pubsu
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	logger.Info().Str("topic", topic.ID()).Msg("Auto-publisher started. Sending messages...")
 
 	for i := 0; i < count; i++ {
 		select {

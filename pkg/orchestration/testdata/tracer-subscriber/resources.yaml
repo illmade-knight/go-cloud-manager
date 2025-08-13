@@ -1,0 +1,14 @@
+topics:
+    - name: verify-topic-936573da
+      producer_service:
+        name: tracer-subscriber-936573da
+        env: VERIFY_TOPIC_ID
+subscriptions:
+    - name: tracer-sub-936573da
+      topic: tracer-topic-936573da
+      consumer_service:
+        name: tracer-subscriber-936573da
+        env: TRACER_SUB_ID
+bigquery_datasets: []
+bigquery_tables: []
+gcs_buckets: []

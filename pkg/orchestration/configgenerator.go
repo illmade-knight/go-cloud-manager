@@ -2,9 +2,10 @@ package orchestration
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,17 +34,10 @@ func getAllServices(arch *servicemanager.MicroserviceArchitecture) map[string]se
 // marshaled YAML []byte for that service's configuration.
 func GenerateServiceConfigs(
 	arch *servicemanager.MicroserviceArchitecture,
-	imageRepo string,
-	logger zerolog.Logger,
-) (map[string][]byte, error) {
+	write bool,
+) (map[string]servicemanager.CloudResourcesSpec, error) {
 
-	// 1. Hydrate the entire architecture for the production run.
-	err := servicemanager.HydrateArchitecture(arch, imageRepo, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to hydrate architecture: %w", err)
-	}
-
-	serviceConfigs := make(map[string][]byte)
+	serviceConfigs := make(map[string]servicemanager.CloudResourcesSpec)
 	allServices := getAllServices(arch)
 
 	// 2. Iterate through each service to generate its specific config.
@@ -128,18 +122,27 @@ func GenerateServiceConfigs(
 				}
 			}
 		}
+		serviceConfigs[serviceName] = serviceResourceSpec
+	}
 
-		// 3. Marshal the subset of resources into YAML.
-		// The wrapper ensures the top-level key is "resources:".
-		wrapper := struct {
-			Resources servicemanager.CloudResourcesSpec `yaml:"resources"`
-		}{Resources: serviceResourceSpec}
+	if write {
+		for serviceName, cloudResourceSpec := range serviceConfigs {
 
-		yamlBytes, err := yaml.Marshal(&wrapper)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal config for service '%s': %w", serviceName, err)
+			yamlBytes, err := yaml.Marshal(&cloudResourceSpec)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal config for service '%s': %w", serviceName, err)
+			}
+
+			serviceSpec := allServices[serviceName]
+			buildPath := serviceSpec.Deployment.BuildableModulePath
+			sourcePath := serviceSpec.Deployment.SourcePath
+
+			destPath := filepath.Join(sourcePath, buildPath, "resources.yaml")
+			err = os.WriteFile(destPath, yamlBytes, 0644)
+			if err != nil {
+				return nil, fmt.Errorf("failed to write config for service '%s': %w", serviceName, err)
+			}
 		}
-		serviceConfigs[serviceName] = yamlBytes
 	}
 
 	return serviceConfigs, nil

@@ -6,7 +6,6 @@ import (
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 func TestGenerateServiceConfigs(t *testing.T) {
@@ -45,14 +44,14 @@ func TestGenerateServiceConfigs(t *testing.T) {
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: "topic-a"},
+							CloudResource:   servicemanager.CloudResource{Name: "topic"},
 							ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"},
 						},
 					},
 					Subscriptions: []servicemanager.SubscriptionConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: "sub-a"},
-							Topic:           "topic-a",
+							CloudResource:   servicemanager.CloudResource{Name: "sub"},
+							Topic:           "topic",
 							ConsumerService: &servicemanager.ServiceMapping{Name: "subscriber-service"},
 						},
 					},
@@ -61,9 +60,12 @@ func TestGenerateServiceConfigs(t *testing.T) {
 		},
 	}
 
+	_, err := servicemanager.HydrateTestArchitecture(arch, "test_repo", "a", zerolog.Nop())
+	require.NoError(t, err)
+
 	// --- Act ---
 	// 2. Call the helper function to generate the configs.
-	serviceConfigs, err := GenerateServiceConfigs(arch, "test-repo", zerolog.Nop())
+	serviceConfigs, err := GenerateServiceConfigs(arch, false)
 
 	// --- Assert ---
 	// 3. Verify the results.
@@ -71,40 +73,24 @@ func TestGenerateServiceConfigs(t *testing.T) {
 	require.Len(t, serviceConfigs, 3, "Should generate a config for all 3 services")
 
 	// 4. Check the publisher's config.
-	publisherYAML, ok := serviceConfigs["publisher-service"]
-	require.True(t, ok)
+	publisherWrapper, ok := serviceConfigs["publisher-service-a"]
 
-	var publisherWrapper struct {
-		Resources servicemanager.CloudResourcesSpec `yaml:"resources"`
-	}
-	err = yaml.Unmarshal(publisherYAML, &publisherWrapper)
 	require.NoError(t, err)
-	require.Len(t, publisherWrapper.Resources.Topics, 1, "Publisher should have one topic")
-	require.Equal(t, "topic-a", publisherWrapper.Resources.Topics[0].Name)
-	require.Empty(t, publisherWrapper.Resources.Subscriptions, "Publisher should have no subscriptions")
+	require.Len(t, publisherWrapper.Topics, 1, "Publisher should have one topic")
+	require.Equal(t, "topic-a", publisherWrapper.Topics[0].Name)
+	require.Empty(t, publisherWrapper.Subscriptions, "Publisher should have no subscriptions")
 
 	// 5. Check the subscriber's config.
-	subscriberYAML, ok := serviceConfigs["subscriber-service"]
-	require.True(t, ok)
-
-	var subscriberWrapper struct {
-		Resources servicemanager.CloudResourcesSpec `yaml:"resources"`
-	}
-	err = yaml.Unmarshal(subscriberYAML, &subscriberWrapper)
+	subscriberWrapper, ok := serviceConfigs["subscriber-service-a"]
 	require.NoError(t, err)
-	require.Len(t, subscriberWrapper.Resources.Subscriptions, 1, "Subscriber should have one subscription")
-	require.Equal(t, "sub-a", subscriberWrapper.Resources.Subscriptions[0].Name)
-	require.Empty(t, subscriberWrapper.Resources.Topics, "Subscriber should have no topics")
+	require.Len(t, subscriberWrapper.Subscriptions, 1, "Subscriber should have one subscription")
+	require.Equal(t, "sub-a", subscriberWrapper.Subscriptions[0].Name)
+	require.Empty(t, subscriberWrapper.Topics, "Subscriber should have no topics")
 
 	// 6. Check the ServiceDirector's config (it has no direct resource links).
-	directorYAML, ok := serviceConfigs["service-director"]
+	directorWrapper, ok := serviceConfigs["service-director-a"]
 	require.True(t, ok)
 
-	var directorWrapper struct {
-		Resources servicemanager.CloudResourcesSpec `yaml:"resources"`
-	}
-	err = yaml.Unmarshal(directorYAML, &directorWrapper)
-	require.NoError(t, err)
-	require.Empty(t, directorWrapper.Resources.Topics, "Director should have no topics")
-	require.Empty(t, directorWrapper.Resources.Subscriptions, "Director should have no subscriptions")
+	require.Empty(t, directorWrapper.Topics, "Director should have no topics")
+	require.Empty(t, directorWrapper.Subscriptions, "Director should have no subscriptions")
 }
