@@ -397,6 +397,8 @@ func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding I
 			policy, err = c.pubsubClient.Topic(binding.ResourceID).IAM().Policy(ctx)
 		case "pubsub_subscription":
 			policy, err = c.pubsubClient.Subscription(binding.ResourceID).IAM().Policy(ctx)
+		case "gcs_bucket":
+			policy, err = c.storageClient.Bucket(binding.ResourceID).IAM().Policy(ctx)
 		case "cloudrun_service":
 			// REFACTOR: Implemented check for Cloud Run service IAM.
 			if binding.ResourceLocation == "" {
