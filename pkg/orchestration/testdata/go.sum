@@ -165,6 +165,7 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/illmade-knight/go-cloud-manager v0.2.14-beta h1:XNDg8hcCzL1HiFpiT6NIWnPYAvYXAO+79qx3Nbt1Eb0=
 github.com/illmade-knight/go-cloud-manager v0.2.14-beta/go.mod h1:sfkz1upskQAnmB7WQqZ2EFQJfLtWq4eMUNeZ3Evr3Cw=
+github.com/illmade-knight/go-cloud-manager v0.2.15-beta/go.mod h1:sfkz1upskQAnmB7WQqZ2EFQJfLtWq4eMUNeZ3Evr3Cw=
 github.com/illmade-knight/go-dataflow v0.2.1-beta h1:Ue2MAK9aKkxXyjkPsMbXUSzvC+cCqJRFtkazMMl6LJQ=
 github.com/illmade-knight/go-dataflow v0.2.1-beta/go.mod h1:kz43+B89zYbVsUDawQoRbgUOukbOWXpX46duOIc5FK8=
 github.com/illmade-knight/go-test v0.0.2-beta h1:b7LKySBc2v93kU4JhSv4FzDdVAO0UD/2YyFtCv/LKco=

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"cloud.google.com/go/iam/apiv1/iampb"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
@@ -452,4 +453,48 @@ func (o *IAMOrchestrator) GetProjectNumber(ctx context.Context, projectID string
 	}
 
 	return strings.TrimPrefix(project.Name, "projects/"), nil
+}
+
+// PreflightChecks verifies that the identity running the Conductor has the
+// minimum necessary permissions to perform its verification steps.
+func (o *IAMOrchestrator) PreflightChecks(ctx context.Context) error {
+	o.logger.Info().Msg("Running orchestrator preflight permission checks...")
+
+	requiredPermissions := &iampb.TestIamPermissionsRequest{
+		Resource: fmt.Sprintf("projects/%s", o.arch.ProjectID),
+		Permissions: []string{
+			"resourcemanager.projects.getIamPolicy",
+			"pubsub.topics.getIamPolicy",
+			"pubsub.subscriptions.getIamPolicy",
+			"storage.buckets.getIamPolicy",
+			"bigquery.tables.getIamPolicy",
+			"run.services.getIamPolicy",
+			"secretmanager.secrets.getIamPolicy",
+			"artifactregistry.repositories.getIamPolicy",
+		},
+	}
+
+	resp, err := o.iamProjectManager.TestProjectIAMBinding(ctx, requiredPermissions)
+	if err != nil {
+		return fmt.Errorf("failed to test project IAM permissions: %w", err)
+	}
+
+	var missingPermissions []string
+	allowedMap := make(map[string]bool)
+	for _, p := range resp.Permissions {
+		allowedMap[p] = true
+	}
+
+	for _, p := range requiredPermissions.Permissions {
+		if !allowedMap[p] {
+			missingPermissions = append(missingPermissions, p)
+		}
+	}
+
+	if len(missingPermissions) > 0 {
+		return fmt.Errorf("orchestrator is missing required permissions: %v", missingPermissions)
+	}
+
+	o.logger.Info().Msg("✅ Orchestrator permissions are sufficient.")
+	return nil
 }

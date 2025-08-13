@@ -68,6 +68,15 @@ func (m *GoogleIAMProjectClient) CheckProjectIAMBinding(ctx context.Context, mem
 	return false, nil // Member does not have the role.
 }
 
+// TestProjectIAMBinding checks which of a given set of permissions the caller has on the project.
+// This is a lightweight way to perform pre-flight checks without needing to get the entire policy.
+func (m *GoogleIAMProjectClient) TestProjectIAMBinding(
+	ctx context.Context,
+	req *iampb.TestIamPermissionsRequest,
+) (*iampb.TestIamPermissionsResponse, error) {
+	return m.client.TestIamPermissions(ctx, req)
+}
+
 // AddProjectIAMBinding grants a role to a member at the project level.
 // It uses the standard "get-modify-set" pattern to ensure that existing bindings are preserved.
 func (m *GoogleIAMProjectClient) AddProjectIAMBinding(ctx context.Context, member, role string) error {

@@ -12,7 +12,7 @@ go 1.23.0
 require (
 	cloud.google.com/go/pubsub v1.50.0
 	github.com/google/uuid v1.6.0
-	github.com/illmade-knight/go-cloud-manager v0.2.14-beta
+	github.com/illmade-knight/go-cloud-manager v0.2.15-beta
 	github.com/rs/zerolog v1.34.0
 	gopkg.in/yaml.v3 v3.0.1
 )
