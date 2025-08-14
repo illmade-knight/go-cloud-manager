@@ -100,6 +100,18 @@ func GenerateServiceConfigs(
 					serviceResourceSpec.GCSBuckets = append(serviceResourceSpec.GCSBuckets, bucket)
 				}
 			}
+			for _, db := range dataflow.Resources.FirestoreDatabases {
+				isLinked := false
+				for _, consumer := range db.Consumers {
+					if consumer.Name == service.Name {
+						isLinked = true
+						break
+					}
+				}
+				if isLinked {
+					serviceResourceSpec.FirestoreDatabases = append(serviceResourceSpec.FirestoreDatabases, db)
+				}
+			}
 			// --- Firestore Collections (Previously missing logic) ---
 			for _, collection := range dataflow.Resources.FirestoreCollections {
 				isLinked := false

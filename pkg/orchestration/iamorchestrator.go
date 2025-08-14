@@ -167,9 +167,6 @@ func (o *IAMOrchestrator) ApplyProjectLevelIAMForDataflow(ctx context.Context, d
 	return nil
 }
 
-// REFACTOR: This new function separates the verification of project-level IAM from resource-level IAM.
-// It will be called by the Conductor during the initial IAM setup phase to fail fast.
-//
 // VerifyProjectLevelIAMForDataflow polls project-level IAM policies until they reflect the planned state.
 func (o *IAMOrchestrator) VerifyProjectLevelIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string, verificationTimeout time.Duration) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying PROJECT-LEVEL IAM policy propagation...")
@@ -236,9 +233,6 @@ func (o *IAMOrchestrator) VerifyProjectLevelIAMForDataflow(ctx context.Context, 
 	return nil
 }
 
-// REFACTOR: This new function handles verification for resource-level IAM, which can only happen
-// after the ServiceDirector has created the underlying resources (e.g., topics, subscriptions).
-//
 // VerifyResourceLevelIAMForDataflow polls resource-level IAM policies until they reflect the planned state.
 func (o *IAMOrchestrator) VerifyResourceLevelIAMForDataflow(ctx context.Context, dataflowName string, saEmails map[string]string, verificationTimeout time.Duration) error {
 	o.logger.Info().Str("dataflow", dataflowName).Msg("Verifying RESOURCE-LEVEL IAM policy propagation...")
