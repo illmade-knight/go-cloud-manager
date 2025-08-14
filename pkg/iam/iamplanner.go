@@ -39,7 +39,7 @@ func NewRolePlanner(logger zerolog.Logger) *RolePlanner {
 }
 
 // PlanRolesForServiceDirector plans the necessary administrative roles for the orchestrator.
-func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.MicroserviceArchitecture) ([]string, error) {
+func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.MicroserviceArchitecture) ([]IAMBinding, error) {
 	p.logger.Info().Str("architecture", arch.Environment.Name).Msg("Planning required IAM roles for ServiceDirector...")
 
 	requiredRoles := make(map[string]struct{})
@@ -72,13 +72,19 @@ func (p *RolePlanner) PlanRolesForServiceDirector(arch *servicemanager.Microserv
 		}
 	}
 
-	rolesSlice := make([]string, 0, len(requiredRoles))
+	// Convert the map of roles into a structured slice of IAMBinding structs.
+	bindings := make([]IAMBinding, 0, len(requiredRoles))
 	for role := range requiredRoles {
-		rolesSlice = append(rolesSlice, role)
+		bindings = append(bindings, IAMBinding{
+			ServiceAccount: arch.ServiceManagerSpec.ServiceAccount,
+			ResourceType:   "project",
+			ResourceID:     arch.ProjectID,
+			Role:           role,
+		})
 	}
 
-	p.logger.Info().Strs("roles", rolesSlice).Msg("ServiceDirector IAM role plan complete.")
-	return rolesSlice, nil
+	p.logger.Info().Int("bindings_planned", len(bindings)).Msg("ServiceDirector IAM role plan complete.")
+	return bindings, nil
 }
 
 // PlanRolesForApplicationServices returns a flat slice of all bindings for application services.

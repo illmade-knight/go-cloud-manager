@@ -1,7 +1,7 @@
 topics:
-    - name: tracer-topic-936573da
+    - name: tracer-topic-a16c67c2
       producer_service:
-        name: tracer-publisher-936573da
+        name: tracer-publisher-a16c67c2
         env: TRACER_TOPIC_ID
 subscriptions: []
 bigquery_datasets: []

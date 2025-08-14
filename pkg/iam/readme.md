@@ -41,7 +41,7 @@ In your `dataflow.yaml` files, specify the permissions your services need.
 
 **Example `dataflow.yaml` with IAM definitions:**
 
-```yaml
+```
 
 name: "data-processing-flow"
 

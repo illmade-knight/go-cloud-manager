@@ -9,11 +9,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/prerequisites"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
+
+// PlanEntry is a richer struct for the IAM plan file, including the reason for the binding.
+type PlanEntry struct {
+	Source  string         `yaml:"source"`
+	Binding iam.IAMBinding `yaml:"binding"`
+	Reason  string         `yaml:"reason"`
+}
 
 // PrepareServiceDirectorSource marshals the arch to YAML and copies the resulting services.yaml file
 // into the ServiceDirector's source code directory so it can be included in the build.
@@ -93,6 +101,64 @@ func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitec
 		serviceAccountEmails: make(map[string]string),
 		builtImageURIs:       make(map[string]string),
 	}, nil
+}
+
+func (c *Conductor) Preflight(ctx context.Context) error {
+	// --- NEW PRE-FLIGHT CHECK ---
+	if err := c.iamOrch.PreflightChecks(ctx); err != nil {
+		return fmt.Errorf("preflight permission check failed: %w", err)
+	}
+	return nil
+}
+
+// GenerateIAMPlan creates the full IAM plan and writes it to iam_plan.yaml.
+func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
+	c.logger.Info().Msg("Generating full IAM plan...")
+
+	planner := iam.NewRolePlanner(c.logger)
+	var fullPlan []PlanEntry
+
+	// 1. Get and annotate the plan for the ServiceDirector.
+	directorBindings, err := planner.PlanRolesForServiceDirector(c.arch)
+	if err != nil {
+		return fmt.Errorf("failed to plan ServiceDirector roles: %w", err)
+	}
+	for _, binding := range directorBindings {
+		fullPlan = append(fullPlan, PlanEntry{
+			Source:  "ServiceDirector",
+			Binding: binding,
+			Reason:  "Administrative role required by the ServiceDirector to manage dataflow resources.",
+		})
+	}
+
+	// 2. Get and annotate the plan for the application services.
+	appBindings, err := planner.PlanRolesForApplicationServices(c.arch)
+	if err != nil {
+		return fmt.Errorf("failed to plan application service roles: %w", err)
+	}
+	for _, binding := range appBindings {
+		fullPlan = append(fullPlan, PlanEntry{
+			Source:  "ApplicationService",
+			Binding: binding,
+			Reason:  fmt.Sprintf("Needed because of the service-to-resource link defined in services.yaml for '%s'.", binding.ServiceAccount),
+		})
+	}
+
+	// 3. Marshal the enhanced plan to YAML.
+	yamlBytes, err := yaml.Marshal(fullPlan)
+	if err != nil {
+		return fmt.Errorf("failed to marshal IAM plan to YAML: %w", err)
+	}
+
+	// 4. Write the plan to a file.
+	fileName := iamPlanYAML
+	err = os.WriteFile(fileName, yamlBytes, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write IAM plan to file: %w", err)
+	}
+
+	c.logger.Info().Str("file", fileName).Int("bindings", len(fullPlan)).Msg("✅ Successfully generated IAM plan.")
+	return nil
 }
 
 // Run executes the full, multi-phase orchestration workflow in the correct sequence.

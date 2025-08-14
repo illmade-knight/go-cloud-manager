@@ -327,7 +327,9 @@ func (o *IAMOrchestrator) pollForBinding(ctx context.Context, binding iam.IAMBin
 func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[string]string, error) {
 	o.logger.Info().Msg("Starting ServiceDirector IAM setup...")
 	serviceEmails := make(map[string]string)
-	requiredRoles, err := o.planner.PlanRolesForServiceDirector(o.arch)
+
+	// REFACTOR: This now returns a slice of IAMBinding structs.
+	requiredBindings, err := o.planner.PlanRolesForServiceDirector(o.arch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to plan IAM roles for ServiceDirector: %w", err)
 	}
@@ -346,13 +348,15 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 	serviceEmails[serviceName] = saEmail
 
 	member := "serviceAccount:" + saEmail
-	for _, role := range requiredRoles {
-		o.logger.Info().Str("role", role).Str("member", member).Msg("Granting project-level role to ServiceDirector SA.")
-		err = o.iamProjectManager.AddProjectIAMBinding(ctx, member, role)
+	// REFACTOR: Loop over the bindings, not just the role strings.
+	for _, binding := range requiredBindings {
+		o.logger.Info().Str("role", binding.Role).Str("member", member).Msg("Granting project-level role to ServiceDirector SA.")
+		err = o.iamProjectManager.AddProjectIAMBinding(ctx, member, binding.Role)
 		if err != nil {
-			return nil, fmt.Errorf("failed to grant project role '%s' to ServiceDirector SA: %w", role, err)
+			return nil, fmt.Errorf("failed to grant project role '%s' to ServiceDirector SA: %w", binding.Role, err)
 		}
 	}
+
 	projectNumber, err := o.GetProjectNumber(ctx, o.arch.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project number: %w", err)
@@ -363,18 +367,16 @@ func (o *IAMOrchestrator) SetupServiceDirectorIAM(ctx context.Context) (map[stri
 		return nil, fmt.Errorf("failed to grant 'actAs' permission to Cloud Build SA: %w", err)
 	}
 
-	o.logger.Info().Msg("ServiceDirector IAM grant phase complete.")
+	o.logger.Info().Msg("ServiceDirector IAM setup complete.")
 	return serviceEmails, nil
 }
 
-// REFACTOR: This new function is called by the Conductor to fix a race condition. It ensures
-// that the roles granted to the Service Director have fully propagated before the Conductor
-// attempts to deploy it.
-//
 // VerifyServiceDirectorIAM polls the project-level IAM policies for the ServiceDirector until they are effective.
 func (o *IAMOrchestrator) VerifyServiceDirectorIAM(ctx context.Context, saEmails map[string]string, verificationTimeout time.Duration) error {
 	o.logger.Info().Msg("Verifying ServiceDirector project-level IAM policy propagation...")
-	requiredRoles, err := o.planner.PlanRolesForServiceDirector(o.arch)
+
+	// REFACTOR: This now returns a slice of IAMBinding structs.
+	requiredBindings, err := o.planner.PlanRolesForServiceDirector(o.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan IAM roles for ServiceDirector verification: %w", err)
 	}
@@ -387,16 +389,11 @@ func (o *IAMOrchestrator) VerifyServiceDirectorIAM(ctx context.Context, saEmails
 	member := "serviceAccount:" + saEmail
 
 	var wg sync.WaitGroup
-	errs := make(chan error, len(requiredRoles))
-	o.logger.Info().Int("bindings", len(requiredRoles)).Msg("Concurrently polling for all ServiceDirector IAM bindings...")
+	errs := make(chan error, len(requiredBindings))
+	o.logger.Info().Int("bindings", len(requiredBindings)).Msg("Concurrently polling for all ServiceDirector IAM bindings...")
 
-	for _, role := range requiredRoles {
-		binding := iam.IAMBinding{
-			ResourceType: "project",
-			ResourceID:   o.arch.ProjectID,
-			Role:         role,
-			// ServiceAccount field isn't needed by pollForBinding, which just uses the `member` string.
-		}
+	// REFACTOR: Loop over the full binding structs to poll for each one.
+	for _, binding := range requiredBindings {
 		wg.Add(1)
 		go func(b iam.IAMBinding) {
 			defer wg.Done()

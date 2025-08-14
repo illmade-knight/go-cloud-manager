@@ -33,9 +33,7 @@ import (
 func preflightServiceConfigs(t *testing.T, arch *servicemanager.MicroserviceArchitecture) {
 	t.Helper()
 
-	// 2. Iterate through each service and run its local tests.
-	// The service's own unit/integration tests should include a test
-	// that loads and validates its `resources.yaml`.
+	// 2. Iterate through each service
 	t.Log("Running local preflight validation for each service...")
 	for _, df := range arch.Dataflows {
 		for _, service := range df.Services {
@@ -53,7 +51,6 @@ func preflightServiceConfigs(t *testing.T, arch *servicemanager.MicroserviceArch
 			output, err := cmd.CombinedOutput()
 			require.NoError(t, err, "Preflight validation failed for service '%s'. Output:\n%s", service.Name, string(output))
 		}
-
 	}
 	t.Log("✅ All services passed local preflight validation.")
 }

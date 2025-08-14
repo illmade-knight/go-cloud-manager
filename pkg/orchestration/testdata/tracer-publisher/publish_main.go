@@ -35,11 +35,12 @@ type resourceConfig struct {
 	} `yaml:"topics"`
 }
 
-// getEnv reads and parses configuration from environment variables and the embedded YAML.
-func getEnv(logger zerolog.Logger) (serviceConfig, error) {
+// loadAndValidateConfig centralizes all configuration loading and validation.
+// It is now a testable helper function.
+func loadAndValidateConfig(yamlBytes []byte) (serviceConfig, error) {
 	// --- 1. Load resource links from embedded YAML ---
 	var resources resourceConfig
-	err := yaml.Unmarshal(resourcesYAML, &resources)
+	err := yaml.Unmarshal(yamlBytes, &resources)
 	if err != nil {
 		return serviceConfig{}, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
 	}
@@ -49,9 +50,7 @@ func getEnv(logger zerolog.Logger) (serviceConfig, error) {
 
 	// --- 2. Load runtime config from environment variables ---
 	cfg := serviceConfig{
-		// Set resource IDs from YAML
-		TopicID: resources.Topics[0].Name,
-		// Set default values for runtime vars
+		TopicID:             resources.Topics[0].Name,
 		Port:                "8080",
 		AutoPublishEnabled:  true,
 		AutoPublishInterval: 20 * time.Second,
@@ -66,11 +65,9 @@ func getEnv(logger zerolog.Logger) (serviceConfig, error) {
 	if port := os.Getenv("PORT"); port != "" {
 		cfg.Port = port
 	}
-
 	if enabledStr := os.Getenv("AUTO_PUBLISH_ENABLED"); enabledStr != "" {
 		cfg.AutoPublishEnabled = (enabledStr == "true" || enabledStr == "1")
 	}
-
 	if intervalStr := os.Getenv("AUTO_PUBLISH_INTERVAL"); intervalStr != "" {
 		interval, err := time.ParseDuration(intervalStr)
 		if err != nil {
@@ -78,7 +75,6 @@ func getEnv(logger zerolog.Logger) (serviceConfig, error) {
 		}
 		cfg.AutoPublishInterval = interval
 	}
-
 	if countStr := os.Getenv("AUTO_PUBLISH_COUNT"); countStr != "" {
 		count, err := strconv.Atoi(countStr)
 		if err != nil {
@@ -93,7 +89,7 @@ func getEnv(logger zerolog.Logger) (serviceConfig, error) {
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-publisher").Logger()
 
-	cfg, err := getEnv(logger)
+	cfg, err := loadAndValidateConfig(resourcesYAML)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration error")
 	}
@@ -109,12 +105,10 @@ func main() {
 
 	topic := client.Topic(cfg.TopicID)
 
-	// --- Auto-Publisher (IoT Simulation) ---
 	if cfg.AutoPublishEnabled {
 		go startAutoPublisher(ctx, logger, topic, cfg.AutoPublishInterval, cfg.AutoPublishCount)
 	}
 
-	// --- HTTP Trigger Logic ---
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
