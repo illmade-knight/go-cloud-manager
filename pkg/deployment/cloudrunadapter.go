@@ -3,8 +3,9 @@ package deployment
 import (
 	"context"
 	"fmt"
-	"github.com/rs/zerolog"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"google.golang.org/api/option"
 	"google.golang.org/api/run/v2"

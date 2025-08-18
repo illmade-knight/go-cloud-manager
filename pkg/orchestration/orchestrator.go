@@ -18,7 +18,6 @@ import (
 	"google.golang.org/api/option"
 )
 
-// ... (OrchestratorState, Command, and other structs are unchanged) ...
 type OrchestratorState string
 
 const (
@@ -236,7 +235,6 @@ func (o *Orchestrator) listenForEvents(ctx context.Context) {
 	}
 }
 
-// --- (The rest of the file is included below without change) ---
 func (o *Orchestrator) Teardown(ctx context.Context) error {
 	o.cancelFunc()
 	var allErrors []string

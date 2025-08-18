@@ -177,13 +177,14 @@ func (c *Conductor) Run(ctx context.Context) error {
 		return err
 	}
 	// Phase 3: Now that builds are done and director is ready, trigger remote setup. This is a blocking phase.
-	completionEvents, err := c.triggerRemoteSetup(ctx)
+	// we have removed the check for actual vs requested resources - we expect an error if the requested resources are not available.
+	_, err := c.triggerRemoteSetup(ctx)
 	if err != nil {
 		return err
 	}
 	// REFACTOR: This phase is now more specific.
 	// Phase 4: Now that remote setup is complete, verify resource-level IAM policy propagation.
-	if err := c.verifyResourceLevelIAMPhase(ctx, completionEvents); err != nil {
+	if err := c.verifyResourceLevelIAMPhase(ctx); err != nil {
 		return err
 	}
 	// Phase 5: Now that everything is verified, deploy the final application services.
@@ -367,7 +368,7 @@ func (c *Conductor) triggerRemoteSetup(ctx context.Context) (map[string]Completi
 
 // REFACTOR: This function has been renamed from verificationPhase and now only verifies
 // resource-level IAM policies, as project-level policies were already verified in Phase 1.
-func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context, actualEvents map[string]CompletionEvent) error {
+func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context) error {
 	if !c.options.VerifyDataflowIAM {
 		return nil
 	}

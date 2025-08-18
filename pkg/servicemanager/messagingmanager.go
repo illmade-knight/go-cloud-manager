@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog"
 	"sync"
+
+	"github.com/rs/zerolog"
 )
 
 // MessagingManager handles the creation, validation, and deletion of Pub/Sub topics and subscriptions.

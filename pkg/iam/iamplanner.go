@@ -147,7 +147,7 @@ func (p *RolePlanner) planDataResourceLinkRoles(dataflow servicemanager.Resource
 		// NOTE: Unlike other resources, Firestore roles are granted at the project
 		// level, so the ResourceID for the binding is not used in the same way,
 		// but we set it for consistency in the plan.
-		const firestoreResourceID = "(default)"
+		//const firestoreResourceID = "(default)"
 		for _, producer := range db.Producers {
 			if service, ok := dataflow.Services[producer.Name]; ok {
 				// The 'datastore.user' role grants read and write permissions.

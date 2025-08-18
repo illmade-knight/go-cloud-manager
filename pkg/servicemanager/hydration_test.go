@@ -24,14 +24,20 @@ func TestHydrateArchitecture(t *testing.T) {
 			},
 			Resources: servicemanager.CloudResourcesSpec{
 				Topics: []servicemanager.TopicConfig{{
-					CloudResource:   servicemanager.CloudResource{Name: "events-topic"},
-					ProducerService: &servicemanager.ServiceMapping{Name: "my-service", Env: "EVENTS_TOPIC_ID"},
+					CloudResource: servicemanager.CloudResource{Name: "events-topic"},
+					ProducerService: &servicemanager.ServiceMapping{Name: "my-service", Lookup: servicemanager.Lookup{
+						Key:    "EVENTS_TOPIC_ID",
+						Method: servicemanager.LookupMethodEnv,
+					}},
 				}},
 				// NEW_CODE: Added a Firestore collection to test its hydration.
 				FirestoreCollections: []servicemanager.FirestoreCollection{{
 					CloudResource: servicemanager.CloudResource{Name: "users-collection"},
 					Producers: []servicemanager.ServiceMapping{
-						{Name: "my-service", Env: "USERS_COLLECTION_NAME"},
+						{Name: "my-service", Lookup: servicemanager.Lookup{
+							Key:    "USERS_COLLECTION_NAME",
+							Method: servicemanager.LookupMethodEnv,
+						}},
 					},
 				}},
 			},
@@ -71,8 +77,11 @@ func TestHydrateTestArchitecture(t *testing.T) {
 			},
 			Resources: servicemanager.CloudResourcesSpec{
 				Topics: []servicemanager.TopicConfig{{
-					CloudResource:   servicemanager.CloudResource{Name: originalTopicName},
-					ProducerService: &servicemanager.ServiceMapping{Name: originalServiceName, Env: "EVENTS_TOPIC_ID"},
+					CloudResource: servicemanager.CloudResource{Name: originalTopicName},
+					ProducerService: &servicemanager.ServiceMapping{Name: originalServiceName, Lookup: servicemanager.Lookup{
+						Key:    "EVENTS_TOPIC_ID",
+						Method: servicemanager.LookupMethodYAML,
+					}},
 				}},
 			},
 		}},
@@ -99,7 +108,9 @@ func TestHydrateTestArchitecture(t *testing.T) {
 
 	// Check that derived values (image path and env var) use the new hydrated names
 	assert.Contains(t, hydratedSvc.Deployment.Image, "/"+hydratedSvcName+":", "Image path should use the new hydrated service name")
-	assert.Equal(t, hydratedTopicName, hydratedSvc.Deployment.EnvironmentVars["EVENTS_TOPIC_ID"], "Env var value should be the new hydrated resource name")
+	//assert.Equal(t, hydratedTopicName, hydratedSvc.Deployment.EnvironmentVars["EVENTS_TOPIC_ID"], "Lookup var value should be the new hydrated resource name")
+	//test the new ability to use a method other than env var
+	assert.NotEqual(t, hydratedTopicName, hydratedSvc.Deployment.EnvironmentVars["EVENTS_TOPIC_ID"], "We should no longer see the topic name in the env variables")
 }
 
 func TestHydrateArchitecture_ValidationFailure(t *testing.T) {

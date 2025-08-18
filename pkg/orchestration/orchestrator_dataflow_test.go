@@ -143,7 +143,10 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 							},
 							ProducerService: &servicemanager.ServiceMapping{
 								Name: pubName,
-								Env:  "TRACER_TOPIC_ID",
+								Lookup: servicemanager.Lookup{
+									Key:    "TRACER_TOPIC_ID",
+									Method: servicemanager.LookupMethodEnv,
+								},
 							},
 						},
 						{
@@ -151,7 +154,11 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 								Name: verifyTopicName,
 							},
 							ProducerService: &servicemanager.ServiceMapping{
-								Name: subName, Env: "VERIFY_TOPIC_ID",
+								Name: subName,
+								Lookup: servicemanager.Lookup{
+									Key:    "VERIFY_TOPIC_ID",
+									Method: servicemanager.LookupMethodEnv,
+								},
 							},
 						},
 					},
@@ -162,7 +169,10 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 						Topic: tracerTopicName,
 						ConsumerService: &servicemanager.ServiceMapping{
 							Name: subName,
-							Env:  "TRACER_SUB_ID",
+							Lookup: servicemanager.Lookup{
+								Key:    "TRACER_SUB_ID",
+								Method: servicemanager.LookupMethodEnv,
+							},
 						},
 					}},
 				},

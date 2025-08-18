@@ -1,15 +1,16 @@
 package servicemanager
 
 import (
-	"cloud.google.com/go/bigquery"
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"sync"
+
+	"cloud.google.com/go/bigquery"
 	"github.com/rs/zerolog"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
-	"net/http"
-	"sync"
 )
 
 // --- BigQuery Client Abstraction Interfaces ---

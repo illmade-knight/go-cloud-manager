@@ -85,7 +85,6 @@ const (
 	MessagingResourceType ResourceType = "messaging"
 	StorageResourceType   ResourceType = "storage"
 	BigQueryResourceType  ResourceType = "bigquery"
-	// NEW_CODE: Adding a resource type for the new Firestore manager.
 	FirestoreResourceType ResourceType = "firestore"
 )
 
@@ -150,7 +149,7 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 		}
 	}
 
-	// NEW_CODE: If Firestore resources are defined in the config, initialize the FirestoreManager.
+	// If Firestore resources are defined in the config, initialize the FirestoreManager.
 	if needsFirestore {
 		sm.logger.Info().Msg("Firestore resources found, initializing FirestoreManager.")
 		var firestoreClient DocumentStoreClient

@@ -3,17 +3,18 @@
 package servicemanager_test
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
+	"testing"
+	"time"
+
+	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
-	"time"
 )
 
 // TestMessagingManager_Integration tests the manager against a live Pub/Sub emulator.

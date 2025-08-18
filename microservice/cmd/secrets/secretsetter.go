@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"log"
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 )

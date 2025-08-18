@@ -125,53 +125,71 @@ func hydrateAllDeploymentSpecs(arch *MicroserviceArchitecture, defaultImageRepo 
 func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 	for _, dataflow := range arch.Dataflows {
 		for _, topic := range dataflow.Resources.Topics {
-			if topic.ProducerService != nil {
+			if topic.ProducerService != nil && topic.ProducerService.Lookup.Method == LookupMethodEnv {
 				if service, ok := dataflow.Services[topic.ProducerService.Name]; ok {
-					injectEnvVar(service.Deployment, topic.ProducerService.Env, topic.Name, "TOPIC_ID")
+					injectEnvVar(service.Deployment, topic.ProducerService.Lookup, topic.Name, "TOPIC_ID")
 				}
 			}
 		}
 		for _, sub := range dataflow.Resources.Subscriptions {
-			if sub.ConsumerService != nil {
+			if sub.ConsumerService != nil && sub.ConsumerService.Lookup.Method == LookupMethodEnv {
 				if service, ok := dataflow.Services[sub.ConsumerService.Name]; ok {
-					injectEnvVar(service.Deployment, sub.ConsumerService.Env, sub.Name, "SUB_ID")
+					injectEnvVar(service.Deployment, sub.ConsumerService.Lookup, sub.Name, "SUB_ID")
 				}
 			}
 		}
 		for _, table := range dataflow.Resources.BigQueryTables {
 			for _, producer := range table.Producers {
+				if producer.Lookup.Method != LookupMethodEnv {
+					continue
+				}
 				if service, ok := dataflow.Services[producer.Name]; ok {
-					injectEnvVar(service.Deployment, producer.Env, table.Name, "WRITE_TABLE")
+					injectEnvVar(service.Deployment, producer.Lookup, table.Name, "WRITE_TABLE")
 				}
 			}
 			for _, consumer := range table.Consumers {
+				if consumer.Lookup.Method != LookupMethodEnv {
+					continue
+				}
 				if service, ok := dataflow.Services[consumer.Name]; ok {
-					injectEnvVar(service.Deployment, consumer.Env, table.Name, "READ_TABLE")
+					injectEnvVar(service.Deployment, consumer.Lookup, table.Name, "READ_TABLE")
 				}
 			}
 		}
 		for _, bucket := range dataflow.Resources.GCSBuckets {
 			for _, producer := range bucket.Producers {
+				if producer.Lookup.Method != LookupMethodEnv {
+					continue
+				}
 				if service, ok := dataflow.Services[producer.Name]; ok {
-					injectEnvVar(service.Deployment, producer.Env, bucket.Name, "WRITE_BUCKET")
+					injectEnvVar(service.Deployment, producer.Lookup, bucket.Name, "WRITE_BUCKET")
 				}
 			}
 			for _, consumer := range bucket.Consumers {
+				if consumer.Lookup.Method != LookupMethodEnv {
+					continue
+				}
 				if service, ok := dataflow.Services[consumer.Name]; ok {
-					injectEnvVar(service.Deployment, consumer.Env, bucket.Name, "READ_BUCKET")
+					injectEnvVar(service.Deployment, consumer.Lookup, bucket.Name, "READ_BUCKET")
 				}
 			}
 		}
 		// NEW_CODE: Add hydration for Firestore collections.
 		for _, collection := range dataflow.Resources.FirestoreCollections {
 			for _, producer := range collection.Producers {
+				if producer.Lookup.Method != LookupMethodEnv {
+					continue
+				}
 				if service, ok := dataflow.Services[producer.Name]; ok {
-					injectEnvVar(service.Deployment, producer.Env, collection.Name, "WRITE_COLLECTION")
+					injectEnvVar(service.Deployment, producer.Lookup, collection.Name, "WRITE_COLLECTION")
 				}
 			}
 			for _, consumer := range collection.Consumers {
+				if consumer.Lookup.Method != LookupMethodEnv {
+					continue
+				}
 				if service, ok := dataflow.Services[consumer.Name]; ok {
-					injectEnvVar(service.Deployment, consumer.Env, collection.Name, "READ_COLLECTION")
+					injectEnvVar(service.Deployment, consumer.Lookup, collection.Name, "READ_COLLECTION")
 				}
 			}
 		}
@@ -291,11 +309,14 @@ func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, dataflowName, proj
 	spec.Image = generateImagePath(spec, serviceName, projectID)
 }
 
-func injectEnvVar(spec *DeploymentSpec, specifiedKey, resourceName, keySuffix string) {
+// REFACTOR: This function now accepts the Lookup struct. For now, it only uses the
+// 'Key' field to support the environment variable injection pattern. It can be
+// extended in the future to handle the 'Method' field.
+func injectEnvVar(spec *DeploymentSpec, lookup Lookup, resourceName, keySuffix string) {
 	if spec.EnvironmentVars == nil {
 		spec.EnvironmentVars = make(map[string]string)
 	}
-	envKey := specifiedKey
+	envKey := lookup.Key
 	if envKey == "" {
 		envKey = fmt.Sprintf("%s_%s", strings.Replace(strings.ToUpper(resourceName), "-", "_", -1), keySuffix)
 	}

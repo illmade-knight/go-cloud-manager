@@ -167,7 +167,7 @@ func (c *TestIAMClient) DeleteServiceAccount(ctx context.Context, accountEmail s
 	return nil
 }
 
-// REFACTOR: Implement the GetServiceAccount method to satisfy the IAMClient interface.
+// GetServiceAccount method satisfies the IAMClient interface.
 // This mock simulates checking the pool for the account's existence.
 func (c *TestIAMClient) GetServiceAccount(ctx context.Context, accountEmail string) error {
 	c.mu.Lock()

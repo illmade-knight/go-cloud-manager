@@ -13,7 +13,7 @@ type ContainerDeployer interface {
 	// DeployService deploys a pre-built image to the target platform, returning the service URL.
 	DeployService(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error)
 
-	// Deploy creates or updates a service based on its deployment spec.
+	// BuildAndDeploy creates or updates a service based on its deployment spec.
 	BuildAndDeploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error)
 	Teardown(ctx context.Context, serviceName string) error
 }

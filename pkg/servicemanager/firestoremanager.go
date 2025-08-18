@@ -122,7 +122,7 @@ func (fm *FirestoreManager) Verify(ctx context.Context, resources CloudResources
 	}
 
 	if len(allErrors) > 0 {
-		return fmt.Errorf("Firestore verification failed: %w", errors.Join(allErrors...))
+		return fmt.Errorf("firestore verification failed: %w", errors.Join(allErrors...))
 	}
 
 	fm.logger.Info().Msg("Firestore verification completed successfully.")

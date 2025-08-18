@@ -1,10 +1,11 @@
 package deployment
 
 import (
-	"cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
-	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	"context"
 	"io"
+
+	"cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 )
 
 type IStorageUploader interface {

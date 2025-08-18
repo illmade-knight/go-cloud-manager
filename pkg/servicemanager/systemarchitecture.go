@@ -172,11 +172,11 @@ type CloudResource struct {
 
 // CloudResourcesSpec is a container for all the cloud resources defined in a ResourceGroup.
 type CloudResourcesSpec struct {
-	Topics               []TopicConfig         `yaml:"topics"`
-	Subscriptions        []SubscriptionConfig  `yaml:"subscriptions"`
-	BigQueryDatasets     []BigQueryDataset     `yaml:"bigquery_datasets"`
-	BigQueryTables       []BigQueryTable       `yaml:"bigquery_tables"`
-	GCSBuckets           []GCSBucket           `yaml:"gcs_buckets"`
+	Topics               []TopicConfig         `yaml:"topics,omitempty"`
+	Subscriptions        []SubscriptionConfig  `yaml:"subscriptions,omitempty"`
+	BigQueryDatasets     []BigQueryDataset     `yaml:"bigquery_datasets,omitempty"`
+	BigQueryTables       []BigQueryTable       `yaml:"bigquery_tables,omitempty"`
+	GCSBuckets           []GCSBucket           `yaml:"gcs_buckets,omitempty"`
 	FirestoreDatabases   []FirestoreDatabase   `yaml:"firestore_databases,omitempty"`
 	FirestoreCollections []FirestoreCollection `yaml:"firestore_collections,omitempty"`
 }
@@ -189,9 +189,24 @@ type TopicConfig struct {
 	ProducerService *ServiceMapping `yaml:"producer_service,omitempty"`
 }
 
+type LookupMethod string
+
+const (
+	LookupMethodEnv  LookupMethod = "env"
+	LookupMethodYAML LookupMethod = "yaml"
+	LookupMethodDB   LookupMethod = "db"
+)
+
+type Lookup struct {
+	Key    string       `yaml:"key"`
+	Method LookupMethod `yaml:"method"`
+}
+
+// ServiceMapping defines a mapping between a Resource and the service that uses it. The service uses the
+// Lookup to identify the resource - this could be an environment variable, a config file, a database etc
 type ServiceMapping struct {
-	Name string `yaml:"name"`
-	Env  string `yaml:"env"`
+	Name   string `yaml:"name"`
+	Lookup Lookup `yaml:"lookup,omitempty"`
 }
 
 // SubscriptionConfig defines the configuration for a Pub/Sub subscription.

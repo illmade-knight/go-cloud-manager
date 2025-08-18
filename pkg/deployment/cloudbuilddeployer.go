@@ -119,7 +119,7 @@ func NewCloudBuildDeployerForTest(projectID, region, bucket string, logger zerol
 	}
 }
 
-// REFACTOR: This is the original Deploy function, renamed. It provides the simple, sequential workflow.
+// BuildAndDeploy This is the original Deploy function, renamed. It provides the simple, sequential workflow.
 func (d *CloudBuildDeployer) BuildAndDeploy(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting sequential build and deploy workflow...")
 	// The Build step now returns the final image URI.
@@ -137,7 +137,7 @@ func (d *CloudBuildDeployer) BuildAndDeploy(ctx context.Context, serviceName, se
 	return serviceURL, nil
 }
 
-// REFACTOR: This new Build function encapsulates all steps required to produce a container image.
+// Build This new Build function encapsulates all steps required to produce a container image.
 // It can be run in parallel with other infrastructure setup.
 func (d *CloudBuildDeployer) Build(ctx context.Context, serviceName string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting container build phase...")
@@ -169,7 +169,7 @@ func (d *CloudBuildDeployer) Build(ctx context.Context, serviceName string, spec
 	return spec.Image, nil
 }
 
-// REFACTOR: This new DeployService function handles only the final deployment of a pre-built image to Cloud Run.
+// DeployService This function handles only the final deployment of a pre-built image to Cloud Run.
 func (d *CloudBuildDeployer) DeployService(ctx context.Context, serviceName, serviceAccountEmail string, spec servicemanager.DeploymentSpec) (string, error) {
 	d.logger.Info().Str("service", serviceName).Msg("Starting service deployment phase...")
 	if spec.Image == "" {

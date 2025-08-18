@@ -1,9 +1,10 @@
 package deployment
 
 import (
-	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
 	"context"
 	"fmt"
+
+	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
 
 	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"github.com/rs/zerolog"

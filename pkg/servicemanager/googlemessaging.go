@@ -1,12 +1,13 @@
 package servicemanager
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
-	"google.golang.org/api/option"
 	"reflect"
 	"time"
+
+	"cloud.google.com/go/pubsub"
+	"google.golang.org/api/option"
 )
 
 const (

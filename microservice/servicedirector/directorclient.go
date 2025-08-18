@@ -74,7 +74,7 @@ func (c *Client) VerifyDataflow(ctx context.Context, dataflowName, serviceName s
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Director verification failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("director verification failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	c.logger.Info().Str("dataflow", dataflowName).Msg("Dataflow resources verified successfully.")
