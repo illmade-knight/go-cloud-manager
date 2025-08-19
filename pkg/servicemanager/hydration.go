@@ -25,6 +25,7 @@ func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo string
 	log.Info().Msg("Starting production architecture hydration...")
 
 	// Step 1: Hydrate deployment specs with defaults and generate final image paths.
+	applyDefaults(arch)
 	hydrateAllDeploymentSpecs(arch, defaultImageRepo)
 
 	// Step 2: Inject environment variables using the final, static names.
@@ -55,6 +56,7 @@ func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, r
 	nameMap := make(map[string]string)
 
 	// Step 1: Apply the runID transformation to all names, keys, and links.
+	applyDefaults(arch)
 	applyRunIDTransformation(arch, runID, nameMap)
 
 	// Step 2: Hydrate deployment specs with defaults, now using the transformed names.
@@ -96,6 +98,11 @@ func applyRunIDTransformation(arch *MicroserviceArchitecture, runID string, name
 		}
 		hydrateResourceNamesWithRunID(&dataflow.Resources, runID, nameMap)
 
+		for i, job := range dataflow.Resources.CloudSchedulerJobs {
+			// The ServiceAccount field is now guaranteed to be populated by applyDefaults.
+			dataflow.Resources.CloudSchedulerJobs[i].ServiceAccount = fmt.Sprintf("%s-%s", job.ServiceAccount, runID)
+		}
+
 		rekeyedServices := make(map[string]ServiceSpec, len(dataflow.Services))
 		for _, service := range dataflow.Services {
 			rekeyedServices[service.Name] = service
@@ -116,6 +123,20 @@ func hydrateAllDeploymentSpecs(arch *MicroserviceArchitecture, defaultImageRepo 
 		for _, service := range dataflow.Services {
 			if service.Deployment != nil {
 				hydrateDeploymentSpec(service.Deployment, service.Name, dataflowName, arch.ProjectID, arch.Region, defaultImageRepo)
+			}
+		}
+	}
+}
+
+// applyDefaults ensures that optional fields like service accounts are populated with sensible
+// defaults if they are not provided in the YAML.
+func applyDefaults(arch *MicroserviceArchitecture) {
+	for _, dataflow := range arch.Dataflows {
+		for i, job := range dataflow.Resources.CloudSchedulerJobs {
+			if job.ServiceAccount == "" {
+				// If no SA is specified, create a default name based on the job name.
+				defaultSA := fmt.Sprintf("%s-sa", job.Name)
+				dataflow.Resources.CloudSchedulerJobs[i].ServiceAccount = defaultSA
 			}
 		}
 	}
@@ -202,7 +223,14 @@ func updateAllCrossReferences(dataflow *ResourceGroup, runID string) {
 			service.Dependencies[i] = fmt.Sprintf("%s-%s", depName, runID)
 		}
 	}
+
 	resources := &dataflow.Resources
+	for i, job := range resources.CloudSchedulerJobs {
+		if job.TargetService != "" {
+			dataflow.Resources.CloudSchedulerJobs[i].TargetService = fmt.Sprintf("%s-%s", job.TargetService, runID)
+		}
+	}
+
 	for i := range resources.Topics {
 		if resources.Topics[i].ProducerService != nil {
 			resources.Topics[i].ProducerService.Name = fmt.Sprintf("%s-%s", resources.Topics[i].ProducerService.Name, runID)
@@ -246,6 +274,12 @@ func updateAllCrossReferences(dataflow *ResourceGroup, runID string) {
 }
 
 func hydrateResourceNamesWithRunID(resources *CloudResourcesSpec, runID string, nameMap map[string]string) {
+	for i := range resources.CloudSchedulerJobs {
+		originalName := resources.CloudSchedulerJobs[i].Name
+		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
+		resources.CloudSchedulerJobs[i].Name = hydratedName
+		nameMap[originalName] = hydratedName
+	}
 	for i := range resources.Topics {
 		originalName := resources.Topics[i].Name
 		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)

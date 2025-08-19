@@ -97,6 +97,7 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 	for _, dataflow := range arch.Dataflows {
 		p.planPubSubLinkRoles(dataflow, &finalPlan, &mu)
 		p.planDataResourceLinkRoles(dataflow, &finalPlan, &mu)
+		p.planSchedulerRoles(arch, dataflow, &finalPlan, &mu)
 
 		for serviceName, serviceSpec := range dataflow.Services {
 			p.planDependencyRoles(arch, serviceName, serviceSpec, &finalPlan, &mu)
@@ -106,6 +107,25 @@ func (p *RolePlanner) PlanRolesForApplicationServices(arch *servicemanager.Micro
 
 	p.logger.Info().Int("bindings_planned", len(finalPlan)).Msg("Application service IAM role plan complete.")
 	return finalPlan, nil
+}
+
+// REFACTOR: This new function plans the necessary invoker role for Cloud Scheduler jobs.
+func (p *RolePlanner) planSchedulerRoles(arch *servicemanager.MicroserviceArchitecture, dataflow servicemanager.ResourceGroup, plan *[]IAMBinding, mu *sync.Mutex) {
+	for _, job := range dataflow.Resources.CloudSchedulerJobs {
+		if job.TargetService == "" || job.ServiceAccount == "" {
+			continue
+		}
+		// The scheduler's service account needs permission to invoke the target Cloud Run service.
+		targetServiceRegion := findServiceRegion(arch, job.TargetService)
+		binding := IAMBinding{
+			ServiceAccount:   job.ServiceAccount, // The identity of the scheduler job
+			ResourceType:     "cloudrun_service",
+			ResourceID:       job.TargetService, // The service being invoked
+			Role:             "roles/run.invoker",
+			ResourceLocation: targetServiceRegion,
+		}
+		addBindingToPlan(binding, plan, mu)
+	}
 }
 
 // planDataResourceLinkRoles plans roles based on producer/consumer links for data resources.

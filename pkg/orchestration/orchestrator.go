@@ -30,14 +30,27 @@ const (
 
 type Command struct {
 	Instruction CommandInstruction `json:"instruction"`
-	Value       string             `json:"value"`
+	Payload     json.RawMessage    `json:"payload"`
+}
+
+// FoundationalSetupPayload is the payload for the initial 'dataflow-setup' command.
+type FoundationalSetupPayload struct {
+	DataflowName string `json:"dataflow_name"`
 }
 type CommandInstruction string
 
 const (
 	Setup    CommandInstruction = "dataflow-setup"
 	Teardown CommandInstruction = "teardown"
+	// REFACTOR: Added a new, explicit command for dependent resource setup.
+	SetupDependent CommandInstruction = "dependent-resource-setup"
 )
+
+// DependentSetupPayload contains the dataflow name and the map of deployed service URLs.
+type DependentSetupPayload struct {
+	DataflowName string            `json:"dataflow_name"`
+	ServiceURLs  map[string]string `json:"service_urls"`
+}
 
 type CompletionEvent struct {
 	Status       CompletionStatus             `json:"status"`
@@ -370,29 +383,38 @@ func (o *Orchestrator) BuildDataflowServices(ctx context.Context, dataflowName s
 	}
 	return builtImages, nil
 }
-func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName string, saEmails map[string]string, builtImages map[string]string, directorURL string) error {
+
+// DeployDataflowServices deploys all services for a given dataflow and returns their URLs.
+func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName string, saEmails map[string]string, builtImages map[string]string, directorURL string) (map[string]string, error) {
 	o.archMutex.RLock()
 	dataflow, ok := o.arch.Dataflows[dataflowName]
 	o.archMutex.RUnlock()
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	if len(dataflow.Services) == 0 {
-		return nil
+		return nil, nil
 	}
+
 	var wg sync.WaitGroup
 	errs := make(chan error, len(dataflow.Services))
+	// REFACTOR: Create a channel to receive the URLs of successfully deployed services.
+	urlChan := make(chan struct {
+		Name string
+		URL  string
+	}, len(dataflow.Services))
+
 	for sName, sSpec := range dataflow.Services {
 		if sSpec.Deployment == nil {
 			continue
 		}
 		saEmail, ok := saEmails[sName]
 		if !ok {
-			return fmt.Errorf("SA email not found for '%s'", sName)
+			return nil, fmt.Errorf("SA email not found for '%s'", sName)
 		}
 		imageURI, ok := builtImages[sName]
 		if !ok {
-			return fmt.Errorf("image URI not found for '%s'", sName)
+			return nil, fmt.Errorf("image URI not found for '%s'", sName)
 		}
 		wg.Add(1)
 		go func(sn string, spec servicemanager.ServiceSpec, sa, img string) {
@@ -404,26 +426,48 @@ func (o *Orchestrator) DeployDataflowServices(ctx context.Context, dataflowName 
 			}
 			localSpec.EnvironmentVars["SERVICE_DIRECTOR_URL"] = directorURL
 			localSpec.EnvironmentVars["PROJECT_ID"] = o.arch.ProjectID
-			_, err := o.deployer.DeployService(ctx, sn, sa, localSpec)
+			deployedURL, err := o.deployer.DeployService(ctx, sn, sa, localSpec)
 			if err != nil {
 				errs <- fmt.Errorf("failed to deploy '%s': %w", sn, err)
+				return
 			}
+			// REFACTOR: Send the successful result to the URL channel.
+			urlChan <- struct {
+				Name string
+				URL  string
+			}{sn, deployedURL}
 		}(sName, sSpec, saEmail, imageURI)
 	}
 	wg.Wait()
 	close(errs)
+	close(urlChan)
+
 	var deploymentErrors []string
 	for err := range errs {
 		deploymentErrors = append(deploymentErrors, err.Error())
 	}
 	if len(deploymentErrors) > 0 {
-		return fmt.Errorf("encountered %d error(s) during deployment: %s", len(deploymentErrors), strings.Join(deploymentErrors, "; "))
+		return nil, fmt.Errorf("encountered %d error(s) during deployment: %s", len(deploymentErrors), strings.Join(deploymentErrors, "; "))
 	}
-	return nil
+
+	// REFACTOR: Collect the results from the channel into the map to be returned.
+	deployedURLs := make(map[string]string)
+	for res := range urlChan {
+		deployedURLs[res.Name] = res.URL
+	}
+	return deployedURLs, nil
 }
+
 func (o *Orchestrator) TriggerDataflowResourceCreation(ctx context.Context, dataflowName string) error {
-	cmdPayload := Command{Instruction: Setup, Value: dataflowName}
-	cmdMsg, err := json.Marshal(cmdPayload)
+	payload := FoundationalSetupPayload{DataflowName: dataflowName}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal foundational setup payload: %w", err)
+	}
+
+	cmd := Command{Instruction: Setup, Payload: payloadBytes}
+	cmdMsg, err := json.Marshal(cmd)
+
 	if err != nil {
 		return fmt.Errorf("failed to marshal setup command: %w", err)
 	}
@@ -431,6 +475,29 @@ func (o *Orchestrator) TriggerDataflowResourceCreation(ctx context.Context, data
 	_, err = result.Get(ctx)
 	return err
 }
+
+// TriggerDependentResourceCreation sends the command to set up dependent resources.
+func (o *Orchestrator) TriggerDependentResourceCreation(ctx context.Context, dataflowName string, serviceURLs map[string]string) error {
+	payload := DependentSetupPayload{
+		DataflowName: dataflowName,
+		ServiceURLs:  serviceURLs,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal dependent setup payload: %w", err)
+	}
+
+	cmd := Command{Instruction: SetupDependent, Payload: payloadBytes}
+	cmdMsg, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal dependent setup command: %w", err)
+	}
+
+	result := o.commandTopic.Publish(ctx, &pubsub.Message{Data: cmdMsg})
+	_, err = result.Get(ctx)
+	return err
+}
+
 func (o *Orchestrator) ensureCommandInfra(ctx context.Context) error {
 	o.archMutex.RLock()
 	commandTopicID := o.arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"]

@@ -70,8 +70,10 @@ type Conductor struct {
 	options              ConductorOptions
 	serviceAccountEmails map[string]string
 	directorURL          string
-	builtImageURIs       map[string]string
-	imageBuildMutex      sync.Mutex
+	// REFACTOR: This map will store the URLs of deployed services.
+	deployedServiceURLs map[string]string
+	builtImageURIs      map[string]string
+	imageBuildMutex     sync.Mutex
 }
 
 // NewConductor creates and initializes a new Conductor with specific options.
@@ -99,7 +101,9 @@ func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitec
 		orch:                 orch,
 		options:              opts,
 		serviceAccountEmails: make(map[string]string),
-		builtImageURIs:       make(map[string]string),
+		// REFACTOR: Initialize the new map.
+		deployedServiceURLs: make(map[string]string),
+		builtImageURIs:      make(map[string]string),
 	}, nil
 }
 
@@ -161,7 +165,7 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 	return nil
 }
 
-// Run executes the full, multi-phase orchestration workflow in the correct sequence.
+// Run executes the full, multiphase orchestration workflow in the correct sequence.
 func (c *Conductor) Run(ctx context.Context) error {
 	c.logger.Info().Msg("Starting full architecture orchestration...")
 
@@ -176,10 +180,7 @@ func (c *Conductor) Run(ctx context.Context) error {
 	if err := c.buildAndDeployPhase(ctx); err != nil {
 		return err
 	}
-	// Phase 3: Now that builds are done and director is ready, trigger remote setup. This is a blocking phase.
-	// we have removed the check for actual vs requested resources - we expect an error if the requested resources are not available.
-	_, err := c.triggerRemoteSetup(ctx)
-	if err != nil {
+	if _, err := c.triggerRemoteFoundationalSetup(ctx); err != nil {
 		return err
 	}
 	// REFACTOR: This phase is now more specific.
@@ -189,6 +190,10 @@ func (c *Conductor) Run(ctx context.Context) error {
 	}
 	// Phase 5: Now that everything is verified, deploy the final application services.
 	if err := c.deploymentPhase(ctx); err != nil {
+		return err
+	}
+	// REFACTOR: Added the final phase for dependent resources.
+	if err := c.triggerRemoteDependentSetup(ctx); err != nil {
 		return err
 	}
 
@@ -345,11 +350,13 @@ func (c *Conductor) deployServiceDirector(ctx context.Context) error {
 	return nil
 }
 
-func (c *Conductor) triggerRemoteSetup(ctx context.Context) (map[string]CompletionEvent, error) {
+// ... (checkPrerequisites, setupIAMPhase, buildAndDeployPhase methods remain the same) ...
+
+func (c *Conductor) triggerRemoteFoundationalSetup(ctx context.Context) (map[string]CompletionEvent, error) {
 	if !c.options.TriggerRemoteSetup {
 		return nil, nil
 	}
-	c.logger.Info().Msg("Executing Phase 3: Triggering remote dataflow resource and IAM setup...")
+	c.logger.Info().Msg("Executing Phase 3: Triggering remote foundational resource and IAM setup...")
 	completionEvents := make(map[string]CompletionEvent)
 	for dataflowName := range c.arch.Dataflows {
 		err := c.orch.TriggerDataflowResourceCreation(ctx, dataflowName)
@@ -362,25 +369,16 @@ func (c *Conductor) triggerRemoteSetup(ctx context.Context) (map[string]Completi
 		}
 		completionEvents[dataflowName] = event
 	}
-	c.logger.Info().Msg("Phase 3: Remote dataflow resource and IAM setup is complete.")
+	c.logger.Info().Msg("Phase 3: Remote foundational resource and IAM setup is complete.")
 	return completionEvents, nil
 }
 
-// REFACTOR: This function has been renamed from verificationPhase and now only verifies
-// resource-level IAM policies, as project-level policies were already verified in Phase 1.
 func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context) error {
 	if !c.options.VerifyDataflowIAM {
 		return nil
 	}
 	c.logger.Info().Msg("Executing Phase 4: Verifying dataflow RESOURCE-LEVEL IAM policy propagation...")
-
-	// This is a simplified comparison logic. A real implementation would need a deep-equals on the policy maps.
-	// For this refactor, we are trusting the remote director and proceeding to poll.
-	c.logger.Info().Msg("Trusting remote plan; proceeding to poll for propagation.")
-
 	for dataflowName := range c.arch.Dataflows {
-		// Pass the combined map of all service account emails.
-		// The verification function will select the ones it needs for this dataflow.
 		err := c.iamOrch.VerifyResourceLevelIAMForDataflow(ctx, dataflowName, c.serviceAccountEmails, c.options.PolicyPollTimeout)
 		if err != nil {
 			return fmt.Errorf("failed during resource-level IAM verification for dataflow '%s': %w", dataflowName, err)
@@ -399,12 +397,69 @@ func (c *Conductor) deploymentPhase(ctx context.Context) error {
 		return errors.New("cannot deploy dataflow services: director URL is not available")
 	}
 	for dataflowName := range c.arch.Dataflows {
-		err := c.orch.DeployDataflowServices(ctx, dataflowName, c.serviceAccountEmails, c.builtImageURIs, c.directorURL)
+		// REFACTOR: Capture the deployed service URLs.
+		deployedURLs, err := c.orch.DeployDataflowServices(ctx, dataflowName, c.serviceAccountEmails, c.builtImageURIs, c.directorURL)
 		if err != nil {
 			return fmt.Errorf("failed to deploy application services for dataflow '%s': %w", dataflowName, err)
 		}
+		// REFACTOR: Store the URLs for the next phase.
+		for service, url := range deployedURLs {
+			c.deployedServiceURLs[service] = url
+		}
 	}
 	c.logger.Info().Msg("Phase 5: Final deployment of all dataflow services is complete.")
+	return nil
+}
+
+// REFACTOR: This new phase triggers the setup of dependent resources using the lightweight payload.
+func (c *Conductor) triggerRemoteDependentSetup(ctx context.Context) error {
+	if !c.options.TriggerRemoteSetup {
+		return nil
+	}
+	c.logger.Info().Msg("Executing Phase 6: Triggering remote dependent resource setup...")
+
+	hasDependentResources := false
+	for _, dataflow := range c.arch.Dataflows {
+		if len(dataflow.Resources.CloudSchedulerJobs) > 0 {
+			hasDependentResources = true
+			break
+		}
+	}
+
+	if !hasDependentResources {
+		c.logger.Info().Msg("No dependent resources (e.g., Cloud Scheduler jobs) found. Skipping Phase 6.")
+		return nil
+	}
+
+	// The service URLs map is the lightweight payload we send.
+	// We only need to send the URLs relevant to each dataflow.
+	for dataflowName, dataflow := range c.arch.Dataflows {
+		if len(dataflow.Resources.CloudSchedulerJobs) == 0 {
+			continue
+		}
+
+		// Create a map of service URLs specific to this dataflow's needs.
+		dataflowServiceURLs := make(map[string]string)
+		for _, job := range dataflow.Resources.CloudSchedulerJobs {
+			if url, ok := c.deployedServiceURLs[job.TargetService]; ok {
+				dataflowServiceURLs[job.TargetService] = url
+			} else {
+				return fmt.Errorf("consistency error: URL for target service '%s' not found for job '%s'", job.TargetService, job.Name)
+			}
+		}
+
+		c.logger.Info().Str("dataflow", dataflowName).Msg("Triggering dependent resource setup.")
+		err := c.orch.TriggerDependentResourceCreation(ctx, dataflowName, dataflowServiceURLs)
+		if err != nil {
+			return fmt.Errorf("failed to trigger dependent setup for dataflow '%s': %w", dataflowName, err)
+		}
+		_, err = c.orch.AwaitDataflowReady(ctx, dataflowName+"-dependent")
+		if err != nil {
+			return fmt.Errorf("failed to receive dependent completion for dataflow '%s': %w", dataflowName, err)
+		}
+	}
+
+	c.logger.Info().Msg("Phase 6: Dependent resource setup is complete.")
 	return nil
 }
 

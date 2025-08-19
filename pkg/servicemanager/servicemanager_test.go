@@ -42,7 +42,7 @@ func setupServiceManagerTest(t *testing.T) (*servicemanager.ServiceManager, *Moc
 		},
 	}
 
-	manager, err := servicemanager.NewServiceManagerFromManagers(mockMsg, mockStore, mockBq, mockFs, nil, zerolog.Nop())
+	manager, err := servicemanager.NewServiceManagerFromManagers(mockMsg, mockStore, mockBq, mockFs, nil, nil, zerolog.Nop())
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 
@@ -110,7 +110,7 @@ func TestServiceManager_SetupDataflow_Failure(t *testing.T) {
 	mockFs.On("CreateResources", ctx, df1Resources).Return([]servicemanager.ProvisionedFirestoreDatabase{}, nil).Once()
 
 	// Action
-	_, err := manager.SetupDataflow(ctx, arch, "dataflow1")
+	_, err := manager.SetupFoundationalDataflow(ctx, arch, "dataflow1")
 
 	// Assert
 	assert.Error(t, err)

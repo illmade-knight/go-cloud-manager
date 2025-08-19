@@ -7,12 +7,12 @@ module testdata
 // To test against new library changes, update the version tag below after
 // publishing a new release of the main repository.
 // we cannot use .work and replace as the deployed services will not work with the necessary copy phase of the build
-go 1.23.0
+go 1.24.0
 
 require (
 	cloud.google.com/go/pubsub v1.50.0
 	github.com/google/uuid v1.6.0
-	github.com/illmade-knight/go-cloud-manager v0.2.18-beta
+	github.com/illmade-knight/go-cloud-manager v0.2.19-beta
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
 	gopkg.in/yaml.v3 v3.0.1

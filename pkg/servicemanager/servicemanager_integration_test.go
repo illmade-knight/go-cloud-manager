@@ -101,7 +101,7 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 
 	logger := zerolog.New(zerolog.NewConsoleWriter())
 	// NEW_CODE: Pass the new Firestore test adapter to the ServiceManager constructor.
-	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, fsTestAdapter, arch.Environment, nil, logger)
+	sm, err := servicemanager.NewServiceManagerFromClients(psClient, gcsClient, bqClient, fsTestAdapter, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
 	// --- ACT & ASSERT: Execute and verify each lifecycle phase ---

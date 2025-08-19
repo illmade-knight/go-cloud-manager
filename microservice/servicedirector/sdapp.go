@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/pubsub"
@@ -39,6 +40,7 @@ type CompletionEvent struct {
 // Director implements the microservice.Service interface for the main application.
 type Director struct {
 	*microservice.BaseServer
+	archMutex      sync.RWMutex
 	serviceManager *servicemanager.ServiceManager
 	architecture   *servicemanager.MicroserviceArchitecture
 	logger         zerolog.Logger
@@ -103,50 +105,6 @@ func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 		go d.listenForCommands(ctx)
 		return nil
 	}
-}
-
-// handleSetupCommand orchestrates the setup of a dataflow's resources and IAM policies.
-// REFACTOR: This function is updated to capture the results from the IAMManager
-// and pass them to the completion event publisher.
-func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
-	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' command...")
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	// Helper function to contain the logic for a single dataflow.
-	setupAndApplyIAM := func(dfName string) error {
-		d.logger.Info().Str("dataflow", dfName).Msg("Setting up resources...")
-		_, err := d.serviceManager.SetupDataflow(ctx, d.architecture, dfName)
-		if err != nil {
-			return fmt.Errorf("resource setup failed for dataflow '%s': %w", dfName, err)
-		}
-		d.logger.Info().Str("dataflow", dfName).Msg("Resource setup complete.")
-
-		d.logger.Info().Str("dataflow", dfName).Msg("Applying IAM policies...")
-		// The Director now delegates the entire IAM application process to the IAMManager.
-		// It captures the map of applied policies that is returned.
-		appliedPolicies, err := d.iamManager.ApplyIAMForDataflow(ctx, d.architecture, dfName)
-		if err != nil {
-			return fmt.Errorf("iam application failed for dataflow '%s': %w", dfName, err)
-		}
-		d.logger.Info().Str("dataflow", dfName).Msg("IAM policy application complete.")
-
-		// After a successful run, publish a completion event that includes the
-		// map of policies that were just applied for verification by the Conductor.
-		return d.publishCompletionEvent(ctx, dfName, nil, appliedPolicies)
-	}
-
-	if dataflowName == "all" || dataflowName == "" {
-		for name := range d.architecture.Dataflows {
-			if err := setupAndApplyIAM(name); err != nil {
-				// On failure, publish an event without a policy map.
-				_ = d.publishCompletionEvent(ctx, name, err, nil)
-				return err
-			}
-		}
-		return nil
-	}
-	return setupAndApplyIAM(dataflowName)
 }
 
 // publishReadyEvent sends the initial "I'm alive and listening" message.
@@ -222,7 +180,7 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 // setupAndApplyIAMForDataflow contains the logic for a single dataflow.
 func (d *Director) setupAndApplyIAMForDataflow(ctx context.Context, dfName string) error {
 	d.logger.Info().Str("dataflow", dfName).Msg("Setting up resources...")
-	_, err := d.serviceManager.SetupDataflow(ctx, d.architecture, dfName)
+	_, err := d.serviceManager.SetupFoundationalDataflow(ctx, d.architecture, dfName)
 	if err != nil {
 		return fmt.Errorf("resource setup failed for dataflow '%s': %w", dfName, err)
 	}
@@ -238,6 +196,7 @@ func (d *Director) setupAndApplyIAMForDataflow(ctx context.Context, dfName strin
 }
 
 // listenForCommands starts the blocking Pub/Sub message receiver.
+// REFACTOR: This function is now updated to handle the new flexible command structure.
 func (d *Director) listenForCommands(ctx context.Context) {
 	d.logger.Info().Msg("Starting to listen for commands...")
 	err := d.commands.commandSubscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -248,16 +207,45 @@ func (d *Director) listenForCommands(ctx context.Context) {
 			d.logger.Error().Err(err).Msg("Failed to unmarshal command message")
 			return
 		}
+
 		var cmdErr error
+		var dataflowName string
+		var completionValue string // Used to signal completion for the correct waiter.
+
 		switch cmd.Instruction {
 		case orchestration.Setup:
-			cmdErr = d.handleSetupCommand(ctx, cmd.Value)
+			var payload orchestration.FoundationalSetupPayload
+			if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+				cmdErr = fmt.Errorf("failed to unmarshal setup payload: %w", err)
+			} else {
+				dataflowName = payload.DataflowName
+				completionValue = dataflowName
+				cmdErr = d.handleSetupCommand(ctx, dataflowName)
+			}
+		case orchestration.SetupDependent:
+			var payload orchestration.DependentSetupPayload
+			if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+				cmdErr = fmt.Errorf("failed to unmarshal dependent setup payload: %w", err)
+			} else {
+				dataflowName = payload.DataflowName
+				completionValue = dataflowName + "-dependent" // Unique key for this phase
+				cmdErr = d.handleDependentSetupCommand(ctx, payload)
+			}
 		case orchestration.Teardown:
-			cmdErr = d.handleTeardownCommand(ctx, cmd.Value)
+			var payload orchestration.FoundationalSetupPayload
+			if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+				cmdErr = fmt.Errorf("failed to unmarshal teardown payload: %w", err)
+			} else {
+				dataflowName = payload.DataflowName
+				completionValue = dataflowName
+				cmdErr = d.handleTeardownCommand(ctx, dataflowName)
+			}
 		default:
 			d.logger.Warn().Str("instruction", string(cmd.Instruction)).Msg("Received unknown command")
 		}
-		err := d.publishCompletionEvent(ctx, cmd.Value, cmdErr, nil)
+
+		// Publish completion event.
+		err := d.publishCompletionEvent(ctx, completionValue, cmdErr, nil)
 		if err != nil {
 			d.logger.Error().Err(err).Msg("error publishing completion event")
 		}
@@ -267,6 +255,65 @@ func (d *Director) listenForCommands(ctx context.Context) {
 	} else {
 		d.logger.Info().Msg("Command listener shut down gracefully.")
 	}
+}
+
+// handleSetupCommand orchestrates the setup of a dataflow's foundational resources and IAM.
+func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' command for foundational resources...")
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	d.archMutex.RLock()
+	defer d.archMutex.RUnlock()
+
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Setting up foundational resources...")
+	_, err := d.serviceManager.SetupFoundationalDataflow(ctx, d.architecture, dataflowName)
+	if err != nil {
+		return fmt.Errorf("resource setup failed for dataflow '%s': %w", dataflowName, err)
+	}
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Foundational resource setup complete.")
+
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Applying IAM policies...")
+	_, err = d.iamManager.ApplyIAMForDataflow(ctx, d.architecture, dataflowName)
+	if err != nil {
+		return fmt.Errorf("iam application failed for dataflow '%s': %w", dataflowName, err)
+	}
+	d.logger.Info().Str("dataflow", dataflowName).Msg("IAM policy application complete.")
+	return nil
+}
+
+// REFACTOR: New handler for the dependent setup command.
+// handleDependentSetupCommand hydrates the architecture with service URLs and creates dependent resources.
+func (d *Director) handleDependentSetupCommand(ctx context.Context, payload orchestration.DependentSetupPayload) error {
+	d.logger.Info().Str("dataflow", payload.DataflowName).Msg("Processing 'dependent-resource-setup' command...")
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	// 1. Lock the architecture for modification.
+	d.archMutex.Lock()
+	defer d.archMutex.Unlock()
+
+	// 2. Hydrate the scheduler jobs in the architecture with the provided URLs.
+	dataflow, ok := d.architecture.Dataflows[payload.DataflowName]
+	if !ok {
+		return fmt.Errorf("dataflow '%s' not found in director's architecture", payload.DataflowName)
+	}
+	if len(dataflow.Resources.CloudSchedulerJobs) > 0 {
+		for i, job := range dataflow.Resources.CloudSchedulerJobs {
+			url, ok := payload.ServiceURLs[job.TargetService]
+			if !ok {
+				return fmt.Errorf("URL for target service '%s' not provided for job '%s'", job.TargetService, job.Name)
+			}
+			d.logger.Debug().Str("job", job.Name).Str("url", url).Msg("Hydrating scheduler job target")
+			// Modify the struct in the slice directly.
+			dataflow.Resources.CloudSchedulerJobs[i].TargetService = url
+		}
+		// Put the modified dataflow back into the map.
+		d.architecture.Dataflows[payload.DataflowName] = dataflow
+	}
+
+	// 3. Call the ServiceManager, which will now see the hydrated architecture.
+	return d.serviceManager.SetupDependentDataflow(ctx, d.architecture, payload.DataflowName)
 }
 
 func withIAM(iamManager iam.IAMManager, iamClient iam.IAMClient) DirectorOption {

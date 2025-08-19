@@ -37,9 +37,6 @@ func (m *MockStorageBucketHandle) Delete(ctx context.Context) error {
 	return m.Called(ctx).Error(0)
 }
 
-// REFACTOR_NOTE: The mock IAM() method has been removed to match the updated interface.
-// func (m *MockStorageBucketHandle) IAM() *iam.Handle { ... }
-
 type MockStorageClient struct{ mock.Mock }
 
 func (m *MockStorageClient) Bucket(name string) servicemanager.StorageBucketHandle {

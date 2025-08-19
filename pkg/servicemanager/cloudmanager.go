@@ -30,3 +30,10 @@ type IFirestoreManager interface {
 	IManager
 	CreateResources(ctx context.Context, resources CloudResourcesSpec) ([]ProvisionedFirestoreDatabase, error)
 }
+
+// ISchedulerManager defines the interface for a CloudSchedulerManager.
+// Its CreateResources method does not return any provisioned resources, only an error.
+type ISchedulerManager interface {
+	IManager
+	CreateResources(ctx context.Context, resources CloudResourcesSpec) error
+}

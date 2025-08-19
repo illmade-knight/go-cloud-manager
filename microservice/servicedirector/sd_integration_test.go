@@ -122,7 +122,7 @@ func TestServiceDirector_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	messagingClient := servicemanager.MessagingClientFromPubsubClient(psClient)
-	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, nil, arch.Environment, nil, logger)
+	sm, err := servicemanager.NewServiceManagerFromClients(messagingClient, nil, nil, nil, nil, arch.Environment, nil, logger)
 	require.NoError(t, err)
 
 	// REFACTOR: Pass the IAMManager to the updated constructor.

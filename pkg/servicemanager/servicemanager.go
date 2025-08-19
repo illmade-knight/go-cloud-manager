@@ -86,6 +86,7 @@ const (
 	StorageResourceType   ResourceType = "storage"
 	BigQueryResourceType  ResourceType = "bigquery"
 	FirestoreResourceType ResourceType = "firestore"
+	SchedulerResourceType ResourceType = "scheduler"
 )
 
 // ServiceManager coordinates all resource-specific operations by delegating to specialized managers.
@@ -107,7 +108,7 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 	}
 
 	// NEW_CODE: Updated to scan for Firestore resources as well.
-	needsMessaging, needsStorage, needsBigQuery, needsFirestore := scanArchitectureForResources(arch)
+	needsMessaging, needsStorage, needsBigQuery, needsFirestore, needsScheduler := scanArchitectureForResources(arch)
 	var err error
 
 	if needsMessaging {
@@ -163,13 +164,26 @@ func NewServiceManager(ctx context.Context, arch *MicroserviceArchitecture, writ
 		}
 	}
 
+	if needsScheduler {
+		sm.logger.Info().Msg("Scheduler resources found, initializing CloudSchedulerManager.")
+		var schedulerClient SchedulerClient
+		schedulerClient, err = CreateGoogleSchedulerClient(ctx, arch.ProjectID, arch.Region)
+		if err != nil {
+			return nil, err
+		}
+		sm.managers[SchedulerResourceType], err = NewCloudSchedulerManager(schedulerClient, logger, arch.Environment)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return sm, nil
 }
 
 // NewServiceManagerFromClients creates a ServiceManager with pre-configured clients.
 // This constructor is primarily used for testing with mocks or emulators.
 // NEW_CODE: Added the Firestore client (dsc) to the signature.
-func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, dsc DocumentStoreClient, environment Environment, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQClient, dsc DocumentStoreClient, scc SchedulerClient, environment Environment, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	sm := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
 		writer:   writer,
@@ -195,11 +209,18 @@ func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQCli
 			return nil, fmt.Errorf("failed to create BigQuery manager from client: %w", err)
 		}
 	}
-	// NEW_CODE: Add Firestore manager from its client.
+	// Add Firestore manager from its client.
 	if dsc != nil {
 		sm.managers[FirestoreResourceType], err = NewFirestoreManager(dsc, logger, environment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Firestore manager from client: %w", err)
+		}
+	}
+	// REFACTOR: Add Scheduler manager from its client.
+	if scc != nil {
+		sm.managers[SchedulerResourceType], err = NewCloudSchedulerManager(scc, logger, environment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Scheduler manager from client: %w", err)
 		}
 	}
 
@@ -209,7 +230,7 @@ func NewServiceManagerFromClients(mc MessagingClient, sc StorageClient, bc BQCli
 // NewServiceManagerFromManagers creates a ServiceManager with pre-configured manager instances.
 // This constructor is primarily used for unit testing the ServiceManager's orchestration logic.
 // NEW_CODE: Added the Firestore manager (fsm) to the signature.
-func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, fsm IFirestoreManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
+func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm IBigQueryManager, fsm IFirestoreManager, scm ISchedulerManager, writer ProvisionedResourceWriter, logger zerolog.Logger) (*ServiceManager, error) {
 	svcMgr := &ServiceManager{
 		logger:   logger.With().Str("component", "ServiceManager").Logger(),
 		writer:   writer,
@@ -228,12 +249,15 @@ func NewServiceManagerFromManagers(mm IMessagingManager, sm IStorageManager, bqm
 	if fsm != nil {
 		svcMgr.managers[FirestoreResourceType] = fsm
 	}
+	if scm != nil {
+		svcMgr.managers[SchedulerResourceType] = scm
+	}
 	return svcMgr, nil
 }
 
-// SetupDataflow provisions all resources defined within a specific dataflow (ResourceGroup).
+// SetupFoundationalDataflow provisions all resources defined within a specific dataflow (ResourceGroup).
 // It runs the creation process for each resource type (messaging, storage, etc.) concurrently.
-func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) (*ProvisionedResources, error) {
+func (sm *ServiceManager) SetupFoundationalDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) (*ProvisionedResources, error) {
 	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting setup for specific dataflow")
 	targetDataflow, ok := arch.Dataflows[dataflowName]
 	if !ok {
@@ -327,6 +351,25 @@ func (sm *ServiceManager) SetupDataflow(ctx context.Context, arch *MicroserviceA
 	return provisioned, errors.Join(allErrors...)
 }
 
+// SetupDependentDataflow provisions resources that depend on deployed services (e.g., Cloud Scheduler).
+func (sm *ServiceManager) SetupDependentDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error {
+	sm.logger.Info().Str("dataflow", dataflowName).Msg("Starting setup for dependent resources")
+	targetDataflow, ok := arch.Dataflows[dataflowName]
+	if !ok {
+		return fmt.Errorf("dataflow spec '%s' not found in architecture", dataflowName)
+	}
+
+	// This function only targets the scheduler manager.
+	if mgr, ok := sm.managers[SchedulerResourceType]; ok {
+		if err := mgr.(ISchedulerManager).CreateResources(ctx, targetDataflow.Resources); err != nil {
+			return err
+		}
+	} else {
+		sm.logger.Info().Str("dataflow", dataflowName).Msg("No dependent resource managers (like Scheduler) were initialized.")
+	}
+	return nil
+}
+
 // TeardownDataflow deletes all resources within a specific dataflow.
 // It will only act if the dataflow's lifecycle strategy is 'ephemeral'.
 func (sm *ServiceManager) TeardownDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error {
@@ -394,7 +437,7 @@ func (sm *ServiceManager) SetupAll(ctx context.Context, arch *MicroserviceArchit
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			provRes, err := sm.SetupDataflow(ctx, arch, name)
+			provRes, err := sm.SetupFoundationalDataflow(ctx, arch, name)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to setup dataflow '%s': %w", name, err)
 				return
@@ -450,7 +493,7 @@ func (sm *ServiceManager) TeardownAll(ctx context.Context, arch *MicroserviceArc
 // scanArchitectureForResources is a helper that inspects the entire architecture to see
 // which types of resources are present, so that only the necessary sub-managers are initialized.
 // NEW_CODE: The function now returns a boolean indicating if Firestore resources are present.
-func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessaging bool, needsStorage bool, needsBigQuery bool, needsFirestore bool) {
+func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessaging bool, needsStorage bool, needsBigQuery bool, needsFirestore bool, needsScheduler bool) {
 	for _, df := range arch.Dataflows {
 		if len(df.Resources.Topics) > 0 || len(df.Resources.Subscriptions) > 0 {
 			needsMessaging = true
@@ -461,9 +504,12 @@ func scanArchitectureForResources(arch *MicroserviceArchitecture) (needsMessagin
 		if len(df.Resources.BigQueryDatasets) > 0 || len(df.Resources.BigQueryTables) > 0 {
 			needsBigQuery = true
 		}
-		// NEW_CODE: Check for Firestore database definitions.
+		// Check for Firestore database definitions.
 		if len(df.Resources.FirestoreDatabases) > 0 {
 			needsFirestore = true
+		}
+		if len(df.Resources.CloudSchedulerJobs) > 0 {
+			needsScheduler = true
 		}
 	}
 	return

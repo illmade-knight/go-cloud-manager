@@ -72,13 +72,13 @@ func TestGenerateServiceConfigs_DefaultToYAML(t *testing.T) {
 	require.NoError(t, err)
 
 	// Use the test helper to find and validate the publisher's config.
-	publisherCfg := findConfigForService(t, configFiles, "publisher-service-a")
+	publisherCfg := findConfigForService(t, configFiles, "publisher-service")
 
 	// It should find ONLY the topic where the method is empty (our new default).
 	require.Len(t, publisherCfg.Topics, 1, "Publisher should have one topic for the YAML config")
-	require.Equal(t, "default-topic-a", publisherCfg.Topics[0].Name, "The topic with the empty lookup method should be present")
+	require.Equal(t, "default-topic", publisherCfg.Topics[0].Name, "The topic with the empty lookup method should be present")
 
 	// The subscriber has no links, so its config should be empty.
-	subscriberCfg := findConfigForService(t, configFiles, "subscriber-service-a")
+	subscriberCfg := findConfigForService(t, configFiles, "subscriber-service")
 	require.Empty(t, subscriberCfg.Topics, "Subscriber should have no topics in its YAML")
 }

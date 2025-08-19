@@ -179,6 +179,7 @@ type CloudResourcesSpec struct {
 	GCSBuckets           []GCSBucket           `yaml:"gcs_buckets,omitempty"`
 	FirestoreDatabases   []FirestoreDatabase   `yaml:"firestore_databases,omitempty"`
 	FirestoreCollections []FirestoreCollection `yaml:"firestore_collections,omitempty"`
+	CloudSchedulerJobs   []CloudSchedulerJob   `yaml:"cloud_scheduler_jobs,omitempty"`
 }
 
 // TopicConfig defines the configuration for a Pub/Sub topic.
@@ -372,6 +373,21 @@ type BigQueryTable struct {
 	ClusteringFields []string `yaml:"clustering_fields,omitempty"`
 	// Expiration defines how long the table's data is kept. (e.g., "90d").
 	Expiration Duration `yaml:"expiration,omitempty"`
+}
+
+type CloudSchedulerJob struct {
+	CloudResource `yaml:",inline"`
+	// Schedule is the cron schedule (e.g., "0 * * * *" for every hour).
+	Schedule string `yaml:"schedule"`
+	// TimeZone for the schedule (e.g., "UTC", "America/New_York").
+	TimeZone string `yaml:"time_zone,omitempty"`
+	// TargetService is the logical name of the Cloud Run service to trigger.
+	TargetService string `yaml:"target_service"`
+	// ServiceAccount is the email of the SA the scheduler will use to invoke the target.
+	// If empty, the project's default compute service account is used.
+	ServiceAccount string `yaml:"service_account,omitempty"`
+	// MessageBody is the JSON payload to send to the target service.
+	MessageBody string `yaml:"message_body,omitempty"`
 }
 
 // GCSBucket defines the configuration for a Google Cloud Storage bucket.
