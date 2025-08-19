@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"cloud.google.com/go/bigquery"
 	"github.com/rs/zerolog"
@@ -224,6 +225,15 @@ func (m *BigQueryManager) CreateResources(ctx context.Context, resources CloudRe
 				},
 				Labels: tableCfg.Labels,
 			}
+
+			if tableCfg.TimePartitioningField != "" {
+				meta.TimePartitioning = &bigquery.TimePartitioning{
+					Field:      tableCfg.TimePartitioningField,
+					Type:       bigquery.TimePartitioningType(tableCfg.TimePartitioningType),
+					Expiration: time.Duration(tableCfg.TimePartitioningExpiration),
+				}
+			}
+
 			if len(tableCfg.ClusteringFields) > 0 {
 				meta.Clustering = &bigquery.Clustering{
 					Fields: tableCfg.ClusteringFields,

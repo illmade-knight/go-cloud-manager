@@ -32,6 +32,9 @@ func TestBigQueryManager_Integration(t *testing.T) {
 	datasetName := fmt.Sprintf("it_dataset_%s", runID)
 	tableName := fmt.Sprintf("it_table_%s", runID)
 
+	// 7 days * 24 hours = 168 hours
+	sevenDays := 168 * time.Hour
+
 	// Define the resources to be managed.
 	resources := servicemanager.CloudResourcesSpec{
 		BigQueryDatasets: []servicemanager.BigQueryDataset{
@@ -39,9 +42,14 @@ func TestBigQueryManager_Integration(t *testing.T) {
 		},
 		BigQueryTables: []servicemanager.BigQueryTable{
 			{
-				CloudResource: servicemanager.CloudResource{Name: tableName},
-				Dataset:       datasetName,
-				SchemaType:    "BQTestSchema", // This schema must be registered.
+				CloudResource:              servicemanager.CloudResource{Name: tableName},
+				Dataset:                    datasetName,
+				SchemaType:                 "BQTestSchema", // This schema must be registered.
+				TimePartitioningField:      "event_timestamp",
+				TimePartitioningType:       "DAY",                              // Create one partition per day.
+				TimePartitioningExpiration: servicemanager.Duration(sevenDays), // Automatically delete partitions older than 7 days.
+				// Clustering improves query performance by sorting data within each partition.
+				ClusteringFields: []string{"device_id"},
 			},
 		},
 	}

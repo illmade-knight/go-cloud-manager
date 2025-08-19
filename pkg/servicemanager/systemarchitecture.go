@@ -337,6 +337,16 @@ const (
 	FirestoreModeDatastore FirestoreDatabaseType = "DATASTORE_MODE"
 )
 
+// BQPartitioningType defines the allowed granularity for time-based table partitioning.
+type BQPartitioningType string
+
+const (
+	BQPartitioningHour  BQPartitioningType = "HOUR"
+	BQPartitioningDay   BQPartitioningType = "DAY"
+	BQPartitioningMonth BQPartitioningType = "MONTH"
+	BQPartitioningYear  BQPartitioningType = "YEAR"
+)
+
 type BigQueryTable struct {
 	CloudResource `yaml:",inline"`
 	// Consumers lists the services that read from this table.
@@ -354,8 +364,10 @@ type BigQueryTable struct {
 	SchemaImportPath string `yaml:"schema_import_path"`
 	// TimePartitioningField is the column used to partition the table by time.
 	TimePartitioningField string `yaml:"time_partitioning_field,omitempty"`
-	// TimePartitioningType is the granularity of the time partitioning (e.g., "DAY", "HOUR").
-	TimePartitioningType string `yaml:"time_partitioning_type,omitempty"`
+	// TimePartitioningType is the granularity of the time partitioning
+	TimePartitioningType BQPartitioningType `yaml:"time_partitioning_type,omitempty"`
+	// TimePartitioningExpiration is how long a partition is kept. (e.g., "168h" for 7 days).
+	TimePartitioningExpiration Duration `yaml:"time_partitioning_expiration,omitempty"`
 	// ClusteringFields are the columns used to cluster data within partitions for faster queries.
 	ClusteringFields []string `yaml:"clustering_fields,omitempty"`
 	// Expiration defines how long the table's data is kept. (e.g., "90d").
