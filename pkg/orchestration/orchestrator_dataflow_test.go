@@ -92,6 +92,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 
 	sdName, sdServiceAccount := "sd", "sd-sa"
 	dataflowName := "tracer-flow"
+	commandFlowName := "command-flow"
 	pubName, pubServiceAccount := "tracer-publisher", "pub-sa"
 	subName, subServiceAccount := "tracer-subscriber", "sub-sa"
 	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
@@ -114,6 +115,51 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
+			commandFlowName: {
+				Resources: servicemanager.CloudResourcesSpec{
+					Topics: []servicemanager.TopicConfig{
+						{
+							CloudResource: servicemanager.CloudResource{
+								Name: sdCommandTopicName,
+							},
+							ProducerService: &servicemanager.ServiceMapping{
+								Name: sdName,
+								Lookup: servicemanager.Lookup{
+									Key:    "command-topic-id",
+									Method: servicemanager.LookupYAML,
+								},
+							},
+						},
+						{
+							CloudResource: servicemanager.CloudResource{
+								Name: sdCompletionTopicName,
+							},
+							ProducerService: &servicemanager.ServiceMapping{
+								Name: sdName,
+								Lookup: servicemanager.Lookup{
+									Key:    "completion-topic-id",
+									Method: servicemanager.LookupYAML,
+								},
+							},
+						},
+					},
+					Subscriptions: []servicemanager.SubscriptionConfig{
+						{
+							CloudResource: servicemanager.CloudResource{
+								Name: sdCommandSubName,
+							},
+							Topic: sdCommandTopicName,
+							ConsumerService: &servicemanager.ServiceMapping{
+								Name: sdName,
+								Lookup: servicemanager.Lookup{
+									Key:    "command-subscription-id",
+									Method: servicemanager.LookupYAML,
+								},
+							},
+						},
+					},
+				},
+			},
 			dataflowName: {
 				Services: map[string]servicemanager.ServiceSpec{
 					subName: {
@@ -145,7 +191,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 								Name: pubName,
 								Lookup: servicemanager.Lookup{
 									Key:    "TRACER_TOPIC_ID",
-									Method: servicemanager.LookupMethodEnv,
+									Method: servicemanager.LookupYAML,
 								},
 							},
 						},
@@ -157,7 +203,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 								Name: subName,
 								Lookup: servicemanager.Lookup{
 									Key:    "VERIFY_TOPIC_ID",
-									Method: servicemanager.LookupMethodEnv,
+									Method: servicemanager.LookupYAML,
 								},
 							},
 						},
@@ -171,7 +217,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 							Name: subName,
 							Lookup: servicemanager.Lookup{
 								Key:    "TRACER_SUB_ID",
-								Method: servicemanager.LookupMethodEnv,
+								Method: servicemanager.LookupYAML,
 							},
 						},
 					}},
@@ -193,7 +239,10 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 
 	// advanced preflight validation
 	t.Log("Generating service-specific YAML configurations...")
-	_, err = orchestration.GenerateServiceConfigs(arch, true)
+	sc, err := orchestration.GenerateServiceConfigs(arch)
+	require.NoError(t, err)
+
+	err = orchestration.WriteServiceConfigFiles(sc, logger)
 	require.NoError(t, err)
 
 	// 3. NEW: Run the local preflight check before any cloud deployment.

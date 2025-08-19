@@ -1,14 +1,15 @@
 topics:
-    - name: verify-topic-a16c67c2
+    - name: verify-topic-41c346dd
       producer_service:
-        name: tracer-subscriber-a16c67c2
-        env: VERIFY_TOPIC_ID
+        name: tracer-subscriber-41c346dd
+        lookup:
+            key: VERIFY_TOPIC_ID
+            method: yaml
 subscriptions:
-    - name: tracer-sub-a16c67c2
-      topic: tracer-topic-a16c67c2
+    - name: tracer-sub-41c346dd
+      topic: tracer-topic-41c346dd
       consumer_service:
-        name: tracer-subscriber-a16c67c2
-        env: TRACER_SUB_ID
-bigquery_datasets: []
-bigquery_tables: []
-gcs_buckets: []
+        name: tracer-subscriber-41c346dd
+        lookup:
+            key: TRACER_SUB_ID
+            method: yaml

@@ -6,8 +6,84 @@ import (
 	"path/filepath"
 
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
+
+// isLinkedForYAML checks if a service is linked to a resource with the intent
+// of using the embedded YAML configuration method.
+// It returns true if the method is explicitly 'embedded_yaml' or if the method is not set (the new default).
+func isLinkedForYAML(links []servicemanager.ServiceMapping, serviceName string) bool {
+	for _, link := range links {
+		if link.Name == serviceName {
+			// Default to LookupYAML if the method is not specified.
+			if link.Lookup.Method == "" || link.Lookup.Method == servicemanager.LookupYAML {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// buildServiceResourceSpec creates the filtered CloudResourcesSpec for a single service.
+func buildServiceResourceSpec(service servicemanager.ServiceSpec, arch *servicemanager.MicroserviceArchitecture) servicemanager.CloudResourcesSpec {
+	spec := servicemanager.CloudResourcesSpec{}
+	for _, dataflow := range arch.Dataflows {
+		// Check Topics (only has one producer)
+		for _, topic := range dataflow.Resources.Topics {
+			if topic.ProducerService != nil && isLinkedForYAML([]servicemanager.ServiceMapping{*topic.ProducerService}, service.Name) {
+				spec.Topics = append(spec.Topics, topic)
+			}
+		}
+		// Check Subscriptions (only has one consumer)
+		for _, sub := range dataflow.Resources.Subscriptions {
+			if sub.ConsumerService != nil && isLinkedForYAML([]servicemanager.ServiceMapping{*sub.ConsumerService}, service.Name) {
+				spec.Subscriptions = append(spec.Subscriptions, sub)
+			}
+		}
+		// Check resources with producer/consumer lists
+		for _, table := range dataflow.Resources.BigQueryTables {
+			if isLinkedForYAML(table.Producers, service.Name) || isLinkedForYAML(table.Consumers, service.Name) {
+				spec.BigQueryTables = append(spec.BigQueryTables, table)
+			}
+		}
+		for _, bucket := range dataflow.Resources.GCSBuckets {
+			if isLinkedForYAML(bucket.Producers, service.Name) || isLinkedForYAML(bucket.Consumers, service.Name) {
+				spec.GCSBuckets = append(spec.GCSBuckets, bucket)
+			}
+		}
+		for _, db := range dataflow.Resources.FirestoreDatabases {
+			if isLinkedForYAML(db.Producers, service.Name) || isLinkedForYAML(db.Consumers, service.Name) {
+				spec.FirestoreDatabases = append(spec.FirestoreDatabases, db)
+			}
+		}
+		for _, coll := range dataflow.Resources.FirestoreCollections {
+			if isLinkedForYAML(coll.Producers, service.Name) || isLinkedForYAML(coll.Consumers, service.Name) {
+				spec.FirestoreCollections = append(spec.FirestoreCollections, coll)
+			}
+		}
+	}
+	return spec
+}
+
+// GenerateServiceConfigs hydrates the architecture and creates service-specific YAML configs.
+func GenerateServiceConfigs(arch *servicemanager.MicroserviceArchitecture) ([]ServiceConfig, error) {
+
+	var configFiles []ServiceConfig
+	allServices := getAllServices(arch)
+
+	for serviceName, service := range allServices {
+		serviceResourceSpec := buildServiceResourceSpec(service, arch)
+
+		destPath := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath, "resources.yaml")
+		configFiles = append(configFiles, ServiceConfig{
+			ServiceName: serviceName,
+			FilePath:    destPath,
+			Config:      serviceResourceSpec,
+		})
+	}
+	return configFiles, nil
+}
 
 // getAllServices is a local helper to collect all service specifications from
 // an architecture, including the ServiceDirector, into a single map.
@@ -28,134 +104,34 @@ func getAllServices(arch *servicemanager.MicroserviceArchitecture) map[string]se
 	return allServices
 }
 
-// GenerateServiceConfigs hydrates the full architecture and then creates a
-// map of service-specific, subset YAML configurations.
-// It returns a map where the key is the service name and the value is the
-// marshaled YAML []byte for that service's configuration.
-func GenerateServiceConfigs(
-	arch *servicemanager.MicroserviceArchitecture,
-	write bool,
-) (map[string]servicemanager.CloudResourcesSpec, error) {
+type ServiceConfig struct {
+	ServiceName string
+	FilePath    string
+	Config      servicemanager.CloudResourcesSpec
+}
 
-	serviceConfigs := make(map[string]servicemanager.CloudResourcesSpec)
-	allServices := getAllServices(arch)
+// In orchestration/config_generator.go
 
-	// 2. Iterate through each service to generate its specific config.
-	for serviceName, service := range allServices {
-		serviceResourceSpec := servicemanager.CloudResourcesSpec{}
+func WriteServiceConfigFiles(
+	filesToWrite []ServiceConfig, // REFACTOR: Accepts the slice of typed objects
+	logger zerolog.Logger,
+) error {
+	logger.Info().Msg("Writing service-specific config files...")
 
-		// Find all resources this service produces or consumes across all dataflows.
-		for _, dataflow := range arch.Dataflows {
-			// --- Pub/Sub Topics ---
-			for _, topic := range dataflow.Resources.Topics {
-				if topic.ProducerService != nil && topic.ProducerService.Name == service.Name {
-					serviceResourceSpec.Topics = append(serviceResourceSpec.Topics, topic)
-				}
-			}
-			// --- Pub/Sub Subscriptions ---
-			for _, sub := range dataflow.Resources.Subscriptions {
-				if sub.ConsumerService != nil && sub.ConsumerService.Name == service.Name {
-					serviceResourceSpec.Subscriptions = append(serviceResourceSpec.Subscriptions, sub)
-				}
-			}
-			// --- BigQuery Tables ---
-			for _, table := range dataflow.Resources.BigQueryTables {
-				isLinked := false
-				for _, producer := range table.Producers {
-					if producer.Name == service.Name {
-						isLinked = true
-						break
-					}
-				}
-				if !isLinked {
-					for _, consumer := range table.Consumers {
-						if consumer.Name == service.Name {
-							isLinked = true
-							break
-						}
-					}
-				}
-				if isLinked {
-					serviceResourceSpec.BigQueryTables = append(serviceResourceSpec.BigQueryTables, table)
-				}
-			}
-			// --- GCS Buckets (Previously missing logic) ---
-			for _, bucket := range dataflow.Resources.GCSBuckets {
-				isLinked := false
-				for _, producer := range bucket.Producers {
-					if producer.Name == service.Name {
-						isLinked = true
-						break
-					}
-				}
-				if !isLinked {
-					for _, consumer := range bucket.Consumers {
-						if consumer.Name == service.Name {
-							isLinked = true
-							break
-						}
-					}
-				}
-				if isLinked {
-					serviceResourceSpec.GCSBuckets = append(serviceResourceSpec.GCSBuckets, bucket)
-				}
-			}
-			for _, db := range dataflow.Resources.FirestoreDatabases {
-				isLinked := false
-				for _, consumer := range db.Consumers {
-					if consumer.Name == service.Name {
-						isLinked = true
-						break
-					}
-				}
-				if isLinked {
-					serviceResourceSpec.FirestoreDatabases = append(serviceResourceSpec.FirestoreDatabases, db)
-				}
-			}
-			// --- Firestore Collections (Previously missing logic) ---
-			for _, collection := range dataflow.Resources.FirestoreCollections {
-				isLinked := false
-				for _, producer := range collection.Producers {
-					if producer.Name == service.Name {
-						isLinked = true
-						break
-					}
-				}
-				if !isLinked {
-					for _, consumer := range collection.Consumers {
-						if consumer.Name == service.Name {
-							isLinked = true
-							break
-						}
-					}
-				}
-				if isLinked {
-					serviceResourceSpec.FirestoreCollections = append(serviceResourceSpec.FirestoreCollections, collection)
-				}
-			}
+	for _, spec := range filesToWrite {
+
+		yamlBytes, err := yaml.Marshal(&spec.Config)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config for service '%s': %w", spec.ServiceName, err)
 		}
-		serviceConfigs[serviceName] = serviceResourceSpec
-	}
 
-	if write {
-		for serviceName, cloudResourceSpec := range serviceConfigs {
-
-			yamlBytes, err := yaml.Marshal(&cloudResourceSpec)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal config for service '%s': %w", serviceName, err)
-			}
-
-			serviceSpec := allServices[serviceName]
-			buildPath := serviceSpec.Deployment.BuildableModulePath
-			sourcePath := serviceSpec.Deployment.SourcePath
-
-			destPath := filepath.Join(sourcePath, buildPath, "resources.yaml")
-			err = os.WriteFile(destPath, yamlBytes, 0644)
-			if err != nil {
-				return nil, fmt.Errorf("failed to write config for service '%s': %w", serviceName, err)
-			}
+		logger.Debug().Str("destination", spec.FilePath).Msgf("Writing config for '%s'", spec.ServiceName)
+		err = os.WriteFile(spec.FilePath, yamlBytes, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to write resources.yaml for service %s: %w", spec.ServiceName, err)
 		}
 	}
 
-	return serviceConfigs, nil
+	logger.Info().Msg("✅ All service config files written successfully.")
+	return nil
 }

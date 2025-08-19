@@ -123,7 +123,7 @@ type HealthCheckSpec struct {
 // ResourceGroup defines a logical grouping of services and the cloud resources they depend on.
 type ResourceGroup struct {
 	// Name is the unique identifier for the dataflow or resource group.
-	Name string `yaml:"name"`
+	Name string `yaml:"name,omitempty"`
 	// Description provides a human-readable explanation of the group's purpose.
 	Description string `yaml:"description,omitempty"`
 	// Services is a map of service specifications belonging to this group. The key is a logical name for the service.
@@ -192,9 +192,9 @@ type TopicConfig struct {
 type LookupMethod string
 
 const (
-	LookupMethodEnv  LookupMethod = "env"
-	LookupMethodYAML LookupMethod = "yaml"
-	LookupMethodDB   LookupMethod = "db"
+	LookupEnv      LookupMethod = "env"
+	LookupYAML     LookupMethod = "yaml"
+	LookupMethodDB LookupMethod = "db"
 )
 
 type Lookup struct {

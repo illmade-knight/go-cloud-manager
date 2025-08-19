@@ -1,58 +1,62 @@
-package orchestration
+package orchestration_test
 
 import (
 	"testing"
 
+	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
-func TestGenerateServiceConfigs(t *testing.T) {
+// findConfigForService is a test-local helper to make assertions cleaner.
+// It iterates through the result slice and finds the config for a specific service.
+func findConfigForService(t *testing.T, configs []orchestration.ServiceConfig, serviceName string) servicemanager.CloudResourcesSpec {
+	t.Helper()
+	for _, c := range configs {
+		if c.ServiceName == serviceName {
+			return c.Config
+		}
+	}
+	require.Fail(t, "config not found for service", serviceName)
+	return servicemanager.CloudResourcesSpec{}
+}
+
+func TestGenerateServiceConfigs_DefaultToYAML(t *testing.T) {
 	// --- Arrange ---
-	// 1. Create a mock architecture with multiple services and resources.
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{
-			ProjectID: "test-project",
-			Region:    "test-region",
-		},
+		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "test-region"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name:           "service-director",
-			ServiceAccount: "sd-sa",
-			Deployment: &servicemanager.DeploymentSpec{
-				SourcePath: ".",
-			},
+			Name: "service-director", ServiceAccount: "sd-sa",
+			Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-flow": {
 				Services: map[string]servicemanager.ServiceSpec{
 					"publisher-service": {
-						Name:           "publisher-service",
-						ServiceAccount: "pub-sa",
-						Deployment: &servicemanager.DeploymentSpec{
-							SourcePath: ".",
-						},
+						Name: "publisher-service", ServiceAccount: "pub-sa",
+						Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
 					},
 					"subscriber-service": {
-						Name:           "subscriber-service",
-						ServiceAccount: "sub-sa",
-						Deployment: &servicemanager.DeploymentSpec{
-							SourcePath: ".",
-						},
+						Name: "subscriber-service", ServiceAccount: "sub-sa",
+						Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
 					},
 				},
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics: []servicemanager.TopicConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: "topic"},
-							ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"},
+							CloudResource: servicemanager.CloudResource{Name: "env-var-topic"},
+							ProducerService: &servicemanager.ServiceMapping{
+								Name:   "publisher-service",
+								Lookup: servicemanager.Lookup{Method: "env_var"}, // Explicitly env_var
+							},
 						},
-					},
-					Subscriptions: []servicemanager.SubscriptionConfig{
 						{
-							CloudResource:   servicemanager.CloudResource{Name: "sub"},
-							Topic:           "topic",
-							ConsumerService: &servicemanager.ServiceMapping{Name: "subscriber-service"},
+							CloudResource: servicemanager.CloudResource{Name: "default-topic"},
+							ProducerService: &servicemanager.ServiceMapping{
+								Name: "publisher-service",
+								// This lookup is empty, so it should default to embedded_yaml
+								Lookup: servicemanager.Lookup{},
+							},
 						},
 					},
 				},
@@ -60,37 +64,21 @@ func TestGenerateServiceConfigs(t *testing.T) {
 		},
 	}
 
-	_, err := servicemanager.HydrateTestArchitecture(arch, "test_repo", "a", zerolog.Nop())
-	require.NoError(t, err)
-
 	// --- Act ---
-	// 2. Call the helper function to generate the configs.
-	serviceConfigs, err := GenerateServiceConfigs(arch, false)
+	// Call the helper function from the 'orchestration' package to generate the configs.
+	configFiles, err := orchestration.GenerateServiceConfigs(arch)
 
 	// --- Assert ---
-	// 3. Verify the results.
 	require.NoError(t, err)
-	require.Len(t, serviceConfigs, 3, "Should generate a config for all 3 services")
 
-	// 4. Check the publisher's config.
-	publisherWrapper, ok := serviceConfigs["publisher-service-a"]
+	// Use the test helper to find and validate the publisher's config.
+	publisherCfg := findConfigForService(t, configFiles, "publisher-service-a")
 
-	require.NoError(t, err)
-	require.Len(t, publisherWrapper.Topics, 1, "Publisher should have one topic")
-	require.Equal(t, "topic-a", publisherWrapper.Topics[0].Name)
-	require.Empty(t, publisherWrapper.Subscriptions, "Publisher should have no subscriptions")
+	// It should find ONLY the topic where the method is empty (our new default).
+	require.Len(t, publisherCfg.Topics, 1, "Publisher should have one topic for the YAML config")
+	require.Equal(t, "default-topic-a", publisherCfg.Topics[0].Name, "The topic with the empty lookup method should be present")
 
-	// 5. Check the subscriber's config.
-	subscriberWrapper, ok := serviceConfigs["subscriber-service-a"]
-	require.NoError(t, err)
-	require.Len(t, subscriberWrapper.Subscriptions, 1, "Subscriber should have one subscription")
-	require.Equal(t, "sub-a", subscriberWrapper.Subscriptions[0].Name)
-	require.Empty(t, subscriberWrapper.Topics, "Subscriber should have no topics")
-
-	// 6. Check the ServiceDirector's config (it has no direct resource links).
-	directorWrapper, ok := serviceConfigs["service-director-a"]
-	require.True(t, ok)
-
-	require.Empty(t, directorWrapper.Topics, "Director should have no topics")
-	require.Empty(t, directorWrapper.Subscriptions, "Director should have no subscriptions")
+	// The subscriber has no links, so its config should be empty.
+	subscriberCfg := findConfigForService(t, configFiles, "subscriber-service-a")
+	require.Empty(t, subscriberCfg.Topics, "Subscriber should have no topics in its YAML")
 }

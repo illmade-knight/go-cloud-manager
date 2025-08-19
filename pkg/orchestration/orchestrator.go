@@ -67,8 +67,8 @@ type Orchestrator struct {
 	completionSubscription *pubsub.Subscription
 	stateChan              chan OrchestratorState
 
-	// REFACTOR: This is the simple, correct, thread-safe map of channels.
-	// It will hold one channel for each pending operation.
+	// This is the simple, thread-safe map of channels.
+	// It will hold one channel for each pending operation (e.g. one for each dataflow setup or teardown completion event).
 	waiters      map[string]chan CompletionEvent
 	waitersMutex sync.Mutex
 }

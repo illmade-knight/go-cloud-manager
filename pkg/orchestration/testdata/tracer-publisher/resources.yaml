@@ -1,9 +1,7 @@
 topics:
-    - name: tracer-topic-a16c67c2
+    - name: tracer-topic-41c346dd
       producer_service:
-        name: tracer-publisher-a16c67c2
-        env: TRACER_TOPIC_ID
-subscriptions: []
-bigquery_datasets: []
-bigquery_tables: []
-gcs_buckets: []
+        name: tracer-publisher-41c346dd
+        lookup:
+            key: TRACER_TOPIC_ID
+            method: yaml

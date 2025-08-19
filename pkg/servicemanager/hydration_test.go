@@ -27,7 +27,7 @@ func TestHydrateArchitecture(t *testing.T) {
 					CloudResource: servicemanager.CloudResource{Name: "events-topic"},
 					ProducerService: &servicemanager.ServiceMapping{Name: "my-service", Lookup: servicemanager.Lookup{
 						Key:    "EVENTS_TOPIC_ID",
-						Method: servicemanager.LookupMethodEnv,
+						Method: servicemanager.LookupEnv,
 					}},
 				}},
 				// NEW_CODE: Added a Firestore collection to test its hydration.
@@ -36,7 +36,7 @@ func TestHydrateArchitecture(t *testing.T) {
 					Producers: []servicemanager.ServiceMapping{
 						{Name: "my-service", Lookup: servicemanager.Lookup{
 							Key:    "USERS_COLLECTION_NAME",
-							Method: servicemanager.LookupMethodEnv,
+							Method: servicemanager.LookupEnv,
 						}},
 					},
 				}},
@@ -80,7 +80,7 @@ func TestHydrateTestArchitecture(t *testing.T) {
 					CloudResource: servicemanager.CloudResource{Name: originalTopicName},
 					ProducerService: &servicemanager.ServiceMapping{Name: originalServiceName, Lookup: servicemanager.Lookup{
 						Key:    "EVENTS_TOPIC_ID",
-						Method: servicemanager.LookupMethodYAML,
+						Method: servicemanager.LookupYAML,
 					}},
 				}},
 			},

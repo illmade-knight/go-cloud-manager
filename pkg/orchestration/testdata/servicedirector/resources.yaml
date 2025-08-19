@@ -1,5 +1,21 @@
-topics: []
-subscriptions: []
-bigquery_datasets: []
-bigquery_tables: []
-gcs_buckets: []
+topics:
+    - name: director-commands-41c346dd
+      producer_service:
+        name: sd-41c346dd
+        lookup:
+            key: command-topic-id
+            method: yaml
+    - name: director-events-41c346dd
+      producer_service:
+        name: sd-41c346dd
+        lookup:
+            key: completion-topic-id
+            method: yaml
+subscriptions:
+    - name: director-command-sub-41c346dd
+      topic: director-commands-41c346dd
+      consumer_service:
+        name: sd-41c346dd
+        lookup:
+            key: command-subscription-id
+            method: yaml

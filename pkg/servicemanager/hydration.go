@@ -125,14 +125,14 @@ func hydrateAllDeploymentSpecs(arch *MicroserviceArchitecture, defaultImageRepo 
 func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 	for _, dataflow := range arch.Dataflows {
 		for _, topic := range dataflow.Resources.Topics {
-			if topic.ProducerService != nil && topic.ProducerService.Lookup.Method == LookupMethodEnv {
+			if topic.ProducerService != nil && topic.ProducerService.Lookup.Method == LookupEnv {
 				if service, ok := dataflow.Services[topic.ProducerService.Name]; ok {
 					injectEnvVar(service.Deployment, topic.ProducerService.Lookup, topic.Name, "TOPIC_ID")
 				}
 			}
 		}
 		for _, sub := range dataflow.Resources.Subscriptions {
-			if sub.ConsumerService != nil && sub.ConsumerService.Lookup.Method == LookupMethodEnv {
+			if sub.ConsumerService != nil && sub.ConsumerService.Lookup.Method == LookupEnv {
 				if service, ok := dataflow.Services[sub.ConsumerService.Name]; ok {
 					injectEnvVar(service.Deployment, sub.ConsumerService.Lookup, sub.Name, "SUB_ID")
 				}
@@ -140,7 +140,7 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 		}
 		for _, table := range dataflow.Resources.BigQueryTables {
 			for _, producer := range table.Producers {
-				if producer.Lookup.Method != LookupMethodEnv {
+				if producer.Lookup.Method != LookupEnv {
 					continue
 				}
 				if service, ok := dataflow.Services[producer.Name]; ok {
@@ -148,7 +148,7 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 				}
 			}
 			for _, consumer := range table.Consumers {
-				if consumer.Lookup.Method != LookupMethodEnv {
+				if consumer.Lookup.Method != LookupEnv {
 					continue
 				}
 				if service, ok := dataflow.Services[consumer.Name]; ok {
@@ -158,7 +158,7 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 		}
 		for _, bucket := range dataflow.Resources.GCSBuckets {
 			for _, producer := range bucket.Producers {
-				if producer.Lookup.Method != LookupMethodEnv {
+				if producer.Lookup.Method != LookupEnv {
 					continue
 				}
 				if service, ok := dataflow.Services[producer.Name]; ok {
@@ -166,7 +166,7 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 				}
 			}
 			for _, consumer := range bucket.Consumers {
-				if consumer.Lookup.Method != LookupMethodEnv {
+				if consumer.Lookup.Method != LookupEnv {
 					continue
 				}
 				if service, ok := dataflow.Services[consumer.Name]; ok {
@@ -177,7 +177,7 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 		// NEW_CODE: Add hydration for Firestore collections.
 		for _, collection := range dataflow.Resources.FirestoreCollections {
 			for _, producer := range collection.Producers {
-				if producer.Lookup.Method != LookupMethodEnv {
+				if producer.Lookup.Method != LookupEnv {
 					continue
 				}
 				if service, ok := dataflow.Services[producer.Name]; ok {
@@ -185,7 +185,7 @@ func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
 				}
 			}
 			for _, consumer := range collection.Consumers {
-				if consumer.Lookup.Method != LookupMethodEnv {
+				if consumer.Lookup.Method != LookupEnv {
 					continue
 				}
 				if service, ok := dataflow.Services[consumer.Name]; ok {

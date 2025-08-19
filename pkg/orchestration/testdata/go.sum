@@ -163,9 +163,8 @@ github.com/googleapis/gax-go/v2 v2.15.0 h1:SyjDc1mGgZU5LncH8gimWo9lW1DtIfPibOG81
 github.com/googleapis/gax-go/v2 v2.15.0/go.mod h1:zVVkkxAQHa1RQpg9z2AUCMnKhi0Qld9rcmyfL1OZhoc=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
-github.com/illmade-knight/go-cloud-manager v0.2.16-beta h1:skzwZpuWKXfgYJpgBBwKn+shBVhzGwDJvNdct8zp+ng=
-github.com/illmade-knight/go-cloud-manager v0.2.16-beta/go.mod h1:sfkz1upskQAnmB7WQqZ2EFQJfLtWq4eMUNeZ3Evr3Cw=
-github.com/illmade-knight/go-cloud-manager v0.2.17-beta/go.mod h1:sfkz1upskQAnmB7WQqZ2EFQJfLtWq4eMUNeZ3Evr3Cw=
+github.com/illmade-knight/go-cloud-manager v0.2.18-beta h1:nY1W3EH61OYbAQHOWCXPFg25RiNSWvN5N+gRF514w+0=
+github.com/illmade-knight/go-cloud-manager v0.2.18-beta/go.mod h1:sfkz1upskQAnmB7WQqZ2EFQJfLtWq4eMUNeZ3Evr3Cw=
 github.com/illmade-knight/go-dataflow v0.2.1-beta h1:Ue2MAK9aKkxXyjkPsMbXUSzvC+cCqJRFtkazMMl6LJQ=
 github.com/illmade-knight/go-dataflow v0.2.1-beta/go.mod h1:kz43+B89zYbVsUDawQoRbgUOukbOWXpX46duOIc5FK8=
 github.com/illmade-knight/go-test v0.0.2-beta h1:b7LKySBc2v93kU4JhSv4FzDdVAO0UD/2YyFtCv/LKco=
