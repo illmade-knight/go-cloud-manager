@@ -33,11 +33,13 @@ func TestHydrateArchitecture(t *testing.T) {
 				// NEW_CODE: Added a Firestore collection to test its hydration.
 				FirestoreCollections: []servicemanager.FirestoreCollection{{
 					CloudResource: servicemanager.CloudResource{Name: "users-collection"},
-					Producers: []servicemanager.ServiceMapping{
-						{Name: "my-service", Lookup: servicemanager.Lookup{
-							Key:    "USERS_COLLECTION_NAME",
-							Method: servicemanager.LookupEnv,
-						}},
+					ResourceIO: servicemanager.ResourceIO{
+						Producers: []servicemanager.ServiceMapping{
+							{Name: "my-service", Lookup: servicemanager.Lookup{
+								Key:    "USERS_COLLECTION_NAME",
+								Method: servicemanager.LookupEnv,
+							}},
+						},
 					},
 				}},
 			},

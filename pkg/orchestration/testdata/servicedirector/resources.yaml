@@ -1,21 +1,21 @@
 topics:
-    - name: director-commands-41c346dd
+    - name: director-commands-74139467
       producer_service:
-        name: sd-41c346dd
+        name: sd-74139467
         lookup:
             key: command-topic-id
             method: yaml
-    - name: director-events-41c346dd
+    - name: director-events-74139467
       producer_service:
-        name: sd-41c346dd
+        name: sd-74139467
         lookup:
             key: completion-topic-id
             method: yaml
 subscriptions:
-    - name: director-command-sub-41c346dd
-      topic: director-commands-41c346dd
+    - name: director-command-sub-74139467
+      topic: director-commands-74139467
       consumer_service:
-        name: sd-41c346dd
+        name: sd-74139467
         lookup:
             key: command-subscription-id
             method: yaml

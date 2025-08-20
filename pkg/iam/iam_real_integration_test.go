@@ -139,14 +139,18 @@ func TestIAMManager_FullFlow(t *testing.T) {
 					BigQueryTables: []servicemanager.BigQueryTable{
 						{
 							CloudResource: servicemanager.CloudResource{Name: testTableName},
-							Dataset:       testDatasetName,
-							Producers:     []servicemanager.ServiceMapping{{Name: "iam-test-service"}},
+							ResourceIO: servicemanager.ResourceIO{
+								Producers: []servicemanager.ServiceMapping{{Name: "iam-test-service"}},
+							},
+							Dataset: testDatasetName,
 						},
 					},
 					// UPDATE: Add a Firestore database with a producer to the architecture.
 					FirestoreDatabases: []servicemanager.FirestoreDatabase{{
 						CloudResource: servicemanager.CloudResource{Name: "default-db"},
-						Producers:     []servicemanager.ServiceMapping{{Name: "iam-test-service"}},
+						ResourceIO: servicemanager.ResourceIO{
+							Producers: []servicemanager.ServiceMapping{{Name: "iam-test-service"}},
+						},
 					}},
 				},
 			},

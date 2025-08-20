@@ -284,6 +284,13 @@ const (
 	ServiceAccount IAMAccessType = "service-account"
 )
 
+type ResourceIO struct {
+	// Producers lists the services that read from this resource.
+	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	// Producers lists the services that write to this resource.
+	Producers []ServiceMapping `yaml:"producers,omitempty"`
+}
+
 // ProvisionedResources contains details of all resources created by a setup operation.
 // This struct is used to pass information between resource creation and IAM policy application steps.
 type ProvisionedResources struct {
@@ -350,12 +357,16 @@ const (
 
 type BigQueryTable struct {
 	CloudResource `yaml:",inline"`
+
+	ResourceIO `yaml:",inline"`
+	// For BigQuery the ResourceIO enables the following implicit roles
 	// Consumers lists the services that read from this table.
 	// IAM: This implicitly grants the service account the 'roles/bigquery.dataViewer' role.
-	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	//Consumers []ServiceMapping `yaml:"consumers,omitempty"`
 	// Producers lists the services that write to this table.
 	// IAM: This implicitly grants the service account the 'roles/bigquery.dataEditor' role.
-	Producers []ServiceMapping `yaml:"producers,omitempty"`
+	//Producers []ServiceMapping `yaml:"producers,omitempty"`
+
 	// Dataset is the name of the parent BigQuery dataset.
 	Dataset string `yaml:"dataset"`
 	// SchemaType is a key that maps to a Go struct registered with the ServiceManager.
@@ -393,12 +404,15 @@ type CloudSchedulerJob struct {
 // GCSBucket defines the configuration for a Google Cloud Storage bucket.
 type GCSBucket struct {
 	CloudResource `yaml:",inline"`
+
+	ResourceIO `yaml:",inline"`
 	// Consumers lists the services that read from this bucket.
 	// IAM: This implicitly grants the service account the 'roles/storage.objectViewer' role.
-	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	//Consumers []ServiceMapping `yaml:"consumers,omitempty"`
 	// Producers lists the services that write to this bucket.
 	// IAM: This implicitly grants the service account the 'roles/storage.objectAdmin' role.
-	Producers []ServiceMapping `yaml:"producers,omitempty"`
+	//Producers []ServiceMapping `yaml:"producers,omitempty"`
+
 	// Location is the geographic location of the bucket (e.g., "US-CENTRAL1").
 	Location string `yaml:"location,omitempty"`
 	// StorageClass is the default storage class for objects in the bucket (e.g., "STANDARD", "NEARLINE").
@@ -410,26 +424,32 @@ type GCSBucket struct {
 // FirestoreDatabase defines the configuration for a Cloud Firestore database.
 type FirestoreDatabase struct {
 	CloudResource `yaml:",inline"`
+
+	ResourceIO `yaml:",inline"`
+
+	// Consumers lists the services that read from this database.
+	// IAM: This implicitly grants the service account the 'roles/datastore.viewer' role.
+	//Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	// Producers lists the services that write to this database.
+	// IAM: This implicitly grants the service account the 'roles/datastore.user' role.
+	// Producers []ServiceMapping `yaml:"producers,omitempty"`
+
 	// LocationID specifies the multi-region or region for the database (e.g., "eur3", "nam5").
 	LocationID string `yaml:"location_id"`
 	// Type specifies the database mode, either NATIVE or DATASTORE_MODE.
 	Type FirestoreDatabaseType `yaml:"type"`
-	// Consumers lists the services that read from this database.
-	// IAM: This implicitly grants the service account the 'roles/datastore.viewer' role.
-	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
-	// Producers lists the services that write to this database.
-	// IAM: This implicitly grants the service account the 'roles/datastore.user' role.
-	Producers []ServiceMapping `yaml:"producers,omitempty"`
 }
 
 type FirestoreCollection struct {
 	CloudResource `yaml:",inline"`
+
+	ResourceIO `yaml:",inline"`
 	// Consumers lists the services that read from this collection.
 	// IAM: collections do not have IAM so this is used for Hydration etc
-	Consumers []ServiceMapping `yaml:"consumers,omitempty"`
+	//Consumers []ServiceMapping `yaml:"consumers,omitempty"`
 	// Producers lists the services that write to this collection.
 	// IAM: collections do not have IAM so this is used for Hydration etc
-	Producers []ServiceMapping `yaml:"producers,omitempty"`
+	//Producers []ServiceMapping `yaml:"producers,omitempty"`
 	// FirestoreDatabase is the name of the parent Firestore database.
 	FirestoreDatabase string `yaml:"database"`
 }

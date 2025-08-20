@@ -141,7 +141,7 @@ func TestServiceDirector_Integration(t *testing.T) {
 	t.Log("Publishing 'setup' command to ServiceDirector...")
 	cmd := orchestration.Command{
 		Instruction: orchestration.Setup,
-		Value:       "test-flow",
+		Payload:     json.RawMessage("test-flow"),
 	}
 	cmdData, err := json.Marshal(cmd)
 	require.NoError(t, err)

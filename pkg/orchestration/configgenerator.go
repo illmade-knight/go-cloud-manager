@@ -25,6 +25,46 @@ func isLinkedForYAML(links []servicemanager.ServiceMapping, serviceName string) 
 	return false
 }
 
+// ReadResourceMappings extract the lookup names from a CloudResourcesSpec.
+func ReadResourceMappings(spec servicemanager.CloudResourcesSpec) map[string]string {
+	lookupMap := make(map[string]string)
+
+	mr := func(rio servicemanager.ResourceIO) {
+		for _, consumer := range rio.Consumers {
+			if consumer.Lookup.Key != "" {
+				lookupMap[consumer.Lookup.Key] = consumer.Name
+			}
+		}
+		for _, producer := range rio.Producers {
+			if producer.Lookup.Key != "" {
+				lookupMap[producer.Lookup.Key] = producer.Name
+			}
+		}
+	}
+
+	// 3. Iterate through the parsed CloudResourcesSpec to find all resource links.
+	for _, topic := range spec.Topics {
+		if topic.ProducerService != nil && topic.ProducerService.Lookup.Key != "" {
+			lookupMap[topic.ProducerService.Lookup.Key] = topic.Name
+		}
+	}
+	for _, sub := range spec.Subscriptions {
+		if sub.ConsumerService != nil && sub.ConsumerService.Lookup.Key != "" {
+			lookupMap[sub.ConsumerService.Lookup.Key] = sub.Name
+		}
+	}
+	for _, table := range spec.BigQueryTables {
+		mr(table.ResourceIO)
+	}
+	for _, collection := range spec.FirestoreCollections {
+		mr(collection.ResourceIO)
+	}
+	for _, bucket := range spec.GCSBuckets {
+		mr(bucket.ResourceIO)
+	}
+	return lookupMap
+}
+
 // buildServiceResourceSpec creates the filtered CloudResourcesSpec for a single service.
 func buildServiceResourceSpec(service servicemanager.ServiceSpec, arch *servicemanager.MicroserviceArchitecture) servicemanager.CloudResourcesSpec {
 	spec := servicemanager.CloudResourcesSpec{}

@@ -40,17 +40,27 @@ func TestPlanRolesForApplicationServices(t *testing.T) {
 				Resources: servicemanager.CloudResourcesSpec{
 					Topics:        []servicemanager.TopicConfig{{CloudResource: servicemanager.CloudResource{Name: "data-topic"}, ProducerService: &servicemanager.ServiceMapping{Name: "publisher-service"}}},
 					Subscriptions: []servicemanager.SubscriptionConfig{{CloudResource: servicemanager.CloudResource{Name: "data-sub"}, Topic: "data-topic", ConsumerService: &servicemanager.ServiceMapping{Name: "subscriber-service"}}},
-					GCSBuckets:    []servicemanager.GCSBucket{{CloudResource: servicemanager.CloudResource{Name: "data-lake-bucket"}, Producers: []servicemanager.ServiceMapping{{Name: "gcs-writer-service"}}}},
+					GCSBuckets: []servicemanager.GCSBucket{
+						{
+							CloudResource: servicemanager.CloudResource{Name: "data-lake-bucket"},
+							ResourceIO: servicemanager.ResourceIO{
+								Producers: []servicemanager.ServiceMapping{{Name: "gcs-writer-service"}},
+							},
+						}},
 					BigQueryTables: []servicemanager.BigQueryTable{{
 						CloudResource: servicemanager.CloudResource{Name: "events-table"},
-						Dataset:       "analytics-dataset",
-						Consumers:     []servicemanager.ServiceMapping{{Name: "bq-reader-service"}},
+						ResourceIO: servicemanager.ResourceIO{
+							Consumers: []servicemanager.ServiceMapping{{Name: "bq-reader-service"}},
+						},
+						Dataset: "analytics-dataset",
 					}},
 					// UPDATE: Add a Firestore DB with a producer and consumer to the test case.
 					FirestoreDatabases: []servicemanager.FirestoreDatabase{{
 						CloudResource: servicemanager.CloudResource{Name: "user-profiles-db"},
-						Producers:     []servicemanager.ServiceMapping{{Name: "fs-writer-service"}},
-						Consumers:     []servicemanager.ServiceMapping{{Name: "fs-reader-service"}},
+						ResourceIO: servicemanager.ResourceIO{
+							Producers: []servicemanager.ServiceMapping{{Name: "fs-writer-service"}},
+							Consumers: []servicemanager.ServiceMapping{{Name: "fs-reader-service"}},
+						},
 					}},
 				},
 			},
