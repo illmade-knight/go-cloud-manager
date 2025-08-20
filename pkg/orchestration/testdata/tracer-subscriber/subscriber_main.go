@@ -18,10 +18,10 @@ import (
 //go:embed resources.yaml
 var resourcesYAML []byte
 
-func readResourcesYAML() (cfg Config, err error) {
+func readResourcesYAML(yamlBytes []byte) (cfg Config, err error) {
 
 	resources := &servicemanager.CloudResourcesSpec{}
-	err = yaml.Unmarshal(resourcesYAML, &resources)
+	err = yaml.Unmarshal(yamlBytes, &resources)
 	if err != nil {
 		return cfg, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
 	}
@@ -54,8 +54,8 @@ type Config struct {
 
 // loadAndValidateConfig centralizes all configuration loading and validation.
 // It is now a testable helper function.
-func loadAndValidateConfig() (Config, error) {
-	cfg, err := readResourcesYAML()
+func loadAndValidateConfig(yamlBytes []byte) (Config, error) {
+	cfg, err := readResourcesYAML(yamlBytes)
 	if err != nil {
 		return cfg, err
 	}
@@ -78,7 +78,7 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-subscriber").Logger()
 
 	// --- 1. Load configuration ---
-	cfg, err := loadAndValidateConfig()
+	cfg, err := loadAndValidateConfig(resourcesYAML)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration failed")
 	}

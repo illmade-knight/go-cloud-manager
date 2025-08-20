@@ -30,11 +30,11 @@ type serviceConfig struct {
 	AutoPublishCount    int
 }
 
-func readResourcesYAML() (*serviceConfig, error) {
+func readResourcesYAML(yamlBytes []byte) (*serviceConfig, error) {
 
 	// --- 1. Load resource links from embedded YAML ---
 	resources := &servicemanager.CloudResourcesSpec{}
-	err := yaml.Unmarshal(resourcesYAML, resources)
+	err := yaml.Unmarshal(yamlBytes, resources)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
 	}
@@ -58,10 +58,10 @@ func readResourcesYAML() (*serviceConfig, error) {
 
 // loadAndValidateConfig centralizes all configuration loading and validation.
 // It is now a testable helper function.
-func loadAndValidateConfig() (*serviceConfig, error) {
+func loadAndValidateConfig(yamlBytes []byte) (*serviceConfig, error) {
 
 	// --- 2. Load runtime yaml config  ---
-	cfg, err := readResourcesYAML()
+	cfg, err := readResourcesYAML(yamlBytes)
 	if err != nil {
 		return cfg, fmt.Errorf("error reading yaml: %w", err)
 	}
@@ -99,7 +99,7 @@ func loadAndValidateConfig() (*serviceConfig, error) {
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-publisher").Logger()
 
-	cfg, err := loadAndValidateConfig()
+	cfg, err := loadAndValidateConfig(resourcesYAML)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration error")
 	}
