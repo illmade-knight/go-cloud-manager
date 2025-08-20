@@ -19,6 +19,11 @@ func TestConfigLoading(t *testing.T) {
 	yamlContent := `
   topics:
     - name: test-topic-123
+      producer_service:
+        name: tracer-publisher-123
+        lookup:
+            key: tracer-topic-id
+            method: yaml
 `
 	yamlBytes, err := os.ReadFile("resources.yaml")
 	if err != nil {

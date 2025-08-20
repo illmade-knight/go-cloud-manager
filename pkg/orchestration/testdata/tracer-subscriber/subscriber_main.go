@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"cloud.google.com/go/pubsub"
+	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
@@ -16,46 +18,48 @@ import (
 //go:embed resources.yaml
 var resourcesYAML []byte
 
-// Config defines the minimal, local structs needed to unmarshal the service-specific
-// resources.yaml file.
-type (
-	Config struct {
-		ProjectID      string
-		Port           string
-		SubscriptionID string
-		VerifyTopicID  string
-	}
-	resourceConfig struct {
-		Topics        []TopicConfig        `yaml:"topics"`
-		Subscriptions []SubscriptionConfig `yaml:"subscriptions"`
-	}
-	TopicConfig struct {
-		Name string `yaml:"name"`
-	}
-	SubscriptionConfig struct {
-		Name string `yaml:"name"`
-	}
-)
+func readResourcesYAML() (cfg Config, err error) {
 
-// loadAndValidateConfig centralizes all configuration loading and validation.
-// It is now a testable helper function.
-func loadAndValidateConfig(yamlBytes []byte) (Config, error) {
-	var cfg Config
-
-	// 1. Load resource links from embedded YAML.
-	var resources resourceConfig
-	err := yaml.Unmarshal(yamlBytes, &resources)
+	resources := &servicemanager.CloudResourcesSpec{}
+	err = yaml.Unmarshal(resourcesYAML, &resources)
 	if err != nil {
 		return cfg, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
 	}
 
-	// Validate that the config contains exactly what this service needs.
-	if len(resources.Subscriptions) != 1 || len(resources.Topics) != 1 {
-		return cfg, fmt.Errorf("configuration error: expected exactly 1 subscription and 1 topic, but found %d and %d",
-			len(resources.Subscriptions), len(resources.Topics))
+	lookupMap := orchestration.ReadResourceMappings(resources)
+
+	vt, ok := lookupMap["verify-topic-id"]
+	if ok {
+		cfg.VerifyTopicID = vt
+	} else {
+		return cfg, fmt.Errorf("failed to find commands-topic-id in resources.yaml")
 	}
-	cfg.SubscriptionID = resources.Subscriptions[0].Name
-	cfg.VerifyTopicID = resources.Topics[0].Name
+	ts, ok := lookupMap["tracer-subscription-id"]
+	if ok {
+		cfg.SubscriptionID = ts
+	} else {
+		return cfg, fmt.Errorf("failed to find commands-topic-id in resources.yaml")
+	}
+	return cfg, nil
+}
+
+// Config defines the minimal, local structs needed to unmarshal the service-specific
+// resources.yaml file.
+type Config struct {
+	ProjectID      string
+	Port           string
+	SubscriptionID string
+	VerifyTopicID  string
+}
+
+// loadAndValidateConfig centralizes all configuration loading and validation.
+// It is now a testable helper function.
+func loadAndValidateConfig() (Config, error) {
+	cfg, err := readResourcesYAML()
+	if err != nil {
+		return cfg, err
+	}
+	// 1. Load resource links from embedded YAML.
 
 	// 2. Load runtime config from standard environment variables.
 	cfg.ProjectID = os.Getenv("PROJECT_ID")
@@ -74,7 +78,7 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-subscriber").Logger()
 
 	// --- 1. Load configuration ---
-	cfg, err := loadAndValidateConfig(resourcesYAML)
+	cfg, err := loadAndValidateConfig()
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration failed")
 	}

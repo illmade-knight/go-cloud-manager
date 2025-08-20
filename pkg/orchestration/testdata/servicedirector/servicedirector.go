@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
+	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
@@ -23,26 +24,13 @@ var resourcesYAML []byte
 var servicesYAML []byte
 
 func readResourcesYAML() (*servicedirector.PubsubConfig, error) {
-	var spec servicemanager.CloudResourcesSpec
-	err := yaml.Unmarshal(resourcesYAML, &spec)
+	spec := &servicemanager.CloudResourcesSpec{}
+	err := yaml.Unmarshal(resourcesYAML, spec)
 	if err != nil {
 		log.Fatalf("Failed to parse services.yaml: %v", err)
 	}
-	lookupMap := make(map[string]string)
 
-	// 3. Iterate through the parsed CloudResourcesSpec to find all resource links.
-
-	for _, topic := range spec.Topics {
-		if topic.ProducerService != nil && topic.ProducerService.Lookup.Key != "" {
-			lookupMap[topic.ProducerService.Lookup.Key] = topic.Name
-		}
-	}
-	for _, sub := range spec.Subscriptions {
-		if sub.ConsumerService != nil && sub.ConsumerService.Lookup.Key != "" {
-			lookupMap[sub.ConsumerService.Lookup.Key] = sub.Name
-		}
-	}
-	// ... add loops for other resources later if needed.
+	lookupMap := orchestration.ReadResourceMappings(spec)
 
 	cfg := &servicedirector.PubsubConfig{}
 	v, ok := lookupMap["command-topic-id"]

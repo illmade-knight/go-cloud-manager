@@ -100,18 +100,18 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 
 	// 1. Define Architecture with logical names.
 	arch = &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{ProjectID: projectID, Region: "us-central1"},
+		Environment: servicemanager.Environment{Name: "dataflow-test", ProjectID: projectID, Region: "us-central1"},
 		ServiceManagerSpec: servicemanager.ServiceSpec{
 			Name:           sdName,
 			ServiceAccount: sdServiceAccount,
 			Deployment: &servicemanager.DeploymentSpec{
 				SourcePath:          sourcePath,
 				BuildableModulePath: sdBuildPath,
-				EnvironmentVars: map[string]string{
-					"SD_COMMAND_TOPIC":        sdCommandTopicName,
-					"SD_COMMAND_SUBSCRIPTION": sdCommandSubName,
-					"SD_COMPLETION_TOPIC":     sdCompletionTopicName,
-				},
+				//EnvironmentVars: map[string]string{
+				//	"SD_COMMAND_TOPIC":        sdCommandTopicName,
+				//	"SD_COMMAND_SUBSCRIPTION": sdCommandSubName,
+				//	"SD_COMPLETION_TOPIC":     sdCompletionTopicName,
+				//},
 			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
@@ -190,7 +190,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 							ProducerService: &servicemanager.ServiceMapping{
 								Name: pubName,
 								Lookup: servicemanager.Lookup{
-									Key:    "TRACER_TOPIC_ID",
+									Key:    "tracer-topic-id",
 									Method: servicemanager.LookupYAML,
 								},
 							},
@@ -202,7 +202,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 							ProducerService: &servicemanager.ServiceMapping{
 								Name: subName,
 								Lookup: servicemanager.Lookup{
-									Key:    "VERIFY_TOPIC_ID",
+									Key:    "verify-topic-id",
 									Method: servicemanager.LookupYAML,
 								},
 							},
@@ -216,7 +216,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 						ConsumerService: &servicemanager.ServiceMapping{
 							Name: subName,
 							Lookup: servicemanager.Lookup{
-								Key:    "TRACER_SUB_ID",
+								Key:    "tracer-subscription-id",
 								Method: servicemanager.LookupYAML,
 							},
 						},
@@ -261,9 +261,10 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		arch.Dataflows[dfName] = df
 	}
 
-	arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"] = nameMap[sdCommandTopicName]
-	arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"] = nameMap[sdCompletionTopicName]
-	arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"] = nameMap[sdCommandSubName]
+	// REFACTOR now handled by resources.yaml
+	//arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"] = nameMap[sdCommandTopicName]
+	//arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"] = nameMap[sdCompletionTopicName]
+	//arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"] = nameMap[sdCommandSubName]
 
 	// 3. Write the fully hydrated YAML for the ServiceDirector build.
 	t.Log("Writing hydrated services.yaml for the ServiceDirector build...")

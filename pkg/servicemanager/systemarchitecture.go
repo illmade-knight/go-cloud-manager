@@ -127,9 +127,9 @@ type ResourceGroup struct {
 	// Description provides a human-readable explanation of the group's purpose.
 	Description string `yaml:"description,omitempty"`
 	// Services is a map of service specifications belonging to this group. The key is a logical name for the service.
-	Services map[string]ServiceSpec `yaml:"services"`
+	Services map[string]ServiceSpec `yaml:"services,omitempty"`
 	// Resources defines all the cloud infrastructure (topics, buckets, etc.) required by the services in this group.
-	Resources CloudResourcesSpec `yaml:"resources"`
+	Resources CloudResourcesSpec `yaml:"resources,omitempty"`
 	// Lifecycle defines the teardown strategy for the resources in this group.
 	Lifecycle *LifecyclePolicy `yaml:"lifecycle,omitempty"`
 }

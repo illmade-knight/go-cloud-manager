@@ -26,7 +26,7 @@ func isLinkedForYAML(links []servicemanager.ServiceMapping, serviceName string) 
 }
 
 // ReadResourceMappings extract the lookup names from a CloudResourcesSpec.
-func ReadResourceMappings(spec servicemanager.CloudResourcesSpec) map[string]string {
+func ReadResourceMappings(spec *servicemanager.CloudResourcesSpec) map[string]string {
 	lookupMap := make(map[string]string)
 
 	mr := func(rio servicemanager.ResourceIO) {

@@ -11,6 +11,8 @@ import (
 
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
+	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
+	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
@@ -28,35 +30,43 @@ type serviceConfig struct {
 	AutoPublishCount    int
 }
 
-// resourceConfig defines the minimal struct to unmarshal the service-specific YAML.
-type resourceConfig struct {
-	Topics []struct {
-		Name string `yaml:"name"`
-	} `yaml:"topics"`
-}
+func readResourcesYAML() (*serviceConfig, error) {
 
-// loadAndValidateConfig centralizes all configuration loading and validation.
-// It is now a testable helper function.
-func loadAndValidateConfig(yamlBytes []byte) (serviceConfig, error) {
 	// --- 1. Load resource links from embedded YAML ---
-	var resources resourceConfig
-	err := yaml.Unmarshal(yamlBytes, &resources)
+	resources := &servicemanager.CloudResourcesSpec{}
+	err := yaml.Unmarshal(resourcesYAML, resources)
 	if err != nil {
-		return serviceConfig{}, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
-	}
-	if len(resources.Topics) != 1 {
-		return serviceConfig{}, fmt.Errorf("configuration error: expected exactly 1 topic in resources.yaml, found %d", len(resources.Topics))
+		return nil, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
 	}
 
-	// --- 2. Load runtime config from environment variables ---
-	cfg := serviceConfig{
-		TopicID:             resources.Topics[0].Name,
+	lookupMap := orchestration.ReadResourceMappings(resources)
+
+	cfg := &serviceConfig{
 		Port:                "8080",
 		AutoPublishEnabled:  true,
 		AutoPublishInterval: 20 * time.Second,
 		AutoPublishCount:    10,
 	}
+	v, ok := lookupMap["tracer-topic-id"]
+	if ok {
+		cfg.TopicID = v
+	} else {
+		return nil, fmt.Errorf("failed to find commands-topic-id in resources.yaml")
+	}
+	return cfg, nil
+}
 
+// loadAndValidateConfig centralizes all configuration loading and validation.
+// It is now a testable helper function.
+func loadAndValidateConfig() (*serviceConfig, error) {
+
+	// --- 2. Load runtime yaml config  ---
+	cfg, err := readResourcesYAML()
+	if err != nil {
+		return cfg, fmt.Errorf("error reading yaml: %w", err)
+	}
+
+	// --- 2. Load runtime env config  ---
 	cfg.ProjectID = os.Getenv("PROJECT_ID")
 	if cfg.ProjectID == "" {
 		return cfg, fmt.Errorf("missing required environment variable: PROJECT_ID")
@@ -66,7 +76,7 @@ func loadAndValidateConfig(yamlBytes []byte) (serviceConfig, error) {
 		cfg.Port = port
 	}
 	if enabledStr := os.Getenv("AUTO_PUBLISH_ENABLED"); enabledStr != "" {
-		cfg.AutoPublishEnabled = (enabledStr == "true" || enabledStr == "1")
+		cfg.AutoPublishEnabled = enabledStr == "true" || enabledStr == "1"
 	}
 	if intervalStr := os.Getenv("AUTO_PUBLISH_INTERVAL"); intervalStr != "" {
 		interval, err := time.ParseDuration(intervalStr)
@@ -89,7 +99,7 @@ func loadAndValidateConfig(yamlBytes []byte) (serviceConfig, error) {
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-publisher").Logger()
 
-	cfg, err := loadAndValidateConfig(resourcesYAML)
+	cfg, err := loadAndValidateConfig()
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration error")
 	}
