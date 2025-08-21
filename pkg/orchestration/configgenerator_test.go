@@ -25,9 +25,11 @@ func TestGenerateServiceConfigs_DefaultToYAML(t *testing.T) {
 	// --- Arrange ---
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "test-region"},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "service-director", ServiceAccount: "sd-sa",
-			Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
+		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
+			ServiceSpec: servicemanager.ServiceSpec{
+				Name: "service-director", ServiceAccount: "sd-sa",
+				Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
+			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
 			"test-flow": {

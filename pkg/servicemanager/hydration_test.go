@@ -15,8 +15,10 @@ func TestHydrateArchitecture(t *testing.T) {
 	// ARRANGE
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
+		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
+			ServiceSpec: servicemanager.ServiceSpec{
+				Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
+			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{"test-flow": {
 			Services: map[string]servicemanager.ServiceSpec{
@@ -70,8 +72,10 @@ func TestHydrateTestArchitecture(t *testing.T) {
 	originalTopicName := "events-topic"
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "us-central1"},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
+		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
+			ServiceSpec: servicemanager.ServiceSpec{
+				Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
+			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{"test-flow": {
 			Services: map[string]servicemanager.ServiceSpec{
@@ -119,9 +123,8 @@ func TestHydrateArchitecture_ValidationFailure(t *testing.T) {
 	// ARRANGE
 	arch := &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name: "service-manager",
-			// ServiceAccount is missing
+		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
+			ServiceSpec: servicemanager.ServiceSpec{Name: "service-manager"},
 		},
 	}
 

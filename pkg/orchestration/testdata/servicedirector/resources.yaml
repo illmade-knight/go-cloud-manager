@@ -1,21 +1,15 @@
 topics:
-    - name: director-commands-3e6182a9
+    - name: completion-topic-d4596cff
       producer_service:
-        name: sd-3e6182a9
+        name: sd-d4596cff
         lookup:
-            key: command-topic-id
-            method: yaml
-    - name: director-events-3e6182a9
-      producer_service:
-        name: sd-3e6182a9
-        lookup:
-            key: completion-topic-id
+            key: ""
             method: yaml
 subscriptions:
-    - name: director-command-sub-3e6182a9
-      topic: director-commands-3e6182a9
+    - name: command-topic-sub-d4596cff
+      topic: command-topic-d4596cff-d4596cff
       consumer_service:
-        name: sd-3e6182a9
+        name: sd-d4596cff
         lookup:
-            key: command-subscription-id
+            key: SD_COMMAND_SUBSCRIPTION
             method: yaml

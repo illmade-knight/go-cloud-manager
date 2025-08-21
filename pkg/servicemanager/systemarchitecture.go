@@ -19,7 +19,7 @@ type MicroserviceArchitecture struct {
 	Environment `yaml:",inline"`
 	// ServiceManagerSpec defines the special service responsible for orchestrating
 	// the creation and management of all other resources.
-	ServiceManagerSpec ServiceSpec `yaml:"service_manager_spec"`
+	ServiceManagerSpec ServiceManagerSpec `yaml:"service_manager_spec"`
 	// Dataflows is a map of logical resource groups. Each key is a dataflow name.
 	Dataflows map[string]ResourceGroup `yaml:"dataflows"`
 	// DeploymentEnvironments allows for overriding environment settings for specific
@@ -45,6 +45,14 @@ type Environment struct {
 }
 
 // --- Service and Deployment Specification ---
+
+type ServiceManagerSpec struct {
+	ServiceSpec `yaml:",inline"`
+	// CommandTopic is a reference to the Pub/Sub topic resource the ServiceDirector listens on for commands.
+	CommandTopic ServiceMapping `yaml:"command_topic"`
+	// CompletionTopic is a reference to the Pub/Sub topic resource the ServiceDirector publishes completion events to.
+	CompletionTopic ServiceMapping `yaml:"completion_topic"`
+}
 
 // ServiceSpec defines a single microservice's identity and deployment characteristics.
 type ServiceSpec struct {

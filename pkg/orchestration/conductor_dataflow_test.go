@@ -92,74 +92,36 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 
 	sdName, sdServiceAccount := "sd", "sd-sa"
 	dataflowName := "tracer-flow"
-	commandFlowName := "command-flow"
 	pubName, pubServiceAccount := "tracer-publisher", "pub-sa"
 	subName, subServiceAccount := "tracer-subscriber", "sub-sa"
 	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
-	sdCommandTopicName, sdCompletionTopicName, sdCommandSubName := "director-commands", "director-events", "director-command-sub"
-
+	
 	// 1. Define Architecture with logical names.
 	arch = &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{Name: "dataflow-test", ProjectID: projectID, Region: "us-central1"},
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Name:           sdName,
-			ServiceAccount: sdServiceAccount,
-			Deployment: &servicemanager.DeploymentSpec{
-				SourcePath:          sourcePath,
-				BuildableModulePath: sdBuildPath,
-				//EnvironmentVars: map[string]string{
-				//	"SD_COMMAND_TOPIC":        sdCommandTopicName,
-				//	"SD_COMMAND_SUBSCRIPTION": sdCommandSubName,
-				//	"SD_COMPLETION_TOPIC":     sdCompletionTopicName,
-				//},
+		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
+			ServiceSpec: servicemanager.ServiceSpec{
+				Name:           sdName,
+				ServiceAccount: sdServiceAccount,
+				Deployment: &servicemanager.DeploymentSpec{
+					SourcePath:          sourcePath,
+					BuildableModulePath: sdBuildPath,
+				},
+			},
+			CommandTopic: servicemanager.ServiceMapping{
+				Name: "command-topic",
+				Lookup: servicemanager.Lookup{
+					Method: servicemanager.LookupYAML,
+				},
+			},
+			CompletionTopic: servicemanager.ServiceMapping{
+				Name: "completion-topic",
+				Lookup: servicemanager.Lookup{
+					Method: servicemanager.LookupYAML,
+				},
 			},
 		},
 		Dataflows: map[string]servicemanager.ResourceGroup{
-			commandFlowName: {
-				Resources: servicemanager.CloudResourcesSpec{
-					Topics: []servicemanager.TopicConfig{
-						{
-							CloudResource: servicemanager.CloudResource{
-								Name: sdCommandTopicName,
-							},
-							ProducerService: &servicemanager.ServiceMapping{
-								Name: sdName,
-								Lookup: servicemanager.Lookup{
-									Key:    "command-topic-id",
-									Method: servicemanager.LookupYAML,
-								},
-							},
-						},
-						{
-							CloudResource: servicemanager.CloudResource{
-								Name: sdCompletionTopicName,
-							},
-							ProducerService: &servicemanager.ServiceMapping{
-								Name: sdName,
-								Lookup: servicemanager.Lookup{
-									Key:    "completion-topic-id",
-									Method: servicemanager.LookupYAML,
-								},
-							},
-						},
-					},
-					Subscriptions: []servicemanager.SubscriptionConfig{
-						{
-							CloudResource: servicemanager.CloudResource{
-								Name: sdCommandSubName,
-							},
-							Topic: sdCommandTopicName,
-							ConsumerService: &servicemanager.ServiceMapping{
-								Name: sdName,
-								Lookup: servicemanager.Lookup{
-									Key:    "command-subscription-id",
-									Method: servicemanager.LookupYAML,
-								},
-							},
-						},
-					},
-				},
-			},
 			dataflowName: {
 				Services: map[string]servicemanager.ServiceSpec{
 					subName: {

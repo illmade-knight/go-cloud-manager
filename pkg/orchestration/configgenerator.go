@@ -132,7 +132,7 @@ func getAllServices(arch *servicemanager.MicroserviceArchitecture) map[string]se
 
 	// Add the ServiceDirector itself
 	if arch.ServiceManagerSpec.Name != "" {
-		allServices[arch.ServiceManagerSpec.Name] = arch.ServiceManagerSpec
+		allServices[arch.ServiceManagerSpec.Name] = arch.ServiceManagerSpec.ServiceSpec
 	}
 
 	// Add all services from all dataflows

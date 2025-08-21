@@ -9,35 +9,35 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// HydrateArchitecture prepares an architecture for a production-like deployment. It fills
-// in default values and injects environment variables based on the static resource
-// links in the YAML, without applying any test-specific transformations.
+// HydrateArchitecture prepares an architecture for a production-like deployment. It generates
+// necessary infrastructure from high-level specs, fills in defaults, and injects
+// environment variables based on the resource links in the YAML.
 func HydrateArchitecture(arch *MicroserviceArchitecture, defaultImageRepo string, logger zerolog.Logger) error {
 	if arch == nil {
 		return errors.New("cannot hydrate a nil architecture")
 	}
-	err := arch.Validate()
-	if err != nil {
+	if err := arch.Validate(); err != nil {
 		return fmt.Errorf("architecture validation failed: %w", err)
 	}
 
 	log := logger.With().Str("component", "Hydration").Logger()
 	log.Info().Msg("Starting production architecture hydration...")
 
-	// Step 1: Hydrate deployment specs with defaults and generate final image paths.
+	// Step 1: Generate the ServiceDirector's own required resources from its spec.
+	generateAndInjectServiceDirectorResources(arch)
+	// Step 2: Apply default values for optional fields.
 	applyDefaults(arch)
+	// Step 3: Hydrate deployment specs with defaults and generate final image paths.
 	hydrateAllDeploymentSpecs(arch, defaultImageRepo)
-
-	// Step 2: Inject environment variables using the final, static names.
+	// Step 4: Inject environment variables where the lookup method is 'env'.
 	injectAllEnvironmentVariables(arch)
 
 	log.Info().Msg("Production architecture hydration complete.")
 	return nil
 }
 
-// HydrateTestArchitecture prepares an architecture for an isolated test run. It first
-// transforms all names, keys, and cross-references using the provided runID, then
-// hydrates the deployment specs and injects environment variables based on the new names.
+// HydrateTestArchitecture prepares an architecture for an isolated test run. It generates
+// resources, applies a unique runID to all names and links, then hydrates the deployment specs.
 func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, runID string, logger zerolog.Logger) (map[string]string, error) {
 	if runID == "" {
 		return nil, errors.New("HydrateTestArchitecture requires a non-empty runID")
@@ -45,8 +45,7 @@ func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, r
 	if arch == nil {
 		return nil, errors.New("cannot hydrate a nil architecture")
 	}
-	err := arch.Validate()
-	if err != nil {
+	if err := arch.Validate(); err != nil {
 		return nil, fmt.Errorf("architecture validation failed: %w", err)
 	}
 
@@ -55,14 +54,15 @@ func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, r
 
 	nameMap := make(map[string]string)
 
-	// Step 1: Apply the runID transformation to all names, keys, and links.
+	// Step 1: Generate resources before applying test-specific transformations.
+	generateAndInjectServiceDirectorResources(arch)
+	// Step 2: Apply default values for optional fields.
 	applyDefaults(arch)
+	// Step 3: Apply the runID transformation to all names, keys, and links.
 	applyRunIDTransformation(arch, runID, nameMap)
-
-	// Step 2: Hydrate deployment specs with defaults, now using the transformed names.
+	// Step 4: Hydrate deployment specs with defaults, now using the transformed names.
 	hydrateAllDeploymentSpecs(arch, defaultImageRepo)
-
-	// Step 3: Inject environment variables using the final, transformed names.
+	// Step 5: Inject environment variables using the final, transformed names.
 	injectAllEnvironmentVariables(arch)
 
 	log.Info().Msg("Test architecture hydration complete.")
@@ -70,6 +70,70 @@ func HydrateTestArchitecture(arch *MicroserviceArchitecture, defaultImageRepo, r
 }
 
 // --- Private Helpers ---
+
+// generateAndInjectServiceDirectorResources is the core of the "smart hydration" logic.
+// It reads the high-level ServiceManagerSpec and generates the low-level Topic and
+// Subscription resources required for it to function, ensuring they only need to be defined once.
+func generateAndInjectServiceDirectorResources(arch *MicroserviceArchitecture) {
+	spec := arch.ServiceManagerSpec
+	if spec.CommandTopic.Name == "" || spec.CompletionTopic.Name == "" {
+		return // Nothing to generate if the spec doesn't define topics.
+	}
+
+	// Define the names for the resources we will generate based on the spec's references.
+	cmdTopicName := spec.CommandTopic.Name
+	compTopicName := spec.CompletionTopic.Name
+	cmdSubName := fmt.Sprintf("%s-sub", cmdTopicName) // Convention-based subscription name.
+
+	// Create the TopicConfig for the command topic.
+	// REFACTOR: Correctly removed the ProducerService link. The Conductor/RemoteDirectorClient is the producer,
+	// but it's an external entity, not a service defined in the architecture that needs hydration.
+	cmdTopic := TopicConfig{
+		CloudResource: CloudResource{Name: cmdTopicName},
+	}
+
+	// Create the TopicConfig for the completion topic.
+	// The ServiceDirector is the producer of events on this topic.
+	compTopic := TopicConfig{
+		CloudResource: CloudResource{Name: compTopicName},
+		ProducerService: &ServiceMapping{
+			Name:   spec.Name,
+			Lookup: spec.CompletionTopic.Lookup,
+		},
+	}
+
+	// Create the SubscriptionConfig for the ServiceDirector to listen for commands.
+	// REFACTOR: This correctly identifies the ServiceDirector as the ConsumerService.
+	cmdSub := SubscriptionConfig{
+		CloudResource: CloudResource{Name: cmdSubName},
+		Topic:         cmdTopicName,
+		ConsumerService: &ServiceMapping{
+			Name: spec.Name,
+			// The lookup for the subscription is distinct and uses a conventional key.
+			Lookup: Lookup{
+				Key:    "SD_COMMAND_SUBSCRIPTION",
+				Method: spec.CommandTopic.Lookup.Method, // Inherits method from the topic.
+			},
+		},
+	}
+
+	// Create a new, dedicated ResourceGroup for this infrastructure.
+	directorResourceFlow := ResourceGroup{
+		Name:        fmt.Sprintf("%s-infra", spec.Name),
+		Description: fmt.Sprintf("Auto-generated infrastructure resources for the ServiceDirector (%s).", spec.Name),
+		Resources: CloudResourcesSpec{
+			Topics:        []TopicConfig{cmdTopic, compTopic},
+			Subscriptions: []SubscriptionConfig{cmdSub},
+		},
+		// This infrastructure is critical and should be permanent.
+		Lifecycle: &LifecyclePolicy{Strategy: LifecycleStrategyPermanent},
+	}
+
+	if arch.Dataflows == nil {
+		arch.Dataflows = make(map[string]ResourceGroup)
+	}
+	arch.Dataflows[directorResourceFlow.Name] = directorResourceFlow
+}
 
 // applyRunIDTransformation modifies all names, keys, and cross-references in the architecture.
 func applyRunIDTransformation(arch *MicroserviceArchitecture, runID string, nameMap map[string]string) {
@@ -79,13 +143,11 @@ func applyRunIDTransformation(arch *MicroserviceArchitecture, runID string, name
 		arch.ServiceManagerSpec.Name = hydratedName
 		arch.ServiceManagerSpec.ServiceAccount = fmt.Sprintf("%s-%s", arch.ServiceManagerSpec.ServiceAccount, runID)
 		nameMap[originalName] = hydratedName
-
-		for key, val := range arch.ServiceManagerSpec.Deployment.EnvironmentVars {
-			hydratedVal := fmt.Sprintf("%s-%s", val, runID)
-			arch.ServiceManagerSpec.Deployment.EnvironmentVars[key] = hydratedVal
-			nameMap[val] = hydratedVal
-		}
 	}
+
+	// The ServiceMapping names within the spec must also be hydrated for test runs.
+	arch.ServiceManagerSpec.CommandTopic.Name = fmt.Sprintf("%s-%s", arch.ServiceManagerSpec.CommandTopic.Name, runID)
+	arch.ServiceManagerSpec.CompletionTopic.Name = fmt.Sprintf("%s-%s", arch.ServiceManagerSpec.CompletionTopic.Name, runID)
 
 	for dataflowName, dataflow := range arch.Dataflows {
 		for k, service := range dataflow.Services {
@@ -99,7 +161,6 @@ func applyRunIDTransformation(arch *MicroserviceArchitecture, runID string, name
 		hydrateResourceNamesWithRunID(&dataflow.Resources, runID, nameMap)
 
 		for i, job := range dataflow.Resources.CloudSchedulerJobs {
-			// The ServiceAccount field is now guaranteed to be populated by applyDefaults.
 			dataflow.Resources.CloudSchedulerJobs[i].ServiceAccount = fmt.Sprintf("%s-%s", job.ServiceAccount, runID)
 		}
 
@@ -134,7 +195,6 @@ func applyDefaults(arch *MicroserviceArchitecture) {
 	for _, dataflow := range arch.Dataflows {
 		for i, job := range dataflow.Resources.CloudSchedulerJobs {
 			if job.ServiceAccount == "" {
-				// If no SA is specified, create a default name based on the job name.
 				defaultSA := fmt.Sprintf("%s-sa", job.Name)
 				dataflow.Resources.CloudSchedulerJobs[i].ServiceAccount = defaultSA
 			}
@@ -144,77 +204,99 @@ func applyDefaults(arch *MicroserviceArchitecture) {
 
 // injectAllEnvironmentVariables handles the injection of all resource links as env vars.
 func injectAllEnvironmentVariables(arch *MicroserviceArchitecture) {
+	// After generation, the ServiceDirector's topics are now standard resources,
+	// so this single loop handles them correctly along with all other resources.
 	for _, dataflow := range arch.Dataflows {
 		for _, topic := range dataflow.Resources.Topics {
 			if topic.ProducerService != nil && topic.ProducerService.Lookup.Method == LookupEnv {
-				if service, ok := dataflow.Services[topic.ProducerService.Name]; ok {
-					injectEnvVar(service.Deployment, topic.ProducerService.Lookup, topic.Name, "TOPIC_ID")
+				// The producer can be the ServiceDirector itself or a regular service.
+				var targetService *ServiceSpec
+				if topic.ProducerService.Name == arch.ServiceManagerSpec.Name {
+					targetService = &arch.ServiceManagerSpec.ServiceSpec
+				} else if service, ok := dataflow.Services[topic.ProducerService.Name]; ok {
+					targetService = &service
+				}
+
+				if targetService != nil && targetService.Deployment != nil {
+					injectEnvVar(targetService.Deployment, topic.ProducerService.Lookup, topic.Name, "TOPIC_ID")
 				}
 			}
 		}
 		for _, sub := range dataflow.Resources.Subscriptions {
 			if sub.ConsumerService != nil && sub.ConsumerService.Lookup.Method == LookupEnv {
-				if service, ok := dataflow.Services[sub.ConsumerService.Name]; ok {
-					injectEnvVar(service.Deployment, sub.ConsumerService.Lookup, sub.Name, "SUB_ID")
+				var targetService *ServiceSpec
+				if sub.ConsumerService.Name == arch.ServiceManagerSpec.Name {
+					targetService = &arch.ServiceManagerSpec.ServiceSpec
+				} else if service, ok := dataflow.Services[sub.ConsumerService.Name]; ok {
+					targetService = &service
+				}
+
+				if targetService != nil && targetService.Deployment != nil {
+					injectEnvVar(targetService.Deployment, sub.ConsumerService.Lookup, sub.Name, "SUB_ID")
 				}
 			}
 		}
 		for _, table := range dataflow.Resources.BigQueryTables {
 			for _, producer := range table.Producers {
-				if producer.Lookup.Method != LookupEnv {
-					continue
-				}
-				if service, ok := dataflow.Services[producer.Name]; ok {
-					injectEnvVar(service.Deployment, producer.Lookup, table.Name, "WRITE_TABLE")
+				if producer.Lookup.Method == LookupEnv {
+					if service, ok := dataflow.Services[producer.Name]; ok {
+						injectEnvVar(service.Deployment, producer.Lookup, table.Name, "WRITE_TABLE")
+					}
 				}
 			}
 			for _, consumer := range table.Consumers {
-				if consumer.Lookup.Method != LookupEnv {
-					continue
-				}
-				if service, ok := dataflow.Services[consumer.Name]; ok {
-					injectEnvVar(service.Deployment, consumer.Lookup, table.Name, "READ_TABLE")
+				if consumer.Lookup.Method == LookupEnv {
+					if service, ok := dataflow.Services[consumer.Name]; ok {
+						injectEnvVar(service.Deployment, consumer.Lookup, table.Name, "READ_TABLE")
+					}
 				}
 			}
 		}
 		for _, bucket := range dataflow.Resources.GCSBuckets {
 			for _, producer := range bucket.Producers {
-				if producer.Lookup.Method != LookupEnv {
-					continue
-				}
-				if service, ok := dataflow.Services[producer.Name]; ok {
-					injectEnvVar(service.Deployment, producer.Lookup, bucket.Name, "WRITE_BUCKET")
+				if producer.Lookup.Method == LookupEnv {
+					if service, ok := dataflow.Services[producer.Name]; ok {
+						injectEnvVar(service.Deployment, producer.Lookup, bucket.Name, "WRITE_BUCKET")
+					}
 				}
 			}
 			for _, consumer := range bucket.Consumers {
-				if consumer.Lookup.Method != LookupEnv {
-					continue
-				}
-				if service, ok := dataflow.Services[consumer.Name]; ok {
-					injectEnvVar(service.Deployment, consumer.Lookup, bucket.Name, "READ_BUCKET")
+				if consumer.Lookup.Method == LookupEnv {
+					if service, ok := dataflow.Services[consumer.Name]; ok {
+						injectEnvVar(service.Deployment, consumer.Lookup, bucket.Name, "READ_BUCKET")
+					}
 				}
 			}
 		}
-		// NEW_CODE: Add hydration for Firestore collections.
 		for _, collection := range dataflow.Resources.FirestoreCollections {
 			for _, producer := range collection.Producers {
-				if producer.Lookup.Method != LookupEnv {
-					continue
-				}
-				if service, ok := dataflow.Services[producer.Name]; ok {
-					injectEnvVar(service.Deployment, producer.Lookup, collection.Name, "WRITE_COLLECTION")
+				if producer.Lookup.Method == LookupEnv {
+					if service, ok := dataflow.Services[producer.Name]; ok {
+						injectEnvVar(service.Deployment, producer.Lookup, collection.Name, "WRITE_COLLECTION")
+					}
 				}
 			}
 			for _, consumer := range collection.Consumers {
-				if consumer.Lookup.Method != LookupEnv {
-					continue
-				}
-				if service, ok := dataflow.Services[consumer.Name]; ok {
-					injectEnvVar(service.Deployment, consumer.Lookup, collection.Name, "READ_COLLECTION")
+				if consumer.Lookup.Method == LookupEnv {
+					if service, ok := dataflow.Services[consumer.Name]; ok {
+						injectEnvVar(service.Deployment, consumer.Lookup, collection.Name, "READ_COLLECTION")
+					}
 				}
 			}
 		}
 	}
+}
+
+// findTopicResourceName is a helper to find the final (hydrated) name of a topic resource.
+func findTopicResourceName(arch *MicroserviceArchitecture, hydratedLogicalName string) string {
+	for _, df := range arch.Dataflows {
+		for _, topic := range df.Resources.Topics {
+			if topic.Name == hydratedLogicalName {
+				return topic.Name
+			}
+		}
+	}
+	return hydratedLogicalName
 }
 
 func updateAllCrossReferences(dataflow *ResourceGroup, runID string) {
@@ -227,7 +309,7 @@ func updateAllCrossReferences(dataflow *ResourceGroup, runID string) {
 	resources := &dataflow.Resources
 	for i, job := range resources.CloudSchedulerJobs {
 		if job.TargetService != "" {
-			dataflow.Resources.CloudSchedulerJobs[i].TargetService = fmt.Sprintf("%s-%s", job.TargetService, runID)
+			resources.CloudSchedulerJobs[i].TargetService = fmt.Sprintf("%s-%s", job.TargetService, runID)
 		}
 	}
 
@@ -243,6 +325,7 @@ func updateAllCrossReferences(dataflow *ResourceGroup, runID string) {
 		if resources.Subscriptions[i].ConsumerService != nil {
 			resources.Subscriptions[i].ConsumerService.Name = fmt.Sprintf("%s-%s", resources.Subscriptions[i].ConsumerService.Name, runID)
 		}
+		resources.Subscriptions[i].Topic = fmt.Sprintf("%s-%s", resources.Subscriptions[i].Topic, runID)
 		for j := range resources.Subscriptions[i].IAMPolicy {
 			resources.Subscriptions[i].IAMPolicy[j].Name = fmt.Sprintf("%s-%s", resources.Subscriptions[i].IAMPolicy[j].Name, runID)
 		}
@@ -343,9 +426,6 @@ func hydrateDeploymentSpec(spec *DeploymentSpec, serviceName, dataflowName, proj
 	spec.Image = generateImagePath(spec, serviceName, projectID)
 }
 
-// REFACTOR: This function now accepts the Lookup struct. For now, it only uses the
-// 'Key' field to support the environment variable injection pattern. It can be
-// extended in the future to handle the 'Method' field.
 func injectEnvVar(spec *DeploymentSpec, lookup Lookup, resourceName, keySuffix string) {
 	if spec.EnvironmentVars == nil {
 		spec.EnvironmentVars = make(map[string]string)

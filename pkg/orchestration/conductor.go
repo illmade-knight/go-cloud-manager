@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/illmade-knight/go-cloud-manager/pkg/deployment"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/prerequisites"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -26,19 +27,15 @@ type PlanEntry struct {
 // PrepareServiceDirectorSource marshals the arch to YAML and copies the resulting services.yaml file
 // into the ServiceDirector's source code directory so it can be included in the build.
 func PrepareServiceDirectorSource(arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) error {
-	// Step 1: Marshal the fully-hydrated architecture into a YAML file.
 	yamlBytes, err := yaml.Marshal(arch)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hydrated architecture to YAML: %w", err)
 	}
-
-	// Step 2: Write the YAML file to the ServiceDirector's source directory.
 	if arch.ServiceManagerSpec.Deployment == nil || arch.ServiceManagerSpec.Deployment.BuildableModulePath == "" {
 		return errors.New("ServiceManagerSpec.Deployment.BuildableModulePath is not defined")
 	}
 	directorSourcePath := arch.ServiceManagerSpec.Deployment.BuildableModulePath
 	destinationPath := filepath.Join(directorSourcePath, "services.yaml")
-
 	logger.Info().Str("destination", destinationPath).Msg("Copying hydrated services.yaml to ServiceDirector source...")
 	err = os.WriteFile(destinationPath, yamlBytes, 0644)
 	if err != nil {
@@ -66,63 +63,67 @@ type Conductor struct {
 	logger               zerolog.Logger
 	prerequisitesManager *prerequisites.Manager
 	iamOrch              *IAMOrchestrator
-	orch                 *Orchestrator
+	deploymentManager    *DeploymentManager
+	remoteDirectorClient *RemoteDirectorClient
 	options              ConductorOptions
 	serviceAccountEmails map[string]string
 	directorURL          string
-	// REFACTOR: This map will store the URLs of deployed services.
-	deployedServiceURLs map[string]string
-	builtImageURIs      map[string]string
-	imageBuildMutex     sync.Mutex
+	deployedServiceURLs  map[string]string
+	builtImageURIs       map[string]string
 }
 
 // NewConductor creates and initializes a new Conductor with specific options.
 func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger, opts ConductorOptions) (*Conductor, error) {
-	prerequisitesClient, err := prerequisites.NewGoogleServiceAPIClient(ctx, logger)
+	prereqClient, err := prerequisites.NewGoogleServiceAPIClient(ctx, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create prerequisite client: %w", err)
+		return nil, err
 	}
-	prerequisitesManager := prerequisites.NewManager(prerequisitesClient, logger)
-
 	iamOrch, err := NewIAMOrchestrator(ctx, arch, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM orchestrator: %w", err)
+		return nil, err
 	}
 
-	orch, err := NewOrchestrator(ctx, arch, logger)
+	projectID := arch.ProjectID
+	region := arch.Region
+	sourceBucket := fmt.Sprintf("%s_cloudbuild", projectID)
+	deployer, err := deployment.NewCloudBuildDeployer(ctx, projectID, region, sourceBucket, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create main orchestrator: %w", err)
+		return nil, err
 	}
+	deploymentManager := NewDeploymentManager(arch, deployer, logger)
+	remoteClient, err := NewRemoteDirectorClient(ctx, arch, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Conductor{
 		arch:                 arch,
-		prerequisitesManager: prerequisitesManager,
 		logger:               logger.With().Str("component", "Conductor").Logger(),
+		prerequisitesManager: prerequisites.NewManager(prereqClient, logger),
 		iamOrch:              iamOrch,
-		orch:                 orch,
+		deploymentManager:    deploymentManager,
+		remoteDirectorClient: remoteClient,
 		options:              opts,
 		serviceAccountEmails: make(map[string]string),
-		// REFACTOR: Initialize the new map.
-		deployedServiceURLs: make(map[string]string),
-		builtImageURIs:      make(map[string]string),
+		deployedServiceURLs:  make(map[string]string),
+		builtImageURIs:       make(map[string]string),
 	}, nil
 }
 
+// Preflight runs permission checks for the identity executing the Conductor.
 func (c *Conductor) Preflight(ctx context.Context) error {
-	// --- NEW PRE-FLIGHT CHECK ---
 	if err := c.iamOrch.PreflightChecks(ctx); err != nil {
 		return fmt.Errorf("preflight permission check failed: %w", err)
 	}
 	return nil
 }
 
-// GenerateIAMPlan creates the full IAM plan and writes it to iam_plan.yaml.
+// GenerateIAMPlan creates the full IAM plan and writes it to a YAML file.
 func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 	c.logger.Info().Msg("Generating full IAM plan...")
-
 	planner := iam.NewRolePlanner(c.logger)
 	var fullPlan []PlanEntry
 
-	// 1. Get and annotate the plan for the ServiceDirector.
 	directorBindings, err := planner.PlanRolesForServiceDirector(c.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan ServiceDirector roles: %w", err)
@@ -135,7 +136,6 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 		})
 	}
 
-	// 2. Get and annotate the plan for the application services.
 	appBindings, err := planner.PlanRolesForApplicationServices(c.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan application service roles: %w", err)
@@ -148,51 +148,41 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 		})
 	}
 
-	// 3. Marshal the enhanced plan to YAML.
 	yamlBytes, err := yaml.Marshal(fullPlan)
 	if err != nil {
 		return fmt.Errorf("failed to marshal IAM plan to YAML: %w", err)
 	}
-
-	// 4. Write the plan to a file.
-	fileName := iamPlanYAML
-	err = os.WriteFile(fileName, yamlBytes, 0644)
+	err = os.WriteFile(iamPlanYAML, yamlBytes, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write IAM plan to file: %w", err)
 	}
 
-	c.logger.Info().Str("file", fileName).Int("bindings", len(fullPlan)).Msg("✅ Successfully generated IAM plan.")
+	c.logger.Info().Str("file", iamPlanYAML).Int("bindings", len(fullPlan)).Msg("✅ Successfully generated IAM plan.")
 	return nil
 }
 
-// Run executes the full, multiphase orchestration workflow in the correct sequence.
+// Run executes the full, multi-phase orchestration workflow in the correct sequence.
 func (c *Conductor) Run(ctx context.Context) error {
 	c.logger.Info().Msg("Starting full architecture orchestration...")
 
 	if err := c.checkPrerequisites(ctx); err != nil {
 		return err
 	}
-	// Phase 1: Create all service accounts and project-level IAM, then verify propagation immediately.
 	if err := c.setupIAMPhase(ctx); err != nil {
 		return err
 	}
-	// Phase 2: Run builds in parallel with only the ServiceDirector deployment. This is a blocking phase.
 	if err := c.buildAndDeployPhase(ctx); err != nil {
 		return err
 	}
-	if _, err := c.triggerRemoteFoundationalSetup(ctx); err != nil {
+	if err := c.triggerRemoteFoundationalSetup(ctx); err != nil {
 		return err
 	}
-	// REFACTOR: This phase is now more specific.
-	// Phase 4: Now that remote setup is complete, verify resource-level IAM policy propagation.
 	if err := c.verifyResourceLevelIAMPhase(ctx); err != nil {
 		return err
 	}
-	// Phase 5: Now that everything is verified, deploy the final application services.
 	if err := c.deploymentPhase(ctx); err != nil {
 		return err
 	}
-	// REFACTOR: Added the final phase for dependent resources.
 	if err := c.triggerRemoteDependentSetup(ctx); err != nil {
 		return err
 	}
@@ -213,8 +203,6 @@ func (c *Conductor) checkPrerequisites(ctx context.Context) error {
 	return nil
 }
 
-// REFACTOR: This phase has been updated to include immediate verification of all project-level IAM.
-// This makes the process more robust by failing faster and fixing a race condition with the ServiceDirector.
 func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	if !c.options.SetupIAM {
 		return nil
@@ -224,7 +212,6 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Immediately verify ServiceDirector IAM to prevent race conditions on deployment.
 	err = c.iamOrch.VerifyServiceDirectorIAM(ctx, sdSaEmails, c.options.PolicyPollTimeout)
 	if err != nil {
 		return fmt.Errorf("failed during ServiceDirector IAM verification: %w", err)
@@ -263,7 +250,6 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed during project-level IAM application for dataflow '%s': %w", dataflowName, err)
 		}
-		// Immediately verify the project-level IAM for this dataflow.
 		err = c.iamOrch.VerifyProjectLevelIAMForDataflow(ctx, dataflowName, saEmails, c.options.PolicyPollTimeout)
 		if err != nil {
 			return fmt.Errorf("failed during project-level IAM verification for dataflow '%s': %w", dataflowName, err)
@@ -274,103 +260,76 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	return nil
 }
 
+// buildAndDeployPhase now uses the DeploymentManager.
 func (c *Conductor) buildAndDeployPhase(ctx context.Context) error {
 	if !c.options.BuildAndDeployServices {
 		return nil
 	}
-	c.logger.Info().Msg("Executing Phase 2: Building services and deploying director in parallel...")
-	var wg sync.WaitGroup
-	errChan := make(chan error, 2)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := c.buildDataflowServices(ctx); err != nil {
-			errChan <- err
-		}
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := c.deployServiceDirector(ctx); err != nil {
-			errChan <- err
-		}
-	}()
-	wg.Wait()
-	close(errChan)
-	var phaseErrors []error
-	for err := range errChan {
-		phaseErrors = append(phaseErrors, err)
+	c.logger.Info().Msg("Executing Phase 2: Building all services and deploying director...")
+
+	builtImages, err := c.deploymentManager.BuildAllServices(ctx)
+	if err != nil {
+		return err
 	}
-	if len(phaseErrors) > 0 {
-		return fmt.Errorf("encountered errors during build and director deployment phase: %v", phaseErrors)
+	c.builtImageURIs = builtImages
+
+	c.logger.Info().Msg("Deploying ServiceDirector...")
+	if c.options.DirectorURLOverride != "" {
+		c.directorURL = c.options.DirectorURLOverride
+		c.logger.Info().Str("url", c.directorURL).Msg("Using Director URL override.")
+	} else {
+		serviceName := c.arch.ServiceManagerSpec.Name
+		saEmail, ok := c.serviceAccountEmails[serviceName]
+		if !ok {
+			return fmt.Errorf("SA email not found for ServiceDirector '%s'", serviceName)
+		}
+		deploymentSpec := c.arch.ServiceManagerSpec.Deployment
+		if deploymentSpec == nil {
+			return errors.New("ServiceManagerSpec.Deployment is not defined")
+		}
+		url, deployErr := c.deploymentManager.deployer.BuildAndDeploy(ctx, serviceName, saEmail, *deploymentSpec)
+		if deployErr != nil {
+			return fmt.Errorf("failed during ServiceDirector deployment: %w", deployErr)
+		}
+		c.directorURL = url
 	}
+
 	c.logger.Info().Msg("Phase 2: Build and director deployment completed successfully.")
 	return nil
 }
 
-func (c *Conductor) buildDataflowServices(ctx context.Context) error {
-	c.logger.Info().Msg("Starting build of all dataflow services...")
-	for dataflowName := range c.arch.Dataflows {
-		builtImages, err := c.orch.BuildDataflowServices(ctx, dataflowName)
-		if err != nil {
-			return fmt.Errorf("failed to build services for dataflow '%s': %w", dataflowName, err)
-		}
-		c.imageBuildMutex.Lock()
-		for service, image := range builtImages {
-			c.builtImageURIs[service] = image
-		}
-		c.imageBuildMutex.Unlock()
-	}
-	c.logger.Info().Msg("Build of all dataflow services is complete.")
-	return nil
-}
-
-func (c *Conductor) deployServiceDirector(ctx context.Context) error {
-	c.logger.Info().Msg("Deploying ServiceDirector...")
-	if c.options.DirectorURLOverride != "" {
-		c.directorURL = c.options.DirectorURLOverride
+// triggerRemoteFoundationalSetup now uses the RemoteDirectorClient and runs dataflows in parallel.
+func (c *Conductor) triggerRemoteFoundationalSetup(ctx context.Context) error {
+	if !c.options.TriggerRemoteSetup {
 		return nil
 	}
-	if _, ok := c.serviceAccountEmails[c.arch.ServiceManagerSpec.Name]; !ok {
-		return errors.New("cannot deploy service director: SA email not found")
-	}
+	c.logger.Info().Msg("Executing Phase 3: Triggering remote foundational resource setup for all dataflows in parallel...")
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(c.arch.Dataflows))
 
-	url, err := c.orch.DeployServiceDirector(ctx, c.serviceAccountEmails)
-	if err != nil {
-		return fmt.Errorf("failed during ServiceDirector deployment: %w", err)
-	}
-	c.directorURL = url
-	c.logger.Info().Str("url", url).Str("topic", c.orch.completionTopic.ID()).
-		Str("sub", c.orch.completionSubscription.ID()).Msg("Waiting for ServiceDirector to become ready...")
-	err = c.orch.AwaitServiceReady(ctx, ServiceDirector)
-	if err != nil {
-		return fmt.Errorf("failed while waiting for ServiceDirector to become ready: %w", err)
-	}
-	c.logger.Info().Msg("ServiceDirector is deployed and ready.")
-	return nil
-}
-
-// ... (checkPrerequisites, setupIAMPhase, buildAndDeployPhase methods remain the same) ...
-
-func (c *Conductor) triggerRemoteFoundationalSetup(ctx context.Context) (map[string]CompletionEvent, error) {
-	if !c.options.TriggerRemoteSetup {
-		return nil, nil
-	}
-	c.logger.Info().Msg("Executing Phase 3: Triggering remote foundational resource and IAM setup...")
-	completionEvents := make(map[string]CompletionEvent)
 	for dataflowName := range c.arch.Dataflows {
-		err := c.orch.TriggerDataflowResourceCreation(ctx, dataflowName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to trigger setup for dataflow '%s': %w", dataflowName, err)
-		}
-		event, err := c.orch.AwaitDataflowReady(ctx, dataflowName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to receive completion for dataflow '%s': %w", dataflowName, err)
-		}
-		completionEvents[dataflowName] = event
+		wg.Add(1)
+		go func(dfName string) {
+			defer wg.Done()
+			_, err := c.remoteDirectorClient.TriggerFoundationalSetup(ctx, dfName)
+			if err != nil {
+				errChan <- fmt.Errorf("failed during foundational setup for dataflow '%s': %w", dfName, err)
+			}
+		}(dataflowName)
 	}
-	c.logger.Info().Msg("Phase 3: Remote foundational resource and IAM setup is complete.")
-	return completionEvents, nil
+
+	wg.Wait()
+	close(errChan)
+	var allErrors []error
+	for err := range errChan {
+		allErrors = append(allErrors, err)
+	}
+	if len(allErrors) > 0 {
+		return errors.Join(allErrors...)
+	}
+
+	c.logger.Info().Msg("Phase 3: Remote foundational resource setup is complete.")
+	return nil
 }
 
 func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context) error {
@@ -388,92 +347,129 @@ func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context) error {
 	return nil
 }
 
+// deploymentPhase now uses the DeploymentManager and runs dataflow deployments in parallel.
 func (c *Conductor) deploymentPhase(ctx context.Context) error {
 	if !c.options.BuildAndDeployServices {
 		return nil
 	}
-	c.logger.Info().Msg("Executing Phase 5: Deploying final application services...")
+	c.logger.Info().Msg("Executing Phase 5: Deploying final application services for all dataflows in parallel...")
 	if c.directorURL == "" {
 		return errors.New("cannot deploy dataflow services: director URL is not available")
 	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(c.arch.Dataflows))
+	var mu sync.Mutex // To safely write to the shared deployedServiceURLs map
+
 	for dataflowName := range c.arch.Dataflows {
-		// REFACTOR: Capture the deployed service URLs.
-		deployedURLs, err := c.orch.DeployDataflowServices(ctx, dataflowName, c.serviceAccountEmails, c.builtImageURIs, c.directorURL)
-		if err != nil {
-			return fmt.Errorf("failed to deploy application services for dataflow '%s': %w", dataflowName, err)
-		}
-		// REFACTOR: Store the URLs for the next phase.
-		for service, url := range deployedURLs {
-			c.deployedServiceURLs[service] = url
-		}
+		wg.Add(1)
+		go func(dfName string) {
+			defer wg.Done()
+			deployedURLs, err := c.deploymentManager.DeployApplicationServices(ctx, dfName, c.serviceAccountEmails, c.builtImageURIs, c.directorURL)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			mu.Lock()
+			for service, url := range deployedURLs {
+				c.deployedServiceURLs[service] = url
+			}
+			mu.Unlock()
+		}(dataflowName)
 	}
+
+	wg.Wait()
+	close(errChan)
+	var allErrors []error
+	for err := range errChan {
+		allErrors = append(allErrors, err)
+	}
+	if len(allErrors) > 0 {
+		return errors.Join(allErrors...)
+	}
+
 	c.logger.Info().Msg("Phase 5: Final deployment of all dataflow services is complete.")
 	return nil
 }
 
-// REFACTOR: This new phase triggers the setup of dependent resources using the lightweight payload.
+// triggerRemoteDependentSetup now uses the RemoteDirectorClient and runs in parallel.
 func (c *Conductor) triggerRemoteDependentSetup(ctx context.Context) error {
 	if !c.options.TriggerRemoteSetup {
 		return nil
 	}
 	c.logger.Info().Msg("Executing Phase 6: Triggering remote dependent resource setup...")
 
-	hasDependentResources := false
-	for _, dataflow := range c.arch.Dataflows {
-		if len(dataflow.Resources.CloudSchedulerJobs) > 0 {
-			hasDependentResources = true
-			break
-		}
-	}
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(c.arch.Dataflows))
 
-	if !hasDependentResources {
-		c.logger.Info().Msg("No dependent resources (e.g., Cloud Scheduler jobs) found. Skipping Phase 6.")
-		return nil
-	}
-
-	// The service URLs map is the lightweight payload we send.
-	// We only need to send the URLs relevant to each dataflow.
 	for dataflowName, dataflow := range c.arch.Dataflows {
 		if len(dataflow.Resources.CloudSchedulerJobs) == 0 {
 			continue
 		}
 
-		// Create a map of service URLs specific to this dataflow's needs.
-		dataflowServiceURLs := make(map[string]string)
-		for _, job := range dataflow.Resources.CloudSchedulerJobs {
-			if url, ok := c.deployedServiceURLs[job.TargetService]; ok {
-				dataflowServiceURLs[job.TargetService] = url
-			} else {
-				return fmt.Errorf("consistency error: URL for target service '%s' not found for job '%s'", job.TargetService, job.Name)
+		wg.Add(1)
+		go func(dfName string, df servicemanager.ResourceGroup) {
+			defer wg.Done()
+			dataflowServiceURLs := make(map[string]string)
+			for _, job := range df.Resources.CloudSchedulerJobs {
+				if url, ok := c.deployedServiceURLs[job.TargetService]; ok {
+					dataflowServiceURLs[job.TargetService] = url
+				} else {
+					errChan <- fmt.Errorf("consistency error: URL for target service '%s' not found for job '%s'", job.TargetService, job.Name)
+					return
+				}
 			}
-		}
 
-		c.logger.Info().Str("dataflow", dataflowName).Msg("Triggering dependent resource setup.")
-		err := c.orch.TriggerDependentResourceCreation(ctx, dataflowName, dataflowServiceURLs)
-		if err != nil {
-			return fmt.Errorf("failed to trigger dependent setup for dataflow '%s': %w", dataflowName, err)
-		}
-		_, err = c.orch.AwaitDataflowReady(ctx, dataflowName+"-dependent")
-		if err != nil {
-			return fmt.Errorf("failed to receive dependent completion for dataflow '%s': %w", dataflowName, err)
-		}
+			_, err := c.remoteDirectorClient.TriggerDependentSetup(ctx, dfName, dataflowServiceURLs)
+			if err != nil {
+				errChan <- fmt.Errorf("failed during dependent setup for dataflow '%s': %w", dfName, err)
+			}
+		}(dataflowName, dataflow)
+	}
+
+	wg.Wait()
+	close(errChan)
+	var allErrors []error
+	for err := range errChan {
+		allErrors = append(allErrors, err)
+	}
+	if len(allErrors) > 0 {
+		return errors.Join(allErrors...)
 	}
 
 	c.logger.Info().Msg("Phase 6: Dependent resource setup is complete.")
 	return nil
 }
 
+// Teardown cleans up all resources and services created by the Conductor.
 func (c *Conductor) Teardown(ctx context.Context) error {
 	c.logger.Info().Msg("--- Starting Conductor Teardown ---")
 	var allErrors []error
-	if err := c.orch.Teardown(ctx); err != nil {
-		c.logger.Error().Err(err).Msg("Orchestrator teardown failed")
-		allErrors = append(allErrors, err)
+
+	// Teardown application services
+	for _, dataflow := range c.arch.Dataflows {
+		for serviceName := range dataflow.Services {
+			if err := c.deploymentManager.deployer.Teardown(ctx, serviceName); err != nil {
+				allErrors = append(allErrors, fmt.Errorf("failed to teardown service '%s': %w", serviceName, err))
+			}
+		}
 	}
+
+	// Teardown ServiceDirector
+	if err := c.deploymentManager.deployer.Teardown(ctx, c.arch.ServiceManagerSpec.Name); err != nil {
+		allErrors = append(allErrors, fmt.Errorf("failed to teardown service director: %w", err))
+	}
+
+	// Teardown remote client (Pub/Sub resources)
+	if err := c.remoteDirectorClient.Teardown(ctx); err != nil {
+		allErrors = append(allErrors, fmt.Errorf("failed to teardown remote client: %w", err))
+	}
+
+	// Teardown IAM resources
 	if err := c.iamOrch.Teardown(ctx); err != nil {
-		c.logger.Error().Err(err).Msg("IAM teardown failed")
-		allErrors = append(allErrors, err)
+		allErrors = append(allErrors, fmt.Errorf("failed during IAM teardown: %w", err))
 	}
+
 	if len(allErrors) > 0 {
 		return fmt.Errorf("conductor teardown failed with %d errors: %v", len(allErrors), allErrors)
 	}
