@@ -3,20 +3,13 @@ package servicedirector
 import (
 	"flag"
 	"os"
-	"strings"
 
 	"github.com/illmade-knight/go-dataflow/pkg/microservice"
-	"google.golang.org/api/option"
-
 	"github.com/rs/zerolog/log"
+	"google.golang.org/api/option"
 )
 
-const (
-	VerifyPath   = "/dataflow/verify"
-	SetupPath    = "/dataflow/setup"
-	TeardownPath = "/orchestrate/teardown"
-)
-
+// PubsubConfig holds the runtime configuration for Pub/Sub, discovered from the embedded YAML.
 type PubsubConfig struct {
 	CommandTopicID    string
 	CommandSubID      string
@@ -31,8 +24,8 @@ type Config struct {
 	Commands *PubsubConfig
 }
 
-// NewConfig creates a new, minimal Config instance.
-// It no longer loads configuration that is now sourced from MicroserviceArchitecture.
+// NewConfig creates a new, minimal Config instance. It only handles runtime
+// operational flags and environment variables like the HTTP port.
 func NewConfig() (*Config, error) {
 	cfg := &Config{
 		BaseConfig: microservice.BaseConfig{
@@ -46,23 +39,7 @@ func NewConfig() (*Config, error) {
 	flag.Parse()
 
 	cfg.ProjectID = os.Getenv("PROJECT_ID")
-
-	// Override with environment variables if they are set.
-	if envVal := os.Getenv("SD_HTTP_PORT"); envVal != "" {
-		if !strings.HasPrefix(envVal, ":") {
-			envVal = ":" + envVal
-		}
-		cfg.HTTPPort = envVal
-	}
-
-	if commandTopicID := os.Getenv("SD_COMMAND_TOPIC"); commandTopicID != "" {
-		cfg.Commands = &PubsubConfig{
-			CommandTopicID:    commandTopicID,
-			CommandSubID:      os.Getenv("SD_COMMAND_SUBSCRIPTION"),
-			CompletionTopicID: os.Getenv("SD_COMPLETION_TOPIC"),
-		}
-	}
-
+	
 	// Cloud Run's special 'PORT' variable takes highest precedence.
 	if port := os.Getenv("PORT"); port != "" {
 		newPort := ":" + port

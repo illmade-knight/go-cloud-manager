@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -22,7 +21,6 @@ import (
 	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 // In orchestrator_dataflow_test.go
@@ -95,7 +93,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	pubName, pubServiceAccount := "tracer-publisher", "pub-sa"
 	subName, subServiceAccount := "tracer-subscriber", "sub-sa"
 	verifyTopicName, tracerTopicName, tracerSubName := "verify-topic", "tracer-topic", "tracer-sub"
-	
+
 	// 1. Define Architecture with logical names.
 	arch = &servicemanager.MicroserviceArchitecture{
 		Environment: servicemanager.Environment{Name: "dataflow-test", ProjectID: projectID, Region: "us-central1"},
@@ -199,17 +197,6 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	nameMap, err = servicemanager.HydrateTestArchitecture(arch, "test-images", runID, logger)
 	require.NoError(t, err)
 
-	// advanced preflight validation
-	t.Log("Generating service-specific YAML configurations...")
-	sc, err := orchestration.GenerateServiceConfigs(arch)
-	require.NoError(t, err)
-
-	err = orchestration.WriteServiceConfigFiles(sc, logger)
-	require.NoError(t, err)
-
-	// 3. NEW: Run the local preflight check before any cloud deployment.
-	preflightServiceConfigs(t, arch)
-
 	leasedSDEmail, err := iamClient.EnsureServiceAccountExists(ctx, arch.ServiceManagerSpec.ServiceAccount)
 	require.NoError(t, err)
 	arch.ServiceManagerSpec.ServiceAccount = leasedSDEmail
@@ -222,24 +209,6 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 		}
 		arch.Dataflows[dfName] = df
 	}
-
-	// REFACTOR now handled by resources.yaml
-	//arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_TOPIC"] = nameMap[sdCommandTopicName]
-	//arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMPLETION_TOPIC"] = nameMap[sdCompletionTopicName]
-	//arch.ServiceManagerSpec.Deployment.EnvironmentVars["SD_COMMAND_SUBSCRIPTION"] = nameMap[sdCommandSubName]
-
-	// 3. Write the fully hydrated YAML for the ServiceDirector build.
-	t.Log("Writing hydrated services.yaml for the ServiceDirector build...")
-	yamlBytes, err := yaml.Marshal(arch)
-	require.NoError(t, err)
-	embeddedYamlPath := filepath.Join(sourcePath, sdBuildPath, "services.yaml")
-	err = os.WriteFile(embeddedYamlPath, yamlBytes, 0644)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.Remove(embeddedYamlPath) })
-
-	//
-	// OK we've finished replicating the PrepareServiceDirectorSource logic for the test environment
-	//
 
 	// 4. Pre-create test resources.
 	t.Log("Pre-creating test resources...")
@@ -268,6 +237,9 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conductor.Teardown(context.Background()) })
 
+	// 3. NEW: Run the local preflight check before any cloud deployment.
+	//preflightServiceConfigs(t, arch)
+	
 	_, verifySub := createVerificationResources(t, ctx, psClient, hydratedVerifyTopicName)
 	validationChan := startVerificationListener(t, ctx, verifySub, 2)
 

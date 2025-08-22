@@ -34,8 +34,9 @@ func PrepareServiceDirectorSource(arch *servicemanager.MicroserviceArchitecture,
 	if arch.ServiceManagerSpec.Deployment == nil || arch.ServiceManagerSpec.Deployment.BuildableModulePath == "" {
 		return errors.New("ServiceManagerSpec.Deployment.BuildableModulePath is not defined")
 	}
-	directorSourcePath := arch.ServiceManagerSpec.Deployment.BuildableModulePath
-	destinationPath := filepath.Join(directorSourcePath, "services.yaml")
+	directorSourcePath := arch.ServiceManagerSpec.Deployment.SourcePath
+	directorBuildPath := arch.ServiceManagerSpec.Deployment.BuildableModulePath
+	destinationPath := filepath.Join(directorSourcePath, directorBuildPath, "services.yaml")
 	logger.Info().Str("destination", destinationPath).Msg("Copying hydrated services.yaml to ServiceDirector source...")
 	err = os.WriteFile(destinationPath, yamlBytes, 0644)
 	if err != nil {
@@ -124,6 +125,7 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 	planner := iam.NewRolePlanner(c.logger)
 	var fullPlan []PlanEntry
 
+	// 1. Get and annotate the plan for the ServiceDirector.
 	directorBindings, err := planner.PlanRolesForServiceDirector(c.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan ServiceDirector roles: %w", err)
@@ -136,6 +138,7 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 		})
 	}
 
+	// 2. Get and annotate the plan for the application services.
 	appBindings, err := planner.PlanRolesForApplicationServices(c.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan application service roles: %w", err)
@@ -148,10 +151,13 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 		})
 	}
 
+	// 3. Marshal the enhanced plan to YAML.
 	yamlBytes, err := yaml.Marshal(fullPlan)
 	if err != nil {
 		return fmt.Errorf("failed to marshal IAM plan to YAML: %w", err)
 	}
+
+	// 4. Write the plan to a file.
 	err = os.WriteFile(iamPlanYAML, yamlBytes, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write IAM plan to file: %w", err)
@@ -166,6 +172,9 @@ func (c *Conductor) Run(ctx context.Context) error {
 	c.logger.Info().Msg("Starting full architecture orchestration...")
 
 	if err := c.checkPrerequisites(ctx); err != nil {
+		return err
+	}
+	if err := c.prepareBuildArtifactsPhase(); err != nil {
 		return err
 	}
 	if err := c.setupIAMPhase(ctx); err != nil {
@@ -260,7 +269,26 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	return nil
 }
 
-// buildAndDeployPhase now uses the DeploymentManager.
+func (c *Conductor) prepareBuildArtifactsPhase() error {
+	c.logger.Info().Msg("Executing Phase 1.5: Preparing build artifacts (services.yaml, resources.yaml)...")
+
+	serviceConfigs, err := GenerateServiceConfigs(c.arch)
+	if err != nil {
+		return fmt.Errorf("failed to generate service-specific configs: %w", err)
+	}
+
+	if err := WriteServiceConfigFiles(serviceConfigs, c.logger); err != nil {
+		return fmt.Errorf("failed to write service config files: %w", err)
+	}
+
+	if err := PrepareServiceDirectorSource(c.arch, c.logger); err != nil {
+		return fmt.Errorf("failed to prepare ServiceDirector source: %w", err)
+	}
+
+	c.logger.Info().Msg("Phase 1.5: Build artifacts prepared successfully.")
+	return nil
+}
+
 func (c *Conductor) buildAndDeployPhase(ctx context.Context) error {
 	if !c.options.BuildAndDeployServices {
 		return nil
@@ -298,7 +326,6 @@ func (c *Conductor) buildAndDeployPhase(ctx context.Context) error {
 	return nil
 }
 
-// triggerRemoteFoundationalSetup now uses the RemoteDirectorClient and runs dataflows in parallel.
 func (c *Conductor) triggerRemoteFoundationalSetup(ctx context.Context) error {
 	if !c.options.TriggerRemoteSetup {
 		return nil
@@ -347,7 +374,6 @@ func (c *Conductor) verifyResourceLevelIAMPhase(ctx context.Context) error {
 	return nil
 }
 
-// deploymentPhase now uses the DeploymentManager and runs dataflow deployments in parallel.
 func (c *Conductor) deploymentPhase(ctx context.Context) error {
 	if !c.options.BuildAndDeployServices {
 		return nil
@@ -392,7 +418,6 @@ func (c *Conductor) deploymentPhase(ctx context.Context) error {
 	return nil
 }
 
-// triggerRemoteDependentSetup now uses the RemoteDirectorClient and runs in parallel.
 func (c *Conductor) triggerRemoteDependentSetup(ctx context.Context) error {
 	if !c.options.TriggerRemoteSetup {
 		return nil

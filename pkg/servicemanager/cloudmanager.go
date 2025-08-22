@@ -37,3 +37,14 @@ type ISchedulerManager interface {
 	IManager
 	CreateResources(ctx context.Context, resources CloudResourcesSpec) error
 }
+
+// IServiceManager defines the high-level interface for the main ServiceManager,
+// allowing it to be mocked for testing purposes.
+type IServiceManager interface {
+	SetupFoundationalDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) (*ProvisionedResources, error)
+	SetupDependentDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error
+	TeardownDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error
+	TeardownAll(ctx context.Context, arch *MicroserviceArchitecture) error
+	VerifyDataflow(ctx context.Context, arch *MicroserviceArchitecture, dataflowName string) error
+	SetupAll(ctx context.Context, arch *MicroserviceArchitecture) (*ProvisionedResources, error)
+}
