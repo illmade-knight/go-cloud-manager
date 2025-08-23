@@ -41,14 +41,6 @@ We will generate the repository in a logical order that mirrors a typical develo
 * **Input:** The generated manager interfaces from Phase 2\.
 * **Prompts:** A series of prompts to generate the files in the orchestration package. The prompt for the conductor.go file, for example, will be given the interfaces for the IAMOrchestrator and DeploymentManager so it knows what tools it has available to coordinate.
 
-### **Phase 4: The Verification (Tests)**
-
-* **Goal:** Generate a comprehensive test suite for the entire system.
-* **Input:** The generated implementation files.
-* **Prompts:** For each implementation file, we will create a corresponding prompt to generate its test file.
-    * **Unit Test Prompt Example:** "Given the following code for storagemanager.go and its interface storageadapter.go, write a complete storagemanager\_test.go file that uses mocks to validate all public methods, covering both success and failure scenarios."
-    * **Integration Test Prompt Example:** "Given the StorageManager and its Google Cloud adapter, write a full integration test (storagemanager\_integration\_test.go) that uses a GCS emulator to verify the create, update, and delete lifecycle of a bucket."
-
 ## **3\. Requirements Traceability: The Feedback Loop**
 
 To ensure our prompts and the resulting code stay aligned with our requirements, we will establish a traceability system.
