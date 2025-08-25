@@ -94,6 +94,9 @@ func generateAndInjectServiceDirectorResources(arch *MicroserviceArchitecture) {
 
 	// Create the TopicConfig for the completion topic.
 	// The ServiceDirector is the producer of events on this topic.
+	if spec.CompletionTopic.Lookup.Key == "" {
+		spec.CompletionTopic.Lookup.Key = fmt.Sprintf("%s-id", spec.Name)
+	}
 	compTopic := TopicConfig{
 		CloudResource: CloudResource{Name: compTopicName},
 		ProducerService: &ServiceMapping{
@@ -111,7 +114,7 @@ func generateAndInjectServiceDirectorResources(arch *MicroserviceArchitecture) {
 			Name: spec.Name,
 			// The lookup for the subscription is distinct and uses a conventional key.
 			Lookup: Lookup{
-				Key:    "SD_COMMAND_SUBSCRIPTION",
+				Key:    "command-subscription-id",
 				Method: spec.CommandTopic.Lookup.Method, // Inherits method from the topic.
 			},
 		},
@@ -393,7 +396,8 @@ func hydrateResourceNamesWithRunID(resources *CloudResourcesSpec, runID string, 
 		hydratedName := fmt.Sprintf("%s-%s", originalName, runID)
 		resources.Subscriptions[i].Name = hydratedName
 		nameMap[originalName] = hydratedName
-		resources.Subscriptions[i].Topic = fmt.Sprintf("%s-%s", resources.Subscriptions[i].Topic, runID)
+		//this is a bug now as our later updateAllCrossReferences is the proper place for this to be updated
+		//resources.Subscriptions[i].Topic = fmt.Sprintf("%s-%s", resources.Subscriptions[i].Topic, runID)
 	}
 }
 

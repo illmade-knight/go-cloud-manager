@@ -13,10 +13,12 @@ func TestPrerequisitePlanner_PlanRequiredServices(t *testing.T) {
 	// ARRANGE: Create a comprehensive test architecture that uses a wide
 	// variety of resource types to trigger all logic paths in the planner.
 	arch := &servicemanager.MicroserviceArchitecture{
-		ServiceManagerSpec: servicemanager.ServiceSpec{
-			Deployment: &servicemanager.DeploymentSpec{
-				SecretEnvironmentVars: []servicemanager.SecretEnvVar{
-					{Name: "A", ValueFrom: "secret-a"},
+		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
+			ServiceSpec: servicemanager.ServiceSpec{
+				Deployment: &servicemanager.DeploymentSpec{
+					SecretEnvironmentVars: []servicemanager.SecretEnvVar{
+						{Name: "A", ValueFrom: "secret-a"},
+					},
 				},
 			},
 		},

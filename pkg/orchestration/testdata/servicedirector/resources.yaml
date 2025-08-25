@@ -1,15 +1,15 @@
 topics:
-    - name: completion-topic-75a39eef
+    - name: completion-topic-cbe10116
       producer_service:
-        name: sd-75a39eef
+        name: sd-cbe10116
         lookup:
-            key: ""
+            key: completion-topic-id
             method: yaml
 subscriptions:
-    - name: command-topic-sub-75a39eef
-      topic: command-topic-75a39eef-75a39eef
+    - name: command-topic-sub-cbe10116
+      topic: command-topic-cbe10116
       consumer_service:
-        name: sd-75a39eef
+        name: sd-cbe10116
         lookup:
-            key: SD_COMMAND_SUBSCRIPTION
+            key: command-subscription-id
             method: yaml

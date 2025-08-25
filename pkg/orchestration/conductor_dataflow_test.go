@@ -109,12 +109,14 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 			CommandTopic: servicemanager.ServiceMapping{
 				Name: "command-topic",
 				Lookup: servicemanager.Lookup{
+					Key:    "command-topic-id",
 					Method: servicemanager.LookupYAML,
 				},
 			},
 			CompletionTopic: servicemanager.ServiceMapping{
 				Name: "completion-topic",
 				Lookup: servicemanager.Lookup{
+					Key:    "completion-topic-id",
 					Method: servicemanager.LookupYAML,
 				},
 			},
@@ -239,7 +241,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 
 	// 3. NEW: Run the local preflight check before any cloud deployment.
 	//preflightServiceConfigs(t, arch)
-	
+
 	_, verifySub := createVerificationResources(t, ctx, psClient, hydratedVerifyTopicName)
 	validationChan := startVerificationListener(t, ctx, verifySub, 2)
 

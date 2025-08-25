@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed" // REFACTOR: Import the embed package
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
@@ -23,34 +22,45 @@ var resourcesYAML []byte
 //go:embed services.yaml
 var servicesYAML []byte
 
+// TODO on next push use the readResourcesYAML method in microservice/servicedirector instead
 func readResourcesYAML() (*servicedirector.PubsubConfig, error) {
 	spec := &servicemanager.CloudResourcesSpec{}
 	err := yaml.Unmarshal(resourcesYAML, spec)
 	if err != nil {
-		log.Fatalf("Failed to parse services.yaml: %v", err)
+		// Changed from Fatalf to return an error for better handling
+		return nil, fmt.Errorf("failed to parse embedded resources.yaml: %w", err)
 	}
 
 	lookupMap := orchestration.ReadResourceMappings(spec)
 
 	cfg := &servicedirector.PubsubConfig{}
-	v, ok := lookupMap["command-topic-id"]
-	if ok {
-		cfg.CommandTopicID = v
-	} else {
-		return nil, fmt.Errorf("failed to find commands-topic-id in resources.yaml")
+	var ok bool
+
+	// Get subscription name from the map
+	cfg.CommandSubID, ok = lookupMap["command-subscription-id"]
+	if !ok {
+		return nil, fmt.Errorf("failed to find command-subscription-id in resources.yaml")
 	}
-	v, ok = lookupMap["completion-topic-id"]
-	if ok {
-		cfg.CompletionTopicID = v
-	} else {
-		return nil, fmt.Errorf("failed to find events-topic-id in resources.yaml")
+
+	// Find the subscription in the spec to get its topic
+	var commandTopicName string
+	for _, sub := range spec.Subscriptions {
+		if sub.Name == cfg.CommandSubID {
+			commandTopicName = sub.Topic
+			break
+		}
 	}
-	v, ok = lookupMap["command-subscription-id"]
-	if ok {
-		cfg.CommandSubID = v
-	} else {
-		return nil, fmt.Errorf("failed to find commands-sub-id in resources.yaml")
+	if commandTopicName == "" {
+		return nil, fmt.Errorf("could not find topic for subscription %s", cfg.CommandSubID)
 	}
+	cfg.CommandTopicID = commandTopicName
+
+	// Get completion topic name from the map
+	cfg.CompletionTopicID, ok = lookupMap["completion-topic-id"]
+	if !ok {
+		return nil, fmt.Errorf("failed to find completion-topic-id in resources.yaml")
+	}
+
 	return cfg, nil
 }
 
@@ -74,6 +84,8 @@ func main() {
 	if err == nil {
 		logger.Info().Msg("loaded resources.yaml")
 		cfg.Commands = pubsub
+	} else {
+		logger.Err(err).Msg("error loading yaml")
 	}
 
 	sd, err := servicedirector.NewServiceDirector(ctx, cfg, arch, logger)
