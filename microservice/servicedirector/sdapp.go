@@ -18,7 +18,6 @@ import (
 )
 
 // pubsubCommands holds the initialized Pub/Sub clients for the Director.
-// REFACTOR: This now holds v2 Publisher and Subscriber objects.
 type pubsubCommands struct {
 	client            *pubsub.Client
 	commandSubscriber *pubsub.Subscriber
@@ -62,7 +61,6 @@ func withServiceManager(sm servicemanager.IServiceManager) DirectorOption {
 }
 
 // withPubSubCommands is an option to configure the Director with its Pub/Sub command infrastructure.
-// REFACTOR: Updated to use the v2 pubsub.Client, Publisher, and Subscriber.
 func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 	return func(ctx context.Context, d *Director) error {
 		if cfg.Commands == nil {
@@ -167,7 +165,7 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 }
 
 // listenForCommands starts the blocking Pub/Sub message receiver.
-// REFACTOR: Updated to use the v2 Subscriber.
+// It acts as a transport layer, converting Pub/Sub messages into calls to the Director's public API.
 func (d *Director) listenForCommands(ctx context.Context) {
 	d.logger.Info().Msg("Starting to listen for commands...")
 	err := d.commands.commandSubscriber.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -191,7 +189,7 @@ func (d *Director) listenForCommands(ctx context.Context) {
 			} else {
 				dataflowName = payload.DataflowName
 				completionValue = dataflowName
-				cmdErr = d.handleSetupCommand(ctx, dataflowName)
+				cmdErr = d.SetupFoundationalDataflow(ctx, dataflowName)
 			}
 		case orchestration.SetupDependent:
 			var payload orchestration.DependentSetupPayload
@@ -200,7 +198,7 @@ func (d *Director) listenForCommands(ctx context.Context) {
 			} else {
 				dataflowName = payload.DataflowName
 				completionValue = dataflowName + "-dependent"
-				cmdErr = d.handleDependentSetupCommand(ctx, payload)
+				cmdErr = d.SetupDependentDataflow(ctx, payload)
 			}
 		case orchestration.Teardown:
 			var payload orchestration.FoundationalSetupPayload
@@ -209,7 +207,11 @@ func (d *Director) listenForCommands(ctx context.Context) {
 			} else {
 				dataflowName = payload.DataflowName
 				completionValue = dataflowName
-				cmdErr = d.handleTeardownCommand(ctx, dataflowName)
+				if dataflowName == "all" || dataflowName == "" {
+					cmdErr = d.TeardownAll(ctx)
+				} else {
+					cmdErr = d.TeardownDataflow(ctx, dataflowName)
+				}
 			}
 		default:
 			d.logger.Warn().Str("instruction", string(cmd.Instruction)).Msg("Received unknown command")
@@ -227,9 +229,9 @@ func (d *Director) listenForCommands(ctx context.Context) {
 	}
 }
 
-// handleSetupCommand orchestrates the setup of a dataflow's foundational resources and IAM.
-func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) error {
-	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' command for foundational resources...")
+// SetupFoundationalDataflow orchestrates the creation of foundational resources and IAM policies for a dataflow.
+func (d *Director) SetupFoundationalDataflow(ctx context.Context, dataflowName string) error {
+	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'setup' for foundational resources...")
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
@@ -251,9 +253,9 @@ func (d *Director) handleSetupCommand(ctx context.Context, dataflowName string) 
 	return nil
 }
 
-// handleDependentSetupCommand hydrates the architecture with service URLs and creates dependent resources.
-func (d *Director) handleDependentSetupCommand(ctx context.Context, payload orchestration.DependentSetupPayload) error {
-	d.logger.Info().Str("dataflow", payload.DataflowName).Msg("Processing 'dependent-resource-setup' command...")
+// SetupDependentDataflow hydrates the service architecture with runtime URLs and creates dependent resources like schedulers.
+func (d *Director) SetupDependentDataflow(ctx context.Context, payload orchestration.DependentSetupPayload) error {
+	d.logger.Info().Str("dataflow", payload.DataflowName).Msg("Processing 'dependent-resource-setup'...")
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -279,17 +281,22 @@ func (d *Director) handleDependentSetupCommand(ctx context.Context, payload orch
 	return d.serviceManager.SetupDependentDataflow(ctx, d.architecture, payload.DataflowName)
 }
 
-func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName string) error {
+// TeardownDataflow orchestrates the deletion of all resources for a specific dataflow.
+func (d *Director) TeardownDataflow(ctx context.Context, dataflowName string) error {
 	d.logger.Info().Str("dataflow", dataflowName).Msg("Processing 'teardown' command...")
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	if dataflowName == "all" || dataflowName == "" {
-		return d.serviceManager.TeardownAll(ctx, d.architecture)
-	}
 	return d.serviceManager.TeardownDataflow(ctx, d.architecture, dataflowName)
 }
 
-// REFACTOR: Updated to use the v2 Publisher.
+// TeardownAll orchestrates the deletion of all resources for all dataflows in the architecture.
+func (d *Director) TeardownAll(ctx context.Context) error {
+	d.logger.Info().Msg("Processing 'teardown all' command...")
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	return d.serviceManager.TeardownAll(ctx, d.architecture)
+}
+
 func (d *Director) publishReadyEvent(ctx context.Context) error {
 	d.logger.Info().Msg("Publishing 'service_ready' event...")
 	event := orchestration.CompletionEvent{
@@ -309,7 +316,6 @@ func (d *Director) publishReadyEvent(ctx context.Context) error {
 	return nil
 }
 
-// REFACTOR: Updated to use the v2 Publisher.
 func (d *Director) publishCompletionEvent(ctx context.Context, value string, commandErr error, appliedPolicies map[string]iam.PolicyBinding) error {
 	d.logger.Info().Str("value", value).Msg("Publishing completion event...")
 
@@ -354,7 +360,6 @@ func (d *Director) Shutdown(ctx context.Context) {
 	}
 }
 
-// REFACTOR: Updated to use the v2 admin clients for resource creation.
 func ensureCommandInfrastructureExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string, logger zerolog.Logger) error {
 	projectID := psClient.Project()
 	topicAdmin := psClient.TopicAdminClient
@@ -383,7 +388,6 @@ func ensureCommandInfrastructureExists(ctx context.Context, psClient *pubsub.Cli
 	return nil
 }
 
-// REFACTOR: Updated to use the v2 admin client for resource creation.
 func ensureCompletionTopicExists(ctx context.Context, psClient *pubsub.Client, topicID string, logger zerolog.Logger) error {
 	topicAdmin := psClient.TopicAdminClient
 	topicName := fmt.Sprintf("projects/%s/topics/%s", psClient.Project(), topicID)
