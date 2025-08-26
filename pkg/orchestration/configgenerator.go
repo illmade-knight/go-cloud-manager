@@ -197,3 +197,37 @@ func WriteServiceConfigFiles(
 	logger.Info().Msg("✅ All service config files written successfully.")
 	return nil
 }
+
+// In orchestration/configgenerator.go
+
+// CleanStaleConfigs removes any leftover resources.yaml or services.yaml files
+// from the source directories of all services defined in the architecture. This
+// ensures every deployment starts from a clean state.
+func CleanStaleConfigs(arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) error {
+	logger.Info().Msg("Cleaning stale configuration files from service directories...")
+	allServices := getAllServices(arch)
+
+	for _, service := range allServices {
+		if service.Deployment == nil {
+			continue
+		}
+		serviceDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
+
+		// Remove resources.yaml from all services
+		resourcesPath := filepath.Join(serviceDir, "resources.yaml")
+		if err := os.Remove(resourcesPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove stale resources.yaml for service '%s': %w", service.Name, err)
+		}
+
+		// Specifically clean the services.yaml from the director's path
+		if service.Name == arch.ServiceManagerSpec.Name {
+			servicesPath := filepath.Join(serviceDir, "services.yaml")
+			if err := os.Remove(servicesPath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("failed to remove stale services.yaml for ServiceDirector: %w", err)
+			}
+		}
+	}
+
+	logger.Info().Msg("✅ Stale configuration files cleaned successfully.")
+	return nil
+}

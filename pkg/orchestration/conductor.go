@@ -271,8 +271,14 @@ func (c *Conductor) setupIAMPhase(ctx context.Context) error {
 	return nil
 }
 
+// In orchestration/conductor.go
 func (c *Conductor) prepareBuildArtifactsPhase() error {
 	c.logger.Info().Msg("Executing Phase 1.5: Preparing build artifacts (services.yaml, resources.yaml)...")
+
+	// REFACTOR: First, clean up any leftover YAML files from previous runs.
+	if err := CleanStaleConfigs(c.arch, c.logger); err != nil {
+		return fmt.Errorf("failed during config cleanup: %w", err)
+	}
 
 	serviceConfigs, err := GenerateServiceConfigs(c.arch)
 	if err != nil {
