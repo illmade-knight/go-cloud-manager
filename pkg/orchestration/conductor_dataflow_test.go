@@ -214,13 +214,14 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// --- Act ---
 	t.Log("Creating Conductor...")
 	opts := orchestration.ConductorOptions{
-		CheckPrerequisites:     true,
-		SetupIAM:               true,
-		BuildAndDeployServices: true,
-		TriggerRemoteSetup:     true,
-		VerifyDataflowIAM:      true,
-		SAPollTimeout:          4 * time.Minute,
-		PolicyPollTimeout:      7 * time.Minute, // Generous timeout for policy propagation
+		CheckPrerequisites:      true,
+		PreflightServiceConfigs: true,
+		SetupIAM:                true,
+		BuildAndDeployServices:  true,
+		TriggerRemoteSetup:      true,
+		VerifyDataflowIAM:       true,
+		SAPollTimeout:           4 * time.Minute,
+		PolicyPollTimeout:       7 * time.Minute, // Generous timeout for policy propagation
 	}
 	conductor, err := orchestration.NewConductor(ctx, arch, logger, opts)
 	require.NoError(t, err)

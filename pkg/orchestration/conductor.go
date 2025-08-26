@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -48,14 +49,15 @@ func PrepareServiceDirectorSource(arch *servicemanager.MicroserviceArchitecture,
 
 // ConductorOptions provides flags and configuration to control the orchestration workflow.
 type ConductorOptions struct {
-	CheckPrerequisites     bool
-	SetupIAM               bool
-	BuildAndDeployServices bool
-	TriggerRemoteSetup     bool
-	VerifyDataflowIAM      bool
-	DirectorURLOverride    string
-	SAPollTimeout          time.Duration
-	PolicyPollTimeout      time.Duration
+	CheckPrerequisites      bool
+	PreflightServiceConfigs bool // REFACTOR: New option to enable the preflight check.
+	SetupIAM                bool
+	BuildAndDeployServices  bool
+	TriggerRemoteSetup      bool
+	VerifyDataflowIAM       bool
+	DirectorURLOverride     string
+	SAPollTimeout           time.Duration
+	PolicyPollTimeout       time.Duration
 }
 
 // Conductor manages the high-level orchestration of a full microservice architecture deployment.
@@ -177,6 +179,10 @@ func (c *Conductor) Run(ctx context.Context) error {
 	if err := c.prepareBuildArtifactsPhase(); err != nil {
 		return err
 	}
+	// REFACTOR: The new preflight check runs immediately after artifacts are prepared.
+	if err := c.preflightServiceConfigsPhase(); err != nil {
+		return err
+	}
 	if err := c.setupIAMPhase(ctx); err != nil {
 		return err
 	}
@@ -286,6 +292,48 @@ func (c *Conductor) prepareBuildArtifactsPhase() error {
 	}
 
 	c.logger.Info().Msg("Phase 1.5: Build artifacts prepared successfully.")
+	return nil
+}
+
+// preflightServiceConfigsPhase runs `go test` in each service's directory to validate
+// that the newly generated config files are loadable and parseable.
+func (c *Conductor) preflightServiceConfigsPhase() error {
+	if !c.options.PreflightServiceConfigs {
+		return nil
+	}
+	c.logger.Info().Msg("Executing Phase 1.6: Running local preflight validation for each service...")
+
+	// Validate the ServiceDirector first.
+	sdSpec := c.arch.ServiceManagerSpec
+	if sdSpec.Deployment != nil {
+		serviceDir := filepath.Join(sdSpec.Deployment.SourcePath, sdSpec.Deployment.BuildableModulePath)
+		c.logger.Info().Msgf("Validating service in directory: %s", serviceDir)
+		cmd := exec.Command("go", "test", "./...")
+		cmd.Dir = serviceDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("preflight validation failed for service '%s'. Output:\n%s", sdSpec.Name, string(output))
+		}
+	}
+
+	// Validate all application services.
+	for _, df := range c.arch.Dataflows {
+		for _, service := range df.Services {
+			if service.Deployment == nil {
+				continue
+			}
+			serviceDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
+			c.logger.Info().Msgf("Validating service in directory: %s", serviceDir)
+			cmd := exec.Command("go", "test", "./...")
+			cmd.Dir = serviceDir
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("preflight validation failed for service '%s'. Output:\n%s", service.Name, string(output))
+			}
+		}
+	}
+
+	c.logger.Info().Msg("✅ All services passed local preflight validation.")
 	return nil
 }
 

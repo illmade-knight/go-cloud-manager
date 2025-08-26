@@ -1,15 +1,15 @@
 topics:
-    - name: completion-topic-209eee15
+    - name: completion-topic-cfe6faa0
       producer_service:
-        name: sd-209eee15
+        name: sd-cfe6faa0
         lookup:
             key: completion-topic-id
             method: yaml
 subscriptions:
-    - name: command-topic-sub-209eee15
-      topic: command-topic-209eee15
+    - name: command-topic-sub-cfe6faa0
+      topic: command-topic-cfe6faa0
       consumer_service:
-        name: sd-209eee15
+        name: sd-cfe6faa0
         lookup:
             key: command-subscription-id
             method: yaml
