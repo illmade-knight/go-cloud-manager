@@ -111,7 +111,6 @@ func (c *RemoteDirectorClient) initialize(ctx context.Context) error {
 
 	c.logger.Info().Str("command_topic", commandTopicID).Str("completion_topic", completionTopicID).Msg("Resolved ServiceDirector topics.")
 
-	// REFACTOR: Restore the "create if not exists" logic for dependent topics.
 	err = ensureTopicExists(ctx, c.psClient, commandTopicID, c.logger)
 	if err != nil {
 		return err
@@ -170,6 +169,9 @@ func (c *RemoteDirectorClient) listenForEvents(ctx context.Context) {
 		c.waitersMutex.Lock()
 		if ch, ok := c.waiters[event.Value]; ok {
 			ch <- event
+			// REFACTOR: The listener is now responsible for cleanup. This prevents race conditions.
+			close(ch)
+			delete(c.waiters, event.Value)
 		} else {
 			c.logger.Warn().Str("key", event.Value).Msg("Received event for which there was no active waiter.")
 		}
@@ -211,14 +213,15 @@ func (c *RemoteDirectorClient) TriggerDependentSetup(ctx context.Context, datafl
 func (c *RemoteDirectorClient) sendCommandAndWait(ctx context.Context, waiterKey string, cmd Command) (CompletionEvent, error) {
 	waitChan := make(chan CompletionEvent, 1)
 	c.waitersMutex.Lock()
+	if _, exists := c.waiters[waiterKey]; exists {
+		c.waitersMutex.Unlock()
+		return CompletionEvent{}, fmt.Errorf("a command with the same waiter key '%s' is already in progress", waiterKey)
+	}
 	c.waiters[waiterKey] = waitChan
 	c.waitersMutex.Unlock()
 
-	defer func() {
-		c.waitersMutex.Lock()
-		delete(c.waiters, waiterKey)
-		c.waitersMutex.Unlock()
-	}()
+	// REFACTOR: The deferred cleanup function has been removed from here.
+	// The listener is now responsible for deleting the waiter from the map.
 
 	cmdMsg, err := json.Marshal(cmd)
 	if err != nil {
@@ -227,11 +230,19 @@ func (c *RemoteDirectorClient) sendCommandAndWait(ctx context.Context, waiterKey
 	result := c.commandPublisher.Publish(ctx, &pubsub.Message{Data: cmdMsg})
 	_, err = result.Get(ctx)
 	if err != nil {
+		// If publishing fails, we must clean up the waiter we just added.
+		c.waitersMutex.Lock()
+		delete(c.waiters, waiterKey)
+		c.waitersMutex.Unlock()
 		return CompletionEvent{}, fmt.Errorf("failed to publish command: %w", err)
 	}
 
 	select {
-	case event := <-waitChan:
+	case event, ok := <-waitChan:
+		if !ok {
+			// This can happen if the context is cancelled while the listener is processing.
+			return CompletionEvent{}, fmt.Errorf("waiter channel for '%s' was closed unexpectedly", waiterKey)
+		}
 		if event.Status == "failure" {
 			return event, fmt.Errorf("remote operation for '%s' failed: %s", waiterKey, event.ErrorMessage)
 		}
