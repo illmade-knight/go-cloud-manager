@@ -14,7 +14,7 @@ import (
 func TestHydrateArchitecture(t *testing.T) {
 	// ARRANGE
 	arch := &servicemanager.MicroserviceArchitecture{
-		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1"},
+		Environment: servicemanager.Environment{ProjectID: "test-project", Region: "europe-west1", Location: "US"},
 		ServiceManagerSpec: servicemanager.ServiceManagerSpec{
 			ServiceSpec: servicemanager.ServiceSpec{
 				Name: "service-manager", ServiceAccount: "sm-sa", Deployment: &servicemanager.DeploymentSpec{SourcePath: "."},
@@ -32,7 +32,6 @@ func TestHydrateArchitecture(t *testing.T) {
 						Method: servicemanager.LookupEnv,
 					}},
 				}},
-				// NEW_CODE: Added a Firestore collection to test its hydration.
 				FirestoreCollections: []servicemanager.FirestoreCollection{{
 					CloudResource: servicemanager.CloudResource{Name: "users-collection"},
 					ResourceIO: servicemanager.ResourceIO{
@@ -43,6 +42,11 @@ func TestHydrateArchitecture(t *testing.T) {
 							}},
 						},
 					},
+				}},
+				// REFACTOR: Add a table that references a dataset that is not explicitly defined.
+				BigQueryTables: []servicemanager.BigQueryTable{{
+					CloudResource: servicemanager.CloudResource{Name: "measurements-table"},
+					Dataset:       "derived-dataset",
 				}},
 			},
 		}},
@@ -60,8 +64,13 @@ func TestHydrateArchitecture(t *testing.T) {
 	assert.Equal(t, "europe-west1", spec.Region)
 	assert.True(t, strings.HasPrefix(spec.Image, "europe-west1-docker.pkg.dev/test-project/default-repo/my-service:"))
 	assert.Equal(t, "events-topic", spec.EnvironmentVars["EVENTS_TOPIC_ID"])
-	// NEW_CODE: Assert that the collection name was injected as an environment variable.
 	assert.Equal(t, "users-collection", spec.EnvironmentVars["USERS_COLLECTION_NAME"])
+
+	// REFACTOR: Assert that the dataset was auto-generated from the table's 'dataset' property.
+	require.Len(t, arch.Dataflows["test-flow"].Resources.BigQueryDatasets, 1, "A dataset should have been auto-generated from the table reference")
+	generatedDataset := arch.Dataflows["test-flow"].Resources.BigQueryDatasets[0]
+	assert.Equal(t, "derived-dataset", generatedDataset.Name)
+	assert.Equal(t, "US", generatedDataset.Location, "Auto-generated dataset should inherit the default location")
 }
 
 // TestHydrateTestArchitecture validates the testing hydration path with a runID.
@@ -103,19 +112,12 @@ func TestHydrateTestArchitecture(t *testing.T) {
 	hydratedSvc, newKeyExists := arch.Dataflows["test-flow"].Services[hydratedSvcName]
 	assert.True(t, newKeyExists, "Hydrated service key should exist")
 
-	// Check that names and references were updated
 	assert.Equal(t, hydratedSvcName, hydratedSvc.Name)
 	assert.Equal(t, hydratedTopicName, arch.Dataflows["test-flow"].Resources.Topics[0].Name)
 	assert.Equal(t, hydratedSvcName, arch.Dataflows["test-flow"].Resources.Topics[0].ProducerService.Name, "ProducerService link should be updated")
-
-	// Assert that the service account names were also hydrated
 	assert.Equal(t, "sm-sa-xyz123", arch.ServiceManagerSpec.ServiceAccount)
 	assert.Equal(t, "my-sa-xyz123", hydratedSvc.ServiceAccount)
-
-	// Check that derived values (image path and env var) use the new hydrated names
 	assert.Contains(t, hydratedSvc.Deployment.Image, "/"+hydratedSvcName+":", "Image path should use the new hydrated service name")
-	//assert.Equal(t, hydratedTopicName, hydratedSvc.Deployment.EnvironmentVars["EVENTS_TOPIC_ID"], "Lookup var value should be the new hydrated resource name")
-	//test the new ability to use a method other than env var
 	assert.NotEqual(t, hydratedTopicName, hydratedSvc.Deployment.EnvironmentVars["EVENTS_TOPIC_ID"], "We should no longer see the topic name in the env variables")
 }
 

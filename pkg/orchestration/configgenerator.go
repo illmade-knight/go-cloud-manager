@@ -12,11 +12,9 @@ import (
 
 // isLinkedForYAML checks if a service is linked to a resource with the intent
 // of using the embedded YAML configuration method.
-// It returns true if the method is explicitly 'embedded_yaml' or if the method is not set (the new default).
 func isLinkedForYAML(links []servicemanager.ServiceMapping, serviceName string) bool {
 	for _, link := range links {
 		if link.Name == serviceName {
-			// Default to LookupYAML if the method is not specified.
 			if link.Lookup.Method == "" || link.Lookup.Method == servicemanager.LookupYAML {
 				return true
 			}
@@ -42,7 +40,6 @@ func ReadResourceMappings(spec *servicemanager.CloudResourcesSpec) map[string]st
 		}
 	}
 
-	// 3. Iterate through the parsed CloudResourcesSpec to find all resource links.
 	for _, topic := range spec.Topics {
 		if topic.ProducerService != nil && topic.ProducerService.Lookup.Key != "" {
 			lookupMap[topic.ProducerService.Lookup.Key] = topic.Name
@@ -68,51 +65,80 @@ func ReadResourceMappings(spec *servicemanager.CloudResourcesSpec) map[string]st
 // buildServiceResourceSpec creates the filtered CloudResourcesSpec for a single service.
 func buildServiceResourceSpec(service servicemanager.ServiceSpec, arch *servicemanager.MicroserviceArchitecture) servicemanager.CloudResourcesSpec {
 	spec := servicemanager.CloudResourcesSpec{}
+
+	// REFACTOR: Create a lookup map of all datasets for efficient access.
+	allDatasets := make(map[string]servicemanager.BigQueryDataset)
+	for _, df := range arch.Dataflows {
+		for _, ds := range df.Resources.BigQueryDatasets {
+			allDatasets[ds.Name] = ds
+		}
+	}
+	// REFACTOR: Use a map to collect required datasets to avoid duplicates.
+	datasetsToAdd := make(map[string]servicemanager.BigQueryDataset)
+
 	for _, dataflow := range arch.Dataflows {
-		// Check Topics (only has one producer)
+		// Check Topics
 		for _, topic := range dataflow.Resources.Topics {
 			if topic.ProducerService != nil && isLinkedForYAML([]servicemanager.ServiceMapping{*topic.ProducerService}, service.Name) {
 				spec.Topics = append(spec.Topics, topic)
 			}
 		}
-		// Check Subscriptions (only has one consumer)
+		// Check Subscriptions
 		for _, sub := range dataflow.Resources.Subscriptions {
 			if sub.ConsumerService != nil && isLinkedForYAML([]servicemanager.ServiceMapping{*sub.ConsumerService}, service.Name) {
 				spec.Subscriptions = append(spec.Subscriptions, sub)
 			}
 		}
-		// Check resources with producer/consumer lists
+		// Check BigQuery Tables and infer Dataset dependency
 		for _, table := range dataflow.Resources.BigQueryTables {
 			if isLinkedForYAML(table.Producers, service.Name) || isLinkedForYAML(table.Consumers, service.Name) {
+				// 1. Add the linked table to the service's spec.
 				spec.BigQueryTables = append(spec.BigQueryTables, table)
+
+				// 2. Infer the dependency on the parent dataset and add it to our collection.
+				if parentDataset, ok := allDatasets[table.Dataset]; ok {
+					datasetsToAdd[parentDataset.Name] = parentDataset
+				}
 			}
 		}
+		// Check GCS Buckets
 		for _, bucket := range dataflow.Resources.GCSBuckets {
 			if isLinkedForYAML(bucket.Producers, service.Name) || isLinkedForYAML(bucket.Consumers, service.Name) {
 				spec.GCSBuckets = append(spec.GCSBuckets, bucket)
 			}
 		}
+		// Check Firestore Databases
 		for _, db := range dataflow.Resources.FirestoreDatabases {
 			if isLinkedForYAML(db.Producers, service.Name) || isLinkedForYAML(db.Consumers, service.Name) {
 				spec.FirestoreDatabases = append(spec.FirestoreDatabases, db)
 			}
 		}
+		// Check Firestore Collections
 		for _, coll := range dataflow.Resources.FirestoreCollections {
 			if isLinkedForYAML(coll.Producers, service.Name) || isLinkedForYAML(coll.Consumers, service.Name) {
 				spec.FirestoreCollections = append(spec.FirestoreCollections, coll)
 			}
 		}
 	}
+
+	// REFACTOR: Add the unique, transitively-linked datasets to the final spec.
+	for _, ds := range datasetsToAdd {
+		spec.BigQueryDatasets = append(spec.BigQueryDatasets, ds)
+	}
+
 	return spec
 }
 
-// GenerateServiceConfigs hydrates the architecture and creates service-specific YAML configs.
+// GenerateServiceConfigs creates service-specific YAML configs based on the architecture.
 func GenerateServiceConfigs(arch *servicemanager.MicroserviceArchitecture) ([]ServiceConfig, error) {
 
 	var configFiles []ServiceConfig
 	allServices := getAllServices(arch)
 
 	for serviceName, service := range allServices {
+		if service.Deployment == nil {
+			continue // Skip services without a deployment spec
+		}
 		serviceResourceSpec := buildServiceResourceSpec(service, arch)
 
 		destPath := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath, "resources.yaml")
@@ -125,17 +151,14 @@ func GenerateServiceConfigs(arch *servicemanager.MicroserviceArchitecture) ([]Se
 	return configFiles, nil
 }
 
-// getAllServices is a local helper to collect all service specifications from
-// an architecture, including the ServiceDirector, into a single map.
+// getAllServices is a local helper to collect all service specifications into a single map.
 func getAllServices(arch *servicemanager.MicroserviceArchitecture) map[string]servicemanager.ServiceSpec {
 	allServices := make(map[string]servicemanager.ServiceSpec)
 
-	// Add the ServiceDirector itself
 	if arch.ServiceManagerSpec.Name != "" {
 		allServices[arch.ServiceManagerSpec.Name] = arch.ServiceManagerSpec.ServiceSpec
 	}
 
-	// Add all services from all dataflows
 	for _, dataflow := range arch.Dataflows {
 		for _, service := range dataflow.Services {
 			allServices[service.Name] = service
@@ -150,10 +173,9 @@ type ServiceConfig struct {
 	Config      servicemanager.CloudResourcesSpec
 }
 
-// In orchestration/config_generator.go
-
+// WriteServiceConfigFiles writes the generated configurations to their respective service directories.
 func WriteServiceConfigFiles(
-	filesToWrite []ServiceConfig, // REFACTOR: Accepts the slice of typed objects
+	filesToWrite []ServiceConfig,
 	logger zerolog.Logger,
 ) error {
 	logger.Info().Msg("Writing service-specific config files...")
