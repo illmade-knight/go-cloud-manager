@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -50,7 +49,7 @@ func PrepareServiceDirectorSource(arch *servicemanager.MicroserviceArchitecture,
 // ConductorOptions provides flags and configuration to control the orchestration workflow.
 type ConductorOptions struct {
 	CheckPrerequisites      bool
-	PreflightServiceConfigs bool // REFACTOR: New option to enable the preflight check.
+	PreflightServiceConfigs bool
 	SetupIAM                bool
 	BuildAndDeployServices  bool
 	TriggerRemoteSetup      bool
@@ -68,6 +67,7 @@ type Conductor struct {
 	iamOrch              *IAMOrchestrator
 	deploymentManager    *DeploymentManager
 	remoteDirectorClient *RemoteDirectorClient
+	preflightValidator   *PreflightValidator // REFACTOR: Added field for the new validator.
 	options              ConductorOptions
 	serviceAccountEmails map[string]string
 	directorURL          string
@@ -106,6 +106,7 @@ func NewConductor(ctx context.Context, arch *servicemanager.MicroserviceArchitec
 		iamOrch:              iamOrch,
 		deploymentManager:    deploymentManager,
 		remoteDirectorClient: remoteClient,
+		preflightValidator:   NewPreflightValidator(arch, logger), // REFACTOR: Initialize the validator.
 		options:              opts,
 		serviceAccountEmails: make(map[string]string),
 		deployedServiceURLs:  make(map[string]string),
@@ -127,7 +128,6 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 	planner := iam.NewRolePlanner(c.logger)
 	var fullPlan []PlanEntry
 
-	// 1. Get and annotate the plan for the ServiceDirector.
 	directorBindings, err := planner.PlanRolesForServiceDirector(c.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan ServiceDirector roles: %w", err)
@@ -140,7 +140,6 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 		})
 	}
 
-	// 2. Get and annotate the plan for the application services.
 	appBindings, err := planner.PlanRolesForApplicationServices(c.arch)
 	if err != nil {
 		return fmt.Errorf("failed to plan application service roles: %w", err)
@@ -153,13 +152,11 @@ func (c *Conductor) GenerateIAMPlan(iamPlanYAML string) error {
 		})
 	}
 
-	// 3. Marshal the enhanced plan to YAML.
 	yamlBytes, err := yaml.Marshal(fullPlan)
 	if err != nil {
 		return fmt.Errorf("failed to marshal IAM plan to YAML: %w", err)
 	}
 
-	// 4. Write the plan to a file.
 	err = os.WriteFile(iamPlanYAML, yamlBytes, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write IAM plan to file: %w", err)
@@ -179,7 +176,6 @@ func (c *Conductor) Run(ctx context.Context) error {
 	if err := c.prepareBuildArtifactsPhase(); err != nil {
 		return err
 	}
-	// REFACTOR: The new preflight check runs immediately after artifacts are prepared.
 	if err := c.preflightServiceConfigsPhase(); err != nil {
 		return err
 	}
@@ -295,46 +291,13 @@ func (c *Conductor) prepareBuildArtifactsPhase() error {
 	return nil
 }
 
-// preflightServiceConfigsPhase runs `go test` in each service's directory to validate
-// that the newly generated config files are loadable and parseable.
+// preflightServiceConfigsPhase is now a simple wrapper around the PreflightValidator.
 func (c *Conductor) preflightServiceConfigsPhase() error {
 	if !c.options.PreflightServiceConfigs {
 		return nil
 	}
-	c.logger.Info().Msg("Executing Phase 1.6: Running local preflight validation for each service...")
-
-	// Validate the ServiceDirector first.
-	sdSpec := c.arch.ServiceManagerSpec
-	if sdSpec.Deployment != nil {
-		serviceDir := filepath.Join(sdSpec.Deployment.SourcePath, sdSpec.Deployment.BuildableModulePath)
-		c.logger.Info().Msgf("Validating service in directory: %s", serviceDir)
-		cmd := exec.Command("go", "test", "./...")
-		cmd.Dir = serviceDir
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("preflight validation failed for service '%s'. Output:\n%s", sdSpec.Name, string(output))
-		}
-	}
-
-	// Validate all application services.
-	for _, df := range c.arch.Dataflows {
-		for _, service := range df.Services {
-			if service.Deployment == nil {
-				continue
-			}
-			serviceDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
-			c.logger.Info().Msgf("Validating service in directory: %s", serviceDir)
-			cmd := exec.Command("go", "test", "./...")
-			cmd.Dir = serviceDir
-			output, err := cmd.CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("preflight validation failed for service '%s'. Output:\n%s", service.Name, string(output))
-			}
-		}
-	}
-
-	c.logger.Info().Msg("✅ All services passed local preflight validation.")
-	return nil
+	c.logger.Info().Msg("Executing Phase 1.6: Running local preflight validation...")
+	return c.preflightValidator.Run()
 }
 
 func (c *Conductor) buildAndDeployPhase(ctx context.Context) error {
@@ -519,7 +482,6 @@ func (c *Conductor) Teardown(ctx context.Context) error {
 	c.logger.Info().Msg("--- Starting Conductor Teardown ---")
 	var allErrors []error
 
-	// Teardown application services
 	for _, dataflow := range c.arch.Dataflows {
 		for serviceName := range dataflow.Services {
 			if err := c.deploymentManager.deployer.Teardown(ctx, serviceName); err != nil {
@@ -528,17 +490,14 @@ func (c *Conductor) Teardown(ctx context.Context) error {
 		}
 	}
 
-	// Teardown ServiceDirector
 	if err := c.deploymentManager.deployer.Teardown(ctx, c.arch.ServiceManagerSpec.Name); err != nil {
 		allErrors = append(allErrors, fmt.Errorf("failed to teardown service director: %w", err))
 	}
 
-	// Teardown remote client (Pub/Sub resources)
 	if err := c.remoteDirectorClient.Teardown(ctx); err != nil {
 		allErrors = append(allErrors, fmt.Errorf("failed to teardown remote client: %w", err))
 	}
 
-	// Teardown IAM resources
 	if err := c.iamOrch.Teardown(ctx); err != nil {
 		allErrors = append(allErrors, fmt.Errorf("failed during IAM teardown: %w", err))
 	}
