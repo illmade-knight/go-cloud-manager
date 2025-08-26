@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/illmade-knight/go-cloud-manager/microservice/servicedirector"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
@@ -24,8 +26,6 @@ import (
 
 // --- Mocks for Dependencies ---
 
-// MockServiceManager allows us to assert that the Director calls the correct methods.
-// It fully implements the servicemanager.IServiceManager interface.
 type MockServiceManager struct {
 	mock.Mock
 }
@@ -60,7 +60,6 @@ func (m *MockServiceManager) SetupAll(ctx context.Context, arch *servicemanager.
 	return args.Get(0).(*servicemanager.ProvisionedResources), args.Error(1)
 }
 
-// MockIAMManager allows us to assert that the Director calls the correct methods.
 type MockIAMManager struct {
 	mock.Mock
 }
@@ -76,7 +75,7 @@ func TestServiceDirector_Integration(t *testing.T) {
 	// --- Arrange ---
 	logger := zerolog.New(zerolog.NewTestWriter(t)).With().Timestamp().Logger()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	projectID := "sd-it-project"
 	commandTopicID := "sd-it-commands"
@@ -84,15 +83,29 @@ func TestServiceDirector_Integration(t *testing.T) {
 	completionTopicID := "sd-it-events"
 	dataflowToTest := "test-flow"
 
-	// 1. Setup Pub/Sub emulator and topics
-	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
+	// 1. Setup Pub/Sub emulator
+	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID))
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
 
-	_, err = psClient.CreateTopic(ctx, commandTopicID)
+	// REFACTOR: Create all topics and subscriptions *before* starting the service.
+	topicAdmin := psClient.TopicAdminClient
+	subAdmin := psClient.SubscriptionAdminClient
+
+	commandTopicName := fmt.Sprintf("projects/%s/topics/%s", projectID, commandTopicID)
+	_, err = topicAdmin.CreateTopic(ctx, &pubsubpb.Topic{Name: commandTopicName})
 	require.NoError(t, err)
-	_, err = psClient.CreateTopic(ctx, completionTopicID)
+
+	completionTopicName := fmt.Sprintf("projects/%s/topics/%s", projectID, completionTopicID)
+	_, err = topicAdmin.CreateTopic(ctx, &pubsubpb.Topic{Name: completionTopicName})
+	require.NoError(t, err)
+
+	commandSubName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, commandSubID)
+	_, err = subAdmin.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  commandSubName,
+		Topic: commandTopicName,
+	})
 	require.NoError(t, err)
 
 	// 2. Create a minimal architecture object for the Director to use.
@@ -146,8 +159,13 @@ func TestServiceDirector_Integration(t *testing.T) {
 
 	// Create a listener to wait for the completion event.
 	completionSubID := "test-completion-listener"
-	completionSub, err := psClient.CreateSubscription(ctx, completionSubID, pubsub.SubscriptionConfig{Topic: psClient.Topic(completionTopicID)})
+	completionSubName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, completionSubID)
+	_, err = subAdmin.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  completionSubName,
+		Topic: completionTopicName,
+	})
 	require.NoError(t, err)
+	completionSub := psClient.Subscriber(completionSubID)
 
 	done := make(chan struct{})
 	go func() {
@@ -161,7 +179,11 @@ func TestServiceDirector_Integration(t *testing.T) {
 		})
 	}()
 
-	psClient.Topic(commandTopicID).Publish(ctx, &pubsub.Message{Data: cmdData})
+	publisher := psClient.Publisher(commandTopicID)
+	t.Cleanup(publisher.Stop)
+	result := publisher.Publish(ctx, &pubsub.Message{Data: cmdData})
+	_, err = result.Get(ctx)
+	require.NoError(t, err)
 
 	select {
 	case <-done:

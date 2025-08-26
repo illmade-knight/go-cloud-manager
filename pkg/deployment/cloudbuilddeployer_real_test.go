@@ -15,7 +15,7 @@ import (
 
 	"cloud.google.com/go/iam/admin/apiv1"
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/google/uuid"

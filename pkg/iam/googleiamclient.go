@@ -12,7 +12,7 @@ import (
 	"cloud.google.com/go/iam/admin/apiv1"
 	"cloud.google.com/go/iam/admin/apiv1/adminpb"
 	"cloud.google.com/go/iam/apiv1/iampb"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/storage"
 	"github.com/rs/zerolog/log"
@@ -32,12 +32,13 @@ type iamHandle interface {
 // conform to the iamHandle interface.
 type secretIAMHandle struct {
 	client     *secretmanager.Client
+	projectID  string
 	resourceID string
 }
 
 func (h *secretIAMHandle) Policy(ctx context.Context) (*iam.Policy, error) {
 	policy, err := h.client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{
-		Resource: h.resourceID,
+		Resource: fmt.Sprintf("projects/%s/secrets/%s", h.projectID, h.resourceID),
 	})
 	if err != nil {
 		return nil, err
@@ -46,7 +47,57 @@ func (h *secretIAMHandle) Policy(ctx context.Context) (*iam.Policy, error) {
 }
 func (h *secretIAMHandle) SetPolicy(ctx context.Context, p *iam.Policy) error {
 	_, err := h.client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
-		Resource: h.resourceID,
+		Resource: fmt.Sprintf("projects/%s/secrets/%s", h.projectID, h.resourceID),
+		Policy:   p.InternalProto,
+	})
+	return err
+}
+
+// topicIAMHandle is an adapter to make the Topic IAM client
+// conform to the iamHandle interface.
+type topicIAMHandle struct {
+	client     *pubsub.Client
+	projectID  string
+	resourceID string
+}
+
+func (h *topicIAMHandle) Policy(ctx context.Context) (*iam.Policy, error) {
+	policy, err := h.client.TopicAdminClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{
+		Resource: fmt.Sprintf("projects/%s/topics/%s", h.projectID, h.resourceID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &iam.Policy{InternalProto: policy}, nil
+}
+func (h *topicIAMHandle) SetPolicy(ctx context.Context, p *iam.Policy) error {
+	_, err := h.client.TopicAdminClient.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
+		Resource: fmt.Sprintf("projects/%s/topics/%s", h.projectID, h.resourceID),
+		Policy:   p.InternalProto,
+	})
+	return err
+}
+
+// subscriptionIAMHandle is an adapter to make the Topic IAM client
+// conform to the iamHandle interface.
+type subscriptionIAMHandle struct {
+	client     *pubsub.Client
+	projectID  string
+	resourceID string
+}
+
+func (h *subscriptionIAMHandle) Policy(ctx context.Context) (*iam.Policy, error) {
+	policy, err := h.client.SubscriptionAdminClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{
+		Resource: fmt.Sprintf("projects/%s/subscriptions/%s", h.projectID, h.resourceID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &iam.Policy{InternalProto: policy}, nil
+}
+func (h *subscriptionIAMHandle) SetPolicy(ctx context.Context, p *iam.Policy) error {
+	_, err := h.client.SubscriptionAdminClient.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{
+		Resource: fmt.Sprintf("projects/%s/subscriptions/%s", h.projectID, h.resourceID),
 		Policy:   p.InternalProto,
 	})
 	return err
@@ -165,9 +216,17 @@ func (c *GoogleIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBind
 	case "project":
 		return nil
 	case "pubsub_topic":
-		handle = c.pubsubClient.Topic(binding.ResourceID).IAM()
+		handle = &topicIAMHandle{
+			client:     c.pubsubClient,
+			projectID:  c.projectID,
+			resourceID: binding.ResourceID,
+		}
 	case "pubsub_subscription":
-		handle = c.pubsubClient.Subscription(binding.ResourceID).IAM()
+		handle = &subscriptionIAMHandle{
+			client:     c.pubsubClient,
+			projectID:  c.projectID,
+			resourceID: binding.ResourceID,
+		}
 	case "bigquery_table":
 		ids := strings.Split(binding.ResourceID, ":")
 		if len(ids) != 2 {
@@ -179,7 +238,8 @@ func (c *GoogleIAMClient) ApplyIAMPolicy(ctx context.Context, binding PolicyBind
 	case "secret":
 		handle = &secretIAMHandle{
 			client:     c.secretsClient,
-			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
+			projectID:  c.projectID,
+			resourceID: binding.ResourceID,
 		}
 	case "cloudrun_service":
 		// This case is intentionally additive. We loop through the desired bindings
@@ -254,10 +314,18 @@ func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAM
 			handle = c.bigqueryAdminClient.client.Dataset(ids[0]).Table(ids[1]).IAM()
 			err = addStandardIAMBinding(ctx, handle, binding.Role, member)
 		case "pubsub_topic":
-			handle = c.pubsubClient.Topic(binding.ResourceID).IAM()
+			handle = &topicIAMHandle{
+				client:     c.pubsubClient,
+				projectID:  c.projectID,
+				resourceID: binding.ResourceID,
+			}
 			err = addStandardIAMBinding(ctx, handle, binding.Role, member)
 		case "pubsub_subscription":
-			handle = c.pubsubClient.Subscription(binding.ResourceID).IAM()
+			handle = &subscriptionIAMHandle{
+				client:     c.pubsubClient,
+				projectID:  c.projectID,
+				resourceID: binding.ResourceID,
+			}
 			err = addStandardIAMBinding(ctx, handle, binding.Role, member)
 		case "gcs_bucket":
 			handle = c.storageClient.Bucket(binding.ResourceID).IAM()
@@ -265,7 +333,8 @@ func (c *GoogleIAMClient) AddResourceIAMBinding(ctx context.Context, binding IAM
 		case "secret":
 			handle = &secretIAMHandle{
 				client:     c.secretsClient,
-				resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
+				projectID:  c.projectID,
+				resourceID: binding.ResourceID,
 			}
 			err = addStandardIAMBinding(ctx, handle, binding.Role, member)
 		case "cloudrun_service":
@@ -374,14 +443,12 @@ func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding I
 				return found, nil // Return immediately on success.
 			}
 		case "secret":
-			resourceName := fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID)
-			rawPolicy, getErr := c.secretsClient.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
-			if getErr != nil {
-				err = getErr // Assign to the outer err variable to be handled by the retry loop.
-			} else {
-				// If we got the policy, wrap it in the helper type.
-				policy = &iam.Policy{InternalProto: rawPolicy}
+			handle := &secretIAMHandle{
+				client:     c.secretsClient,
+				projectID:  c.projectID,
+				resourceID: binding.ResourceID,
 			}
+			policy, err = handle.Policy(ctx)
 		case "bigquery_dataset":
 			found, err = c.bigqueryAdminClient.CheckDatasetIAMBinding(ctx, binding.ResourceID, binding.Role, member)
 			if err == nil {
@@ -394,9 +461,19 @@ func (c *GoogleIAMClient) CheckResourceIAMBinding(ctx context.Context, binding I
 			}
 			policy, err = c.bigqueryAdminClient.client.Dataset(ids[0]).Table(ids[1]).IAM().Policy(ctx)
 		case "pubsub_topic":
-			policy, err = c.pubsubClient.Topic(binding.ResourceID).IAM().Policy(ctx)
+			handle := &topicIAMHandle{
+				client:     c.pubsubClient,
+				projectID:  c.projectID,
+				resourceID: binding.ResourceID,
+			}
+			policy, err = handle.Policy(ctx)
 		case "pubsub_subscription":
-			policy, err = c.pubsubClient.Subscription(binding.ResourceID).IAM().Policy(ctx)
+			handle := &subscriptionIAMHandle{
+				client:     c.pubsubClient,
+				projectID:  c.projectID,
+				resourceID: binding.ResourceID,
+			}
+			policy, err = handle.Policy(ctx)
 		case "gcs_bucket":
 			policy, err = c.storageClient.Bucket(binding.ResourceID).IAM().Policy(ctx)
 		case "cloudrun_service":
@@ -452,15 +529,24 @@ func (c *GoogleIAMClient) RemoveResourceIAMBinding(ctx context.Context, binding 
 		}
 		handle = c.bigqueryAdminClient.client.Dataset(ids[0]).Table(ids[1]).IAM()
 	case "pubsub_topic":
-		handle = c.pubsubClient.Topic(binding.ResourceID).IAM()
+		handle = &topicIAMHandle{
+			client:     c.pubsubClient,
+			projectID:  c.projectID,
+			resourceID: binding.ResourceID,
+		}
 	case "pubsub_subscription":
-		handle = c.pubsubClient.Subscription(binding.ResourceID).IAM()
+		handle = &subscriptionIAMHandle{
+			client:     c.pubsubClient,
+			projectID:  c.projectID,
+			resourceID: binding.ResourceID,
+		}
 	case "gcs_bucket":
 		handle = c.storageClient.Bucket(binding.ResourceID).IAM()
 	case "secret":
 		handle = &secretIAMHandle{
 			client:     c.secretsClient,
-			resourceID: fmt.Sprintf("projects/%s/secrets/%s", c.projectID, binding.ResourceID),
+			projectID:  c.projectID,
+			resourceID: binding.ResourceID,
 		}
 	case "cloudrun_service":
 		// REFACTOR: Wired up the existing removal logic.

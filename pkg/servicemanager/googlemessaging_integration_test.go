@@ -8,13 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestMessagingManager_Integration tests the manager against a live Pub/Sub emulator.
@@ -42,20 +45,15 @@ func TestMessagingManager_Integration(t *testing.T) {
 
 	// Set up the Pub/Sub emulator and a client connected to it.
 	t.Log("Setting up Pub/Sub emulator...")
-	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
-	psClient, err := pubsub.NewClient(ctx, projectID, psConnection.ClientOptions...)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		closeErr := psClient.Close()
-		if closeErr != nil {
-			t.Logf("Error closing Pub/Sub client: %v", closeErr)
-		}
-	})
+	// REFACTOR: Use the updated GetDefaultPubsubConfig.
+	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID))
 
-	// Create the MessagingManager instance.
+	// Create the MessagingManager instance using the v2 adapter.
 	logger := zerolog.New(zerolog.NewConsoleWriter())
 	environment := servicemanager.Environment{ProjectID: projectID}
-	messagingAdapter := servicemanager.MessagingClientFromPubsubClient(psClient)
+	// REFACTOR: Use the new factory to create the v2-compliant messaging client.
+	messagingAdapter, err := servicemanager.CreateGoogleMessagingClient(ctx, projectID, psConnection.ClientOptions...)
+	require.NoError(t, err)
 	manager, err := servicemanager.NewMessagingManager(messagingAdapter, logger, environment)
 	require.NoError(t, err)
 
@@ -74,15 +72,21 @@ func TestMessagingManager_Integration(t *testing.T) {
 	// Phase 2: VERIFY Resources Exist
 	t.Run("VerifyResourcesExist", func(t *testing.T) {
 		t.Log("--- Verifying resources exist in emulator ---")
-		topic := psClient.Topic(topicName)
-		exists, existsErr := topic.Exists(ctx)
-		require.NoError(t, existsErr)
-		assert.True(t, exists, "Pub/Sub topic should exist after creation")
+		// REFACTOR: Verification must now use a raw v2 client to check the emulator state.
+		rawPSClient, err := pubsub.NewClient(ctx, projectID, psConnection.ClientOptions...)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = rawPSClient.Close()
+		})
 
-		sub := psClient.Subscription(subName)
-		exists, existsErr = sub.Exists(ctx)
-		require.NoError(t, existsErr)
-		assert.True(t, exists, "Pub/Sub subscription should exist after creation")
+		topicAdmin := rawPSClient.TopicAdminClient
+		_, err = topicAdmin.GetTopic(ctx, &pubsubpb.GetTopicRequest{Topic: fmt.Sprintf("projects/%s/topics/%s", projectID, topicName)})
+		require.NoError(t, err, "Topic should exist in the emulator")
+
+		subAdmin := rawPSClient.SubscriptionAdminClient
+		_, err = subAdmin.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{Subscription: fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subName)})
+		require.NoError(t, err, "Subscription should exist in the emulator")
+
 		t.Log("--- Verification successful, all resources exist ---")
 	})
 
@@ -97,13 +101,22 @@ func TestMessagingManager_Integration(t *testing.T) {
 	// Phase 4: VERIFY Resources are Deleted
 	t.Run("VerifyResourcesDeleted", func(t *testing.T) {
 		t.Log("--- Verifying resources are deleted from emulator ---")
-		topicExists, err := psClient.Topic(topicName).Exists(ctx)
+		rawPSClient, err := pubsub.NewClient(ctx, projectID, psConnection.ClientOptions...)
 		require.NoError(t, err)
-		assert.False(t, topicExists, "Pub/Sub topic should NOT exist after teardown")
+		t.Cleanup(func() {
+			_ = rawPSClient.Close()
+		})
 
-		subExists, err := psClient.Subscription(subName).Exists(ctx)
-		require.NoError(t, err)
-		assert.False(t, subExists, "Pub/Sub subscription should NOT exist after teardown")
+		topicAdmin := rawPSClient.TopicAdminClient
+		_, err = topicAdmin.GetTopic(ctx, &pubsubpb.GetTopicRequest{Topic: fmt.Sprintf("projects/%s/topics/%s", projectID, topicName)})
+		require.Error(t, err)
+		assert.Equal(t, codes.NotFound, status.Code(err), "Topic should NOT exist after teardown")
+
+		subAdmin := rawPSClient.SubscriptionAdminClient
+		_, err = subAdmin.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{Subscription: fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subName)})
+		require.Error(t, err)
+		assert.Equal(t, codes.NotFound, status.Code(err), "Subscription should NOT exist after teardown")
+
 		t.Log("--- Deletion verification successful ---")
 	})
 }

@@ -8,8 +8,12 @@ import (
 	"sync"
 
 	"github.com/rs/zerolog"
-	"google.golang.org/api/googleapi"
 )
+
+// ErrBucketNotExist is a standard error returned when a storage bucket is not found.
+// This allows the manager to check for this condition without depending on a specific
+// cloud provider's error types.
+var ErrBucketNotExist = errors.New("storage: bucket does not exist")
 
 // StorageManager handles the creation, update, verification, and deletion of storage buckets.
 // It orchestrates these operations through a generic StorageClient interface.
@@ -29,27 +33,6 @@ func NewStorageManager(client StorageClient, logger zerolog.Logger, environment 
 		logger:      logger.With().Str("component", "StorageManager").Logger(),
 		environment: environment,
 	}, nil
-}
-
-// isBucketNotExist checks for various forms of "not found" errors from the storage client.
-// This is necessary because different operations can return different error types for the same logical condition.
-func isBucketNotExist(err error) bool {
-	// iterator.Done is the standard error when a resource is not found via an iterator.
-	if errors.Is(err, Done) {
-		return true
-	}
-	// The Google Cloud API often returns a specific error type with an HTTP 404 status code.
-	var gapiErr *googleapi.Error
-	if errors.As(err, &gapiErr) {
-		if gapiErr.Code == 404 {
-			return true
-		}
-	}
-	// As a fallback, check for the common error string from the GCS client.
-	if err != nil && strings.Contains(err.Error(), "storage: bucket doesn't exist") {
-		return true
-	}
-	return false
 }
 
 // CreateResources creates new buckets or updates existing ones based on the provided spec.
@@ -93,8 +76,8 @@ func (sm *StorageManager) CreateResources(ctx context.Context, resources CloudRe
 				return
 			}
 
-			// If the error is anything other than "not found," it's an unexpected issue.
-			if !isBucketNotExist(err) {
+			// If the error is anything other than our generic "not found" error, it's an unexpected issue.
+			if !errors.Is(err, ErrBucketNotExist) {
 				errChan <- fmt.Errorf("failed to check existence of bucket '%s': %w", cfg.Name, err)
 				return
 			}
@@ -166,7 +149,7 @@ func (sm *StorageManager) Teardown(ctx context.Context, resources CloudResources
 
 			bucketHandle := sm.client.Bucket(cfg.Name)
 			_, err := bucketHandle.Attrs(ctx)
-			if isBucketNotExist(err) {
+			if errors.Is(err, ErrBucketNotExist) {
 				log.Info().Msg("Bucket does not exist, skipping deletion.")
 				return
 			}
@@ -221,7 +204,7 @@ func (sm *StorageManager) Verify(ctx context.Context, resources CloudResourcesSp
 			bucketHandle := sm.client.Bucket(cfg.Name)
 			_, err := bucketHandle.Attrs(ctx)
 
-			if isBucketNotExist(err) {
+			if errors.Is(err, ErrBucketNotExist) {
 				errChan <- fmt.Errorf("bucket '%s' not found", cfg.Name)
 			} else if err != nil {
 				errChan <- fmt.Errorf("failed to verify bucket '%s': %w", cfg.Name, err)

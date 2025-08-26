@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/google/uuid"
@@ -83,9 +84,16 @@ func TestIAMManager_FullFlow(t *testing.T) {
 	psClient, err := pubsub.NewClient(ctx, projectID)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })
-	topic, err := psClient.CreateTopic(ctx, testTopicName)
+
+	qualifiedTopicName := fmt.Sprintf("projects/%s/topics/%s", projectID, testTopicName)
+	topic, err := psClient.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name: qualifiedTopicName,
+	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = topic.Delete(context.Background()) })
+	t.Cleanup(func() {
+		_ = psClient.TopicAdminClient.DeleteTopic(context.Background(),
+			&pubsubpb.DeleteTopicRequest{Topic: topic.Name})
+	})
 
 	secretClient, err := secretmanager.NewClient(ctx)
 	require.NoError(t, err)

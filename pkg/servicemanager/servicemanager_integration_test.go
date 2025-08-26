@@ -80,7 +80,7 @@ func TestServiceManager_Integration_FullLifecycle(t *testing.T) {
 	t.Cleanup(func() { _ = gcsClient.Close() })
 
 	// Pub/Sub
-	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID, nil))
+	psConnection := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID))
 	psClient, err := servicemanager.CreateGoogleMessagingClient(ctx, projectID, psConnection.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = psClient.Close() })

@@ -3,11 +3,16 @@ package servicemanager
 import (
 	"context"
 	"fmt"
-	"reflect"
+	"strings"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 const (
@@ -20,48 +25,47 @@ const (
 
 // --- Conversion Helpers ---
 
-// fromGCPTopicConfig converts a Google Pub/Sub topic configuration
+// fromGCPTopic converts a Google Pub/Sub topic protobuf
 // into the generic TopicConfig used by the ServiceManager.
-func fromGCPTopicConfig(t *pubsub.TopicConfig) *TopicConfig {
+func fromGCPTopic(t *pubsubpb.Topic) *TopicConfig {
+	// The name from the protobuf is the fully qualified name. We only want the ID.
+	parts := strings.Split(t.Name, "/")
+	name := parts[len(parts)-1]
 	return &TopicConfig{
 		CloudResource: CloudResource{
-			Name:   t.ID(),
+			Name:   name,
 			Labels: t.Labels,
 		},
 	}
 }
 
-// fromGCPSubscriptionConfig converts a Google Pub/Sub subscription configuration
+// fromGCPSubscription converts a Google Pub/Sub subscription protobuf
 // into the generic SubscriptionConfig used by the ServiceManager.
-func fromGCPSubscriptionConfig(s *pubsub.SubscriptionConfig) *SubscriptionConfig {
+func fromGCPSubscription(s *pubsubpb.Subscription) *SubscriptionConfig {
+	// The names from the protobuf are fully qualified. We only want the IDs.
+	nameParts := strings.Split(s.Name, "/")
+	name := nameParts[len(nameParts)-1]
+	topicParts := strings.Split(s.Topic, "/")
+	topic := topicParts[len(topicParts)-1]
+
 	spec := &SubscriptionConfig{
 		CloudResource: CloudResource{
-			Name:   s.ID(),
+			Name:   name,
 			Labels: s.Labels,
 		},
-		Topic:              s.Topic.ID(),
-		AckDeadlineSeconds: int(s.AckDeadline.Seconds()),
-		MessageRetention:   Duration(s.RetentionDuration),
+		Topic:              topic,
+		AckDeadlineSeconds: int(s.AckDeadlineSeconds),
 	}
 
-	minimumBackoff := time.Second * 10
-	maximumBackoff := time.Second * 600
+	if s.MessageRetentionDuration != nil {
+		spec.MessageRetention = Duration(s.MessageRetentionDuration.AsDuration())
+	}
 
-	// REFACTOR_NOTE: Correctly handling the optional RetryPolicy.
-	// The s.RetryPolicy from the Google client is a pointer and can be nil.
-	// If it's not nil, we convert its fields to our Duration type for comparison.
 	if s.RetryPolicy != nil {
-		if s.RetryPolicy.MinimumBackoff != nil {
-			minimumBackoff = s.RetryPolicy.MinimumBackoff.(time.Duration)
+		spec.RetryPolicy = &RetryPolicySpec{
+			MinimumBackoff: Duration(s.RetryPolicy.MinimumBackoff.AsDuration()),
+			MaximumBackoff: Duration(s.RetryPolicy.MaximumBackoff.AsDuration()),
 		}
-		if s.RetryPolicy.MaximumBackoff != nil {
-			maximumBackoff = s.RetryPolicy.MaximumBackoff.(time.Duration)
-		}
-	}
-
-	spec.RetryPolicy = &RetryPolicySpec{
-		MinimumBackoff: Duration(minimumBackoff),
-		MaximumBackoff: Duration(maximumBackoff),
 	}
 
 	return spec
@@ -69,157 +73,164 @@ func fromGCPSubscriptionConfig(s *pubsub.SubscriptionConfig) *SubscriptionConfig
 
 // --- Adapter Implementations ---
 
-// gcpTopicAdapter wraps a *pubsub.Topic to satisfy the MessagingTopic interface.
-type gcpTopicAdapter struct{ topic *pubsub.Topic }
-
-func (a *gcpTopicAdapter) ID() string                               { return a.topic.ID() }
-func (a *gcpTopicAdapter) Exists(ctx context.Context) (bool, error) { return a.topic.Exists(ctx) }
-func (a *gcpTopicAdapter) Delete(ctx context.Context) error         { return a.topic.Delete(ctx) }
-func (a *gcpTopicAdapter) Update(ctx context.Context, cfg TopicConfig) (*TopicConfig, error) {
-	gcpUpdate := pubsub.TopicConfigToUpdate{
-		Labels: cfg.Labels,
-	}
-	updatedCfg, err := a.topic.Update(ctx, gcpUpdate)
-	if err != nil {
-		return nil, err
-	}
-	return fromGCPTopicConfig(&updatedCfg), nil
+// gcpTopicAdapter wraps a v2 pubsub.Client to satisfy the MessagingTopic interface for admin tasks.
+type gcpTopicAdapter struct {
+	client *pubsub.Client
+	name   string // Fully qualified name
 }
 
-// gcpSubscriptionAdapter wraps a *pubsub.Subscription to satisfy the MessagingSubscription interface.
-type gcpSubscriptionAdapter struct{ sub *pubsub.Subscription }
+func (a *gcpTopicAdapter) ID() string {
+	parts := strings.Split(a.name, "/")
+	return parts[len(parts)-1]
+}
 
-func (a *gcpSubscriptionAdapter) ID() string                               { return a.sub.ID() }
-func (a *gcpSubscriptionAdapter) Exists(ctx context.Context) (bool, error) { return a.sub.Exists(ctx) }
-func (a *gcpSubscriptionAdapter) Delete(ctx context.Context) error         { return a.sub.Delete(ctx) }
+func (a *gcpTopicAdapter) Exists(ctx context.Context) (bool, error) {
+	_, err := a.client.TopicAdminClient.GetTopic(ctx, &pubsubpb.GetTopicRequest{Topic: a.name})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
 
-// Update contains the "fetch, compare, execute" logic specific to Google Pub/Sub.
-// It checks the current state of the subscription and applies a minimal update if needed.
+func (a *gcpTopicAdapter) Delete(ctx context.Context) error {
+	return a.client.TopicAdminClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{Topic: a.name})
+}
+
+func (a *gcpTopicAdapter) Update(ctx context.Context, cfg TopicConfig) (*TopicConfig, error) {
+	return nil, fmt.Errorf("update not implemented for v2 topic adapter")
+}
+
+// gcpSubscriptionAdapter wraps a v2 pubsub.Client to satisfy the MessagingSubscription interface for admin tasks.
+type gcpSubscriptionAdapter struct {
+	client *pubsub.Client
+	name   string // Fully qualified name
+}
+
+func (a *gcpSubscriptionAdapter) ID() string {
+	parts := strings.Split(a.name, "/")
+	return parts[len(parts)-1]
+}
+
+func (a *gcpSubscriptionAdapter) Exists(ctx context.Context) (bool, error) {
+	_, err := a.client.SubscriptionAdminClient.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{Subscription: a.name})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (a *gcpSubscriptionAdapter) Delete(ctx context.Context) error {
+	return a.client.SubscriptionAdminClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: a.name})
+}
+
 func (a *gcpSubscriptionAdapter) Update(ctx context.Context, spec SubscriptionConfig) (*SubscriptionConfig, error) {
-	currentGcpCfg, err := a.sub.Config(ctx)
+	currentPbSub, err := a.client.SubscriptionAdminClient.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{Subscription: a.name})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current config for subscription '%s': %w", spec.Name, err)
 	}
-	currentCfg := fromGCPSubscriptionConfig(&currentGcpCfg)
 
-	gcpUpdate := pubsub.SubscriptionConfigToUpdate{}
+	updateReq := &pubsubpb.UpdateSubscriptionRequest{
+		Subscription: &pubsubpb.Subscription{Name: a.name},
+		UpdateMask:   &fieldmaskpb.FieldMask{},
+	}
 	needsUpdate := false
 
-	// Compare AckDeadline.
-	if spec.AckDeadlineSeconds > 0 && spec.AckDeadlineSeconds != currentCfg.AckDeadlineSeconds {
-		gcpUpdate.AckDeadline = time.Duration(spec.AckDeadlineSeconds) * time.Second
+	if spec.AckDeadlineSeconds > 0 && int32(spec.AckDeadlineSeconds) != currentPbSub.AckDeadlineSeconds {
+		updateReq.Subscription.AckDeadlineSeconds = int32(spec.AckDeadlineSeconds)
+		updateReq.UpdateMask.Paths = append(updateReq.UpdateMask.Paths, "ack_deadline_seconds")
 		needsUpdate = true
 	}
 
-	// Compare MessageRetention.
-	if spec.MessageRetention > 0 && spec.MessageRetention != currentCfg.MessageRetention {
-		gcpUpdate.RetentionDuration = time.Duration(spec.MessageRetention)
-		needsUpdate = true
-	}
-
-	// Compare Labels.
-	if !reflect.DeepEqual(spec.Labels, currentCfg.Labels) {
-		gcpUpdate.Labels = spec.Labels
-		needsUpdate = true
-	}
-
-	// Compare RetryPolicy.
-	if !reflect.DeepEqual(spec.RetryPolicy, currentCfg.RetryPolicy) {
-		if spec.RetryPolicy != nil {
-			gcpUpdate.RetryPolicy = &pubsub.RetryPolicy{
-				MinimumBackoff: time.Duration(spec.RetryPolicy.MinimumBackoff),
-				MaximumBackoff: time.Duration(spec.RetryPolicy.MaximumBackoff),
-			}
-		} else {
-			// A nil spec policy means we are clearing the existing one.
-			gcpUpdate.RetryPolicy = &pubsub.RetryPolicy{}
-		}
+	if spec.MessageRetention > 0 && time.Duration(spec.MessageRetention) != currentPbSub.MessageRetentionDuration.AsDuration() {
+		updateReq.Subscription.MessageRetentionDuration = durationpb.New(time.Duration(spec.MessageRetention))
+		updateReq.UpdateMask.Paths = append(updateReq.UpdateMask.Paths, "message_retention_duration")
 		needsUpdate = true
 	}
 
 	if !needsUpdate {
-		// Nothing to do, return the current config.
-		return currentCfg, nil
+		return fromGCPSubscription(currentPbSub), nil
 	}
 
-	updatedGcpCfg, err := a.sub.Update(ctx, gcpUpdate)
+	updatedPbSub, err := a.client.SubscriptionAdminClient.UpdateSubscription(ctx, updateReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to apply update to subscription '%s': %w", spec.Name, err)
 	}
-	return fromGCPSubscriptionConfig(&updatedGcpCfg), nil
+	return fromGCPSubscription(updatedPbSub), nil
 }
 
-// Config fetches the current configuration of the subscription.
-func (a *gcpSubscriptionAdapter) Config(ctx context.Context) (*SubscriptionConfig, error) {
-	gcpConfig, err := a.sub.Config(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return fromGCPSubscriptionConfig(&gcpConfig), nil
+// gcpMessagingClientAdapter wraps a v2 pubsub.Client to satisfy the MessagingClient interface.
+type gcpMessagingClientAdapter struct {
+	client    *pubsub.Client
+	projectID string
 }
-
-// gcpMessagingClientAdapter wraps a *pubsub.Client to satisfy the MessagingClient interface.
-type gcpMessagingClientAdapter struct{ client *pubsub.Client }
 
 func (a *gcpMessagingClientAdapter) Topic(id string) MessagingTopic {
-	return &gcpTopicAdapter{topic: a.client.Topic(id)}
+	fqn := fmt.Sprintf("projects/%s/topics/%s", a.projectID, id)
+	return &gcpTopicAdapter{client: a.client, name: fqn}
 }
 
 func (a *gcpMessagingClientAdapter) Subscription(id string) MessagingSubscription {
-	return &gcpSubscriptionAdapter{sub: a.client.Subscription(id)}
+	fqn := fmt.Sprintf("projects/%s/subscriptions/%s", a.projectID, id)
+	return &gcpSubscriptionAdapter{client: a.client, name: fqn}
 }
 
 func (a *gcpMessagingClientAdapter) CreateTopic(ctx context.Context, topicID string) (MessagingTopic, error) {
-	t, err := a.client.CreateTopic(ctx, topicID)
-	if err != nil {
-		return nil, err
-	}
-	return &gcpTopicAdapter{topic: t}, nil
+	return a.CreateTopicWithConfig(ctx, TopicConfig{CloudResource: CloudResource{Name: topicID}})
 }
+
 func (a *gcpMessagingClientAdapter) CreateTopicWithConfig(ctx context.Context, topicSpec TopicConfig) (MessagingTopic, error) {
-	gcpConfig := &pubsub.TopicConfig{
+	topicName := fmt.Sprintf("projects/%s/topics/%s", a.projectID, topicSpec.Name)
+	_, err := a.client.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name:   topicName,
 		Labels: topicSpec.Labels,
-	}
-	t, err := a.client.CreateTopicWithConfig(ctx, topicSpec.Name, gcpConfig)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &gcpTopicAdapter{topic: t}, nil
+	return a.Topic(topicSpec.Name), nil
 }
 
 func (a *gcpMessagingClientAdapter) CreateSubscription(ctx context.Context, subSpec SubscriptionConfig) (MessagingSubscription, error) {
-	// The responsibility for checking topic existence lies with the MessagingManager.
-	// The adapter simply performs the creation call.
-	topic := a.client.Topic(subSpec.Topic)
+	topicName := fmt.Sprintf("projects/%s/topics/%s", a.projectID, subSpec.Topic)
+	subName := fmt.Sprintf("projects/%s/subscriptions/%s", a.projectID, subSpec.Name)
 
-	gcpConfig := pubsub.SubscriptionConfig{
-		Topic:             topic,
-		Labels:            subSpec.Labels,
-		RetentionDuration: time.Duration(subSpec.MessageRetention),
+	gcpConfig := &pubsubpb.Subscription{
+		Name:               subName,
+		Topic:              topicName,
+		Labels:             subSpec.Labels,
+		AckDeadlineSeconds: int32(subSpec.AckDeadlineSeconds),
 	}
-	if subSpec.AckDeadlineSeconds > 0 {
-		gcpConfig.AckDeadline = time.Duration(subSpec.AckDeadlineSeconds) * time.Second
+
+	if subSpec.MessageRetention > 0 {
+		gcpConfig.MessageRetentionDuration = durationpb.New(time.Duration(subSpec.MessageRetention))
 	}
+
 	if subSpec.RetryPolicy != nil {
-		gcpConfig.RetryPolicy = &pubsub.RetryPolicy{
-			MinimumBackoff: time.Duration(subSpec.RetryPolicy.MinimumBackoff),
-			MaximumBackoff: time.Duration(subSpec.RetryPolicy.MaximumBackoff),
+		gcpConfig.RetryPolicy = &pubsubpb.RetryPolicy{
+			MinimumBackoff: durationpb.New(time.Duration(subSpec.RetryPolicy.MinimumBackoff)),
+			MaximumBackoff: durationpb.New(time.Duration(subSpec.RetryPolicy.MaximumBackoff)),
 		}
 	}
 
-	s, err := a.client.CreateSubscription(ctx, subSpec.Name, gcpConfig)
+	_, err := a.client.SubscriptionAdminClient.CreateSubscription(ctx, gcpConfig)
 	if err != nil {
 		return nil, err
 	}
-	return &gcpSubscriptionAdapter{sub: s}, nil
+	return a.Subscription(subSpec.Name), nil
 }
 
-func (a *gcpMessagingClientAdapter) Close() error { return a.client.Close() }
+func (a *gcpMessagingClientAdapter) Close() error {
+	return a.client.Close()
+}
 
-// Validate checks the resource configuration against Google Pub/Sub specific rules.
 func (a *gcpMessagingClientAdapter) Validate(resources CloudResourcesSpec) error {
 	for _, sub := range resources.Subscriptions {
-		// If AckDeadlineSeconds is set, it must be within the allowed range.
 		if sub.AckDeadlineSeconds != 0 {
 			ackDuration := time.Duration(sub.AckDeadlineSeconds) * time.Second
 			if ackDuration < minAckDeadline || ackDuration > maxAckDeadline {
@@ -228,7 +239,6 @@ func (a *gcpMessagingClientAdapter) Validate(resources CloudResourcesSpec) error
 			}
 		}
 
-		// If MessageRetention is set, it must be within the allowed range.
 		if sub.MessageRetention != 0 {
 			retentionDuration := time.Duration(sub.MessageRetention)
 			if retentionDuration < minRetention || retentionDuration > maxRetention {
@@ -237,26 +247,20 @@ func (a *gcpMessagingClientAdapter) Validate(resources CloudResourcesSpec) error
 			}
 		}
 	}
-
 	return nil
 }
 
 // --- Factory Functions ---
 
-// CreateGoogleMessagingClient creates a real Pub/Sub client wrapped in the MessagingClient interface.
+// CreateGoogleMessagingClient creates a v2 client wrapped in the MessagingClient interface.
 func CreateGoogleMessagingClient(ctx context.Context, projectID string, clientOpts ...option.ClientOption) (MessagingClient, error) {
-	realClient, err := pubsub.NewClient(ctx, projectID, clientOpts...)
+	client, err := pubsub.NewClient(ctx, projectID, clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("pubsub.NewClient: %w", err)
 	}
-	return MessagingClientFromPubsubClient(realClient), nil
-}
 
-// MessagingClientFromPubsubClient wraps a concrete *pubsub.Client to satisfy the MessagingClient interface.
-// This is useful for creating an adapter from an already-existing client instance.
-func MessagingClientFromPubsubClient(client *pubsub.Client) MessagingClient {
-	if client == nil {
-		return nil
-	}
-	return &gcpMessagingClientAdapter{client: client}
+	return &gcpMessagingClientAdapter{
+		client:    client,
+		projectID: projectID,
+	}, nil
 }

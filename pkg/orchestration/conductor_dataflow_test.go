@@ -6,14 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
@@ -21,37 +21,8 @@ import (
 	"github.com/illmade-knight/go-test/auth"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
-
-// In orchestrator_dataflow_test.go
-
-// preflightServiceConfigs generates the service-specific YAML files and then
-// runs a validation command (e.g., `go test`) in each service's source
-// directory to ensure the generated config is valid and readable.
-func preflightServiceConfigs(t *testing.T, arch *servicemanager.MicroserviceArchitecture) {
-	t.Helper()
-
-	// 2. Iterate through each service
-	t.Log("Running local preflight validation for each service...")
-	for _, df := range arch.Dataflows {
-		for _, service := range df.Services {
-			if service.Deployment == nil {
-				continue
-			}
-			serviceDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
-
-			t.Logf("Validating service in directory: %s", serviceDir)
-
-			// Here we assume `go test` in the service's directory is sufficient
-			// to validate its ability to load the config.
-			cmd := exec.Command("go", "test", "./...")
-			cmd.Dir = serviceDir
-			output, err := cmd.CombinedOutput()
-			require.NoError(t, err, "Preflight validation failed for service '%s'. Output:\n%s", service.Name, string(output))
-		}
-	}
-	t.Log("✅ All services passed local preflight validation.")
-}
 
 // TestConductor_Dataflow_CloudIntegration is the final end-to-end cloud integration test for the Conductor.
 //
@@ -216,12 +187,28 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	t.Log("Pre-creating test resources...")
 	hydratedVerifyTopicName := nameMap[verifyTopicName]
 	hydratedTracerTopicName := nameMap[tracerTopicName]
-	verifyTopic, err := psClient.CreateTopic(ctx, hydratedVerifyTopicName)
+
+	// google is having a laugh with this nonsense isn't it???
+	qualifiedVerifyTopicName := fmt.Sprintf("projects/%s/topics/%s", projectID, hydratedVerifyTopicName)
+	qualifiedTracerTopicName := fmt.Sprintf("projects/%s/topics/%s", projectID, hydratedTracerTopicName)
+
+	verifyTopic, err := psClient.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name: qualifiedVerifyTopicName,
+	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = verifyTopic.Delete(context.Background()) })
-	tracerTopic, err := psClient.CreateTopic(ctx, hydratedTracerTopicName)
+	t.Cleanup(
+		func() {
+			_ = psClient.TopicAdminClient.DeleteTopic(context.Background(), &pubsubpb.DeleteTopicRequest{Topic: verifyTopic.Name})
+		})
+
+	tracerTopic, err := psClient.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name: qualifiedTracerTopicName,
+	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = tracerTopic.Delete(context.Background()) })
+	t.Cleanup(
+		func() {
+			_ = psClient.TopicAdminClient.DeleteTopic(context.Background(), &pubsubpb.DeleteTopicRequest{Topic: tracerTopic.Name})
+		})
 	t.Log("Test resources created successfully.")
 
 	// --- Act ---
@@ -242,8 +229,11 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// 3. NEW: Run the local preflight check before any cloud deployment.
 	//preflightServiceConfigs(t, arch)
 
-	_, verifySub := createVerificationResources(t, ctx, psClient, hydratedVerifyTopicName)
-	validationChan := startVerificationListener(t, ctx, verifySub, 2)
+	verifySubName := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
+	qualifiedVerifySubName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, verifySubName)
+	verifySub := createVerificationResources(t, ctx, psClient, qualifiedVerifySubName, verifyTopic.Name)
+	subscriber := psClient.Subscriber(verifySub.Name)
+	validationChan := startVerificationListener(t, ctx, subscriber, 2)
 
 	t.Log("Running Conductor to execute parallel build and deploy workflow...")
 	err = conductor.Run(ctx)
@@ -262,7 +252,7 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 }
 
 // startVerificationListener is a test helper that listens on a subscription for a specified number of messages.
-func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Subscription, expectedCount int) <-chan error {
+func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Subscriber, expectedCount int) <-chan error {
 	t.Helper()
 	validationChan := make(chan error, 1)
 	var receivedCount atomic.Int32
@@ -289,24 +279,20 @@ func startVerificationListener(t *testing.T, ctx context.Context, sub *pubsub.Su
 }
 
 // createVerificationResources is a test helper that creates the ephemeral Pub/Sub resources needed by the test runner.
-func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, hydratedTopicName string) (*pubsub.Topic, *pubsub.Subscription) {
+func createVerificationResources(t *testing.T, ctx context.Context, client *pubsub.Client, subName, hydratedTopicName string) *pubsubpb.Subscription {
 	t.Helper()
-	verifyTopic := client.Topic(hydratedTopicName)
-	exists, err := verifyTopic.Exists(ctx)
-	require.NoError(t, err)
-	require.True(t, exists)
 
-	subID := fmt.Sprintf("verify-sub-%s", uuid.New().String()[:8])
-	verifySub, err := client.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-		Topic:             verifyTopic,
-		AckDeadline:       20 * time.Second,
-		RetentionDuration: 10 * time.Minute,
-	})
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		_ = verifySub.Delete(context.Background())
+	verifySub, err := client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:               subName,
+		Topic:              hydratedTopicName,
+		AckDeadlineSeconds: 10,
+		MessageRetentionDuration: &durationpb.Duration{
+			Seconds: 10 * 60,
+			Nanos:   0,
+		},
 	})
 
-	return verifyTopic, verifySub
+	require.NoError(t, err)
+
+	return verifySub
 }

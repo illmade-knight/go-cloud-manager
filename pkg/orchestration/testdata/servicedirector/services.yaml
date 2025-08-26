@@ -2,12 +2,12 @@ name: dataflow-test
 project_id: gemini-power-test
 region: us-central1
 service_manager_spec:
-    name: sd-cbe10116
-    service_account: it-1754494175@gemini-power-test.iam.gserviceaccount.com
+    name: sd-209eee15
+    service_account: it-iam1@gemini-power-test.iam.gserviceaccount.com
     deployment:
         source_path: C:\Users\tim\Documents\Dev\go-cloud-manager\pkg\orchestration\testdata
         buildable_module_path: servicedirector
-        image: us-central1-docker.pkg.dev/gemini-power-test/test-images/sd-cbe10116:e3084451
+        image: us-central1-docker.pkg.dev/gemini-power-test/test-images/sd-209eee15:c50966a5
         image_repo: test-images
         service_url: ""
         region: us-central1
@@ -17,14 +17,14 @@ service_manager_spec:
         environment_vars:
             DATAFLOW_NAME: conductor
             PROJECT_ID: gemini-power-test
-            SERVICE_NAME: sd-cbe10116
+            SERVICE_NAME: sd-209eee15
     command_topic:
-        name: command-topic-cbe10116
+        name: command-topic-209eee15
         lookup:
             key: command-topic-id
             method: yaml
     completion_topic:
-        name: completion-topic-cbe10116
+        name: completion-topic-209eee15
         lookup:
             key: completion-topic-id
             method: yaml
@@ -34,18 +34,18 @@ dataflows:
         description: Auto-generated infrastructure resources for the ServiceDirector (sd).
         resources:
             topics:
-                - name: command-topic-cbe10116
-                - name: completion-topic-cbe10116
+                - name: command-topic-209eee15
+                - name: completion-topic-209eee15
                   producer_service:
-                    name: sd-cbe10116
+                    name: sd-209eee15
                     lookup:
                         key: completion-topic-id
                         method: yaml
             subscriptions:
-                - name: command-topic-sub-cbe10116
-                  topic: command-topic-cbe10116
+                - name: command-topic-sub-209eee15
+                  topic: command-topic-209eee15
                   consumer_service:
-                    name: sd-cbe10116
+                    name: sd-209eee15
                     lookup:
                         key: command-subscription-id
                         method: yaml
@@ -53,13 +53,13 @@ dataflows:
             strategy: permanent
     tracer-flow:
         services:
-            tracer-publisher-cbe10116:
-                name: tracer-publisher-cbe10116
-                service_account: it-1754499470@gemini-power-test.iam.gserviceaccount.com
+            tracer-publisher-209eee15:
+                name: tracer-publisher-209eee15
+                service_account: it-1754488961@gemini-power-test.iam.gserviceaccount.com
                 deployment:
                     source_path: C:\Users\tim\Documents\Dev\go-cloud-manager\pkg\orchestration\testdata
                     buildable_module_path: tracer-publisher
-                    image: us-central1-docker.pkg.dev/gemini-power-test/test-images/tracer-publisher-cbe10116:b03bdf5c
+                    image: us-central1-docker.pkg.dev/gemini-power-test/test-images/tracer-publisher-209eee15:8d0c3bd7
                     image_repo: test-images
                     service_url: ""
                     region: us-central1
@@ -69,16 +69,16 @@ dataflows:
                     environment_vars:
                         DATAFLOW_NAME: tracer-flow
                         PROJECT_ID: gemini-power-test
-                        SERVICE_NAME: tracer-publisher-cbe10116
+                        SERVICE_NAME: tracer-publisher-209eee15
                 dependencies:
-                    - sd-cbe10116
-            tracer-subscriber-cbe10116:
-                name: tracer-subscriber-cbe10116
-                service_account: it-1754488951@gemini-power-test.iam.gserviceaccount.com
+                    - sd-209eee15
+            tracer-subscriber-209eee15:
+                name: tracer-subscriber-209eee15
+                service_account: it-1754498515@gemini-power-test.iam.gserviceaccount.com
                 deployment:
                     source_path: C:\Users\tim\Documents\Dev\go-cloud-manager\pkg\orchestration\testdata
                     buildable_module_path: tracer-subscriber
-                    image: us-central1-docker.pkg.dev/gemini-power-test/test-images/tracer-subscriber-cbe10116:5d9346b9
+                    image: us-central1-docker.pkg.dev/gemini-power-test/test-images/tracer-subscriber-209eee15:0169cbf8
                     image_repo: test-images
                     service_url: ""
                     region: us-central1
@@ -88,28 +88,28 @@ dataflows:
                     environment_vars:
                         DATAFLOW_NAME: tracer-flow
                         PROJECT_ID: gemini-power-test
-                        SERVICE_NAME: tracer-subscriber-cbe10116
+                        SERVICE_NAME: tracer-subscriber-209eee15
                 dependencies:
-                    - sd-cbe10116
+                    - sd-209eee15
         resources:
             topics:
-                - name: tracer-topic-cbe10116
+                - name: tracer-topic-209eee15
                   producer_service:
-                    name: tracer-publisher-cbe10116
+                    name: tracer-publisher-209eee15
                     lookup:
                         key: tracer-topic-id
                         method: yaml
-                - name: verify-topic-cbe10116
+                - name: verify-topic-209eee15
                   producer_service:
-                    name: tracer-subscriber-cbe10116
+                    name: tracer-subscriber-209eee15
                     lookup:
                         key: verify-topic-id
                         method: yaml
             subscriptions:
-                - name: tracer-sub-cbe10116
-                  topic: tracer-topic-cbe10116
+                - name: tracer-sub-209eee15
+                  topic: tracer-topic-209eee15
                   consumer_service:
-                    name: tracer-subscriber-cbe10116
+                    name: tracer-subscriber-209eee15
                     lookup:
                         key: tracer-subscription-id
                         method: yaml

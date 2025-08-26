@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
-	"google.golang.org/api/option"
+	"net/http"
+	"strings"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
-// gcsBucketHandle is an internal interface that abstracts the methods we need from
-// *storage.BucketHandle. This is the key to allowing mocks to be used in testing.
-// REFACTOR_NOTE: The IAM() method has been correctly removed from this interface.
+// gcsBucketHandle is an internal interface abstracting the `*storage.BucketHandle`
+// methods required by this package. It is used to enable mocking for unit tests.
 type gcsBucketHandle interface {
 	Attrs(ctx context.Context) (*storage.BucketAttrs, error)
 	Create(ctx context.Context, projectID string, attrs *storage.BucketAttrs) error
@@ -20,8 +21,9 @@ type gcsBucketHandle interface {
 	Delete(ctx context.Context) error
 }
 
-// REFACTOR_NOTE: This new unexported struct is the bridge that makes the REAL
-// *storage.BucketHandle satisfy our internal gcsBucketHandle interface.
+// realGCSBucketHandle adapts a real `*storage.BucketHandle` to satisfy the
+// internal `gcsBucketHandle` interface. This struct acts as a bridge between the
+// concrete Google Cloud client and our internal, testable interfaces.
 type realGCSBucketHandle struct {
 	handle *storage.BucketHandle
 }
@@ -29,17 +31,41 @@ type realGCSBucketHandle struct {
 func (r *realGCSBucketHandle) Attrs(ctx context.Context) (*storage.BucketAttrs, error) {
 	return r.handle.Attrs(ctx)
 }
+
 func (r *realGCSBucketHandle) Create(ctx context.Context, projectID string, attrs *storage.BucketAttrs) error {
 	return r.handle.Create(ctx, projectID, attrs)
 }
+
 func (r *realGCSBucketHandle) Update(ctx context.Context, attrs storage.BucketAttrsToUpdate) (*storage.BucketAttrs, error) {
 	return r.handle.Update(ctx, attrs)
 }
+
 func (r *realGCSBucketHandle) Delete(ctx context.Context) error {
 	return r.handle.Delete(ctx)
 }
 
-// --- Conversion Functions (Unchanged) ---
+// isGCSBucketNotExist checks for various forms of "not found" errors from the GCS client.
+// This helper isolates the Google-specific error checking to this implementation file.
+func isGCSBucketNotExist(err error) bool {
+	if errors.Is(err, storage.ErrBucketNotExist) {
+		return true
+	}
+	var gapiErr *googleapi.Error
+	if errors.As(err, &gapiErr) {
+		if gapiErr.Code == http.StatusNotFound {
+			return true
+		}
+	}
+	// Fallback check for the common error string.
+	if err != nil && strings.Contains(err.Error(), "storage: bucket doesn't exist") {
+		return true
+	}
+	return false
+}
+
+// The following functions translate between the generic `servicemanager` bucket
+// attribute types and the GCS-specific types from the `cloud.google.com/go/storage` package.
+
 func fromGCSBucketAttrs(gcsAttrs *storage.BucketAttrs) *BucketAttributes {
 	if gcsAttrs == nil {
 		return nil
@@ -62,6 +88,7 @@ func fromGCSBucketAttrs(gcsAttrs *storage.BucketAttrs) *BucketAttributes {
 	}
 	return attrs
 }
+
 func toGCSBucketAttrs(attrs *BucketAttributes) *storage.BucketAttrs {
 	if attrs == nil {
 		return nil
@@ -86,8 +113,13 @@ func toGCSBucketAttrs(attrs *BucketAttributes) *storage.BucketAttrs {
 	}
 	return gcsAttrs
 }
+
 func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *storage.BucketAttrs) storage.BucketAttrsToUpdate {
 	gcsUpdate := storage.BucketAttrsToUpdate{}
+
+	if attrs.VersioningEnabled != false {
+		gcsUpdate.VersioningEnabled = attrs.VersioningEnabled
+	}
 	if attrs.StorageClass != nil {
 		gcsUpdate.StorageClass = *attrs.StorageClass
 	}
@@ -119,7 +151,8 @@ func toGCSBucketAttrsToUpdate(attrs BucketAttributesToUpdate, existingGCSAttrs *
 	return gcsUpdate
 }
 
-// --- GCS Iterator Adapter (Unchanged) ---
+// gcsBucketIteratorAdapter adapts a `*storage.BucketIterator` to conform to the
+// package's generic `BucketIterator` interface.
 type gcsBucketIteratorAdapter struct {
 	it *storage.BucketIterator
 }
@@ -127,20 +160,23 @@ type gcsBucketIteratorAdapter struct {
 func (a *gcsBucketIteratorAdapter) Next() (*BucketAttributes, error) {
 	gcsAttrs, err := a.it.Next()
 	if err != nil {
+		// Note: The iterator library has its own `iterator.Done` error which is already generic.
 		return nil, err
 	}
 	return fromGCSBucketAttrs(gcsAttrs), nil
 }
 
-// --- GCS Handle/Client Adapters ---
-
-// gcsBucketHandleAdapter now correctly holds the internal interface again, restoring testability.
+// gcsBucketHandleAdapter adapts a `gcsBucketHandle` (our internal, mockable
+// interface) to the public `StorageBucketHandle` interface used by the StorageManager.
 type gcsBucketHandleAdapter struct {
 	bucket gcsBucketHandle
 }
 
 func (a *gcsBucketHandleAdapter) Attrs(ctx context.Context) (*BucketAttributes, error) {
 	gcsAttrs, err := a.bucket.Attrs(ctx)
+	if isGCSBucketNotExist(err) {
+		return nil, ErrBucketNotExist
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -149,17 +185,24 @@ func (a *gcsBucketHandleAdapter) Attrs(ctx context.Context) (*BucketAttributes, 
 
 func (a *gcsBucketHandleAdapter) Create(ctx context.Context, projectID string, attrs *BucketAttributes) error {
 	gcsAttrs := toGCSBucketAttrs(attrs)
+	// Create generally returns a 409 Conflict if it exists, which is not a "not found" error.
+	// No error translation is needed here.
 	return a.bucket.Create(ctx, projectID, gcsAttrs)
 }
 
 func (a *gcsBucketHandleAdapter) Update(ctx context.Context, attrs BucketAttributesToUpdate) (*BucketAttributes, error) {
+	// The manager's logic calls Attrs before Update, so we primarily need to
+	// check for "not found" on the initial attribute fetch.
 	existingGCSAttrs, err := a.bucket.Attrs(ctx)
-	if err != nil && !errors.Is(err, storage.ErrBucketNotExist) {
+	if err != nil && !isGCSBucketNotExist(err) {
 		return nil, fmt.Errorf("failed to get existing attributes before update: %w", err)
 	}
 
 	gcsAttrsToUpdate := toGCSBucketAttrsToUpdate(attrs, existingGCSAttrs)
 	updatedGCSAttrs, err := a.bucket.Update(ctx, gcsAttrsToUpdate)
+	if isGCSBucketNotExist(err) {
+		return nil, ErrBucketNotExist
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -167,16 +210,22 @@ func (a *gcsBucketHandleAdapter) Update(ctx context.Context, attrs BucketAttribu
 }
 
 func (a *gcsBucketHandleAdapter) Delete(ctx context.Context) error {
-	return a.bucket.Delete(ctx)
+	err := a.bucket.Delete(ctx)
+	if isGCSBucketNotExist(err) {
+		// Translate to the generic error, which the manager interprets as "already deleted".
+		return ErrBucketNotExist
+	}
+	return err
 }
 
-// gcsClientAdapter wraps a *storage.Client to conform to our StorageClient interface.
+// gcsClientAdapter is an adapter that wraps the official Google Cloud Storage
+// client (`*storage.Client`) to conform to the generic `StorageClient` interface
+// required by the StorageManager.
 type gcsClientAdapter struct {
 	client *storage.Client
 }
 
 func (a *gcsClientAdapter) Bucket(name string) StorageBucketHandle {
-	// REFACTOR_NOTE: This now correctly wraps the real handle in our two adapter layers.
 	realHandle := &realGCSBucketHandle{handle: a.client.Bucket(name)}
 	return &gcsBucketHandleAdapter{bucket: realHandle}
 }
@@ -189,7 +238,9 @@ func (a *gcsClientAdapter) Close() error {
 	return a.client.Close()
 }
 
-// NewGCSClientAdapter creates a new StorageClient adapter from a concrete *storage.Client.
+// NewGCSClientAdapter creates a new `StorageClient` adapter from a concrete
+// `*storage.Client`. This is the primary way to wrap a real GCS client for use
+// with the StorageManager.
 func NewGCSClientAdapter(client *storage.Client) StorageClient {
 	if client == nil {
 		return nil
@@ -197,7 +248,9 @@ func NewGCSClientAdapter(client *storage.Client) StorageClient {
 	return &gcsClientAdapter{client: client}
 }
 
-// CreateGoogleGCSClient creates a real GCS client wrapped in the StorageClient interface.
+// CreateGoogleGCSClient creates a new, production-ready GCS client that conforms
+// to the `StorageClient` interface. It handles the initialization of the
+// official Google Cloud client and wraps it in the necessary adapter.
 func CreateGoogleGCSClient(ctx context.Context, clientOpts ...option.ClientOption) (StorageClient, error) {
 	realClient, err := storage.NewClient(ctx, clientOpts...)
 	if err != nil {

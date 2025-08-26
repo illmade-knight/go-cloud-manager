@@ -8,7 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/orchestration"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
@@ -17,10 +18,11 @@ import (
 )
 
 // pubsubCommands holds the initialized Pub/Sub clients for the Director.
+// REFACTOR: This now holds v2 Publisher and Subscriber objects.
 type pubsubCommands struct {
-	client              *pubsub.Client
-	commandSubscription *pubsub.Subscription
-	completionTopic     *pubsub.Topic
+	client            *pubsub.Client
+	commandSubscriber *pubsub.Subscriber
+	completionTopic   *pubsub.Publisher
 }
 
 // Director implements the microservice.Service interface for the main application.
@@ -49,7 +51,6 @@ func withServiceManager(sm servicemanager.IServiceManager) DirectorOption {
 	return func(ctx context.Context, d *Director) error {
 		if sm == nil {
 			var err error
-			// The concrete ServiceManager returned by NewServiceManager satisfies the interface.
 			sm, err = servicemanager.NewServiceManager(ctx, d.architecture, nil, d.logger)
 			if err != nil {
 				return fmt.Errorf("director: failed to create ServiceManager: %w", err)
@@ -61,6 +62,7 @@ func withServiceManager(sm servicemanager.IServiceManager) DirectorOption {
 }
 
 // withPubSubCommands is an option to configure the Director with its Pub/Sub command infrastructure.
+// REFACTOR: Updated to use the v2 pubsub.Client, Publisher, and Subscriber.
 func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 	return func(ctx context.Context, d *Director) error {
 		if cfg.Commands == nil {
@@ -74,18 +76,19 @@ func withPubSubCommands(cfg *Config, psClient *pubsub.Client) DirectorOption {
 				return fmt.Errorf("director: failed to create pubsub Client: %w", err)
 			}
 		}
-		sub, err := ensureCommandSubscriptionExists(ctx, psClient, cfg.Commands.CommandTopicID, cfg.Commands.CommandSubID, d.logger)
+		err = ensureCommandInfrastructureExists(ctx, psClient, cfg.Commands.CommandTopicID, cfg.Commands.CommandSubID, d.logger)
 		if err != nil {
 			return err
 		}
-		topic, err := ensureCompletionTopicExists(ctx, psClient, cfg.Commands.CompletionTopicID, d.logger)
+		err = ensureCompletionTopicExists(ctx, psClient, cfg.Commands.CompletionTopicID, d.logger)
 		if err != nil {
 			return err
 		}
+
 		d.commands = &pubsubCommands{
-			client:              psClient,
-			commandSubscription: sub,
-			completionTopic:     topic,
+			client:            psClient,
+			commandSubscriber: psClient.Subscriber(cfg.Commands.CommandSubID),
+			completionTopic:   psClient.Publisher(cfg.Commands.CompletionTopicID),
 		}
 		if err = d.publishReadyEvent(ctx); err != nil {
 			d.logger.Error().Err(err).Msg("Failed to publish initial 'service_ready' event")
@@ -144,7 +147,6 @@ func NewDirectServiceDirector(ctx context.Context, cfg *Config, arch *serviceman
 
 // newInternalSD is the private constructor that applies the functional options.
 func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.MicroserviceArchitecture, directorLogger zerolog.Logger, options ...DirectorOption) (*Director, error) {
-	// The BaseServer provides the HTTP server and default health check endpoints.
 	baseServer := microservice.NewBaseServer(directorLogger, cfg.HTTPPort)
 	d := &Director{
 		BaseServer:   baseServer,
@@ -160,16 +162,15 @@ func newInternalSD(ctx context.Context, cfg *Config, arch *servicemanager.Micros
 		}
 	}
 
-	// The BaseServer's default mux will continue to serve health checks.
-	// Obsolete application-specific HTTP handlers have been removed.
 	directorLogger.Info().Str("http_port", cfg.HTTPPort).Msg("Director initialized.")
 	return d, nil
 }
 
 // listenForCommands starts the blocking Pub/Sub message receiver.
+// REFACTOR: Updated to use the v2 Subscriber.
 func (d *Director) listenForCommands(ctx context.Context) {
 	d.logger.Info().Msg("Starting to listen for commands...")
-	err := d.commands.commandSubscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+	err := d.commands.commandSubscriber.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 		msg.Ack()
 		d.logger.Info().Str("message_id", msg.ID).Msg("Received command message")
 		var cmd orchestration.Command
@@ -288,6 +289,7 @@ func (d *Director) handleTeardownCommand(ctx context.Context, dataflowName strin
 	return d.serviceManager.TeardownDataflow(ctx, d.architecture, dataflowName)
 }
 
+// REFACTOR: Updated to use the v2 Publisher.
 func (d *Director) publishReadyEvent(ctx context.Context) error {
 	d.logger.Info().Msg("Publishing 'service_ready' event...")
 	event := orchestration.CompletionEvent{
@@ -307,6 +309,7 @@ func (d *Director) publishReadyEvent(ctx context.Context) error {
 	return nil
 }
 
+// REFACTOR: Updated to use the v2 Publisher.
 func (d *Director) publishCompletionEvent(ctx context.Context, value string, commandErr error, appliedPolicies map[string]iam.PolicyBinding) error {
 	d.logger.Info().Str("value", value).Msg("Publishing completion event...")
 
@@ -341,47 +344,57 @@ func (d *Director) Shutdown(ctx context.Context) {
 	if d.iamClient != nil {
 		_ = d.iamClient.Close()
 	}
-	if d.commands != nil && d.commands.client != nil {
-		_ = d.commands.client.Close()
+	if d.commands != nil {
+		if d.commands.completionTopic != nil {
+			d.commands.completionTopic.Stop()
+		}
+		if d.commands.client != nil {
+			_ = d.commands.client.Close()
+		}
 	}
 }
 
-func ensureCommandSubscriptionExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string, logger zerolog.Logger) (*pubsub.Subscription, error) {
-	topic := psClient.Topic(topicID)
-	exists, err := topic.Exists(ctx)
-	if err != nil || !exists {
-		return nil, fmt.Errorf("command topic '%s' does not exist", topicID)
-	}
-	sub := psClient.Subscription(subID)
-	exists, err = sub.Exists(ctx)
+// REFACTOR: Updated to use the v2 admin clients for resource creation.
+func ensureCommandInfrastructureExists(ctx context.Context, psClient *pubsub.Client, topicID, subID string, logger zerolog.Logger) error {
+	projectID := psClient.Project()
+	topicAdmin := psClient.TopicAdminClient
+	subAdmin := psClient.SubscriptionAdminClient
+
+	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)
+	subName := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+
+	_, err := topicAdmin.GetTopic(ctx, &pubsubpb.GetTopicRequest{Topic: topicName})
 	if err != nil {
-		return nil, fmt.Errorf("failed to check for subscription %s: %w", subID, err)
+		return fmt.Errorf("command topic '%s' does not exist: %w", topicID, err)
 	}
-	if !exists {
+
+	_, err = subAdmin.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{Subscription: subName})
+	if err != nil {
 		logger.Info().Str("subscription", subID).Msg("Command subscription not found, creating it now.")
-		sub, err = psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-			Topic:       topic,
-			AckDeadline: 20 * time.Second,
+		_, createErr := subAdmin.CreateSubscription(ctx, &pubsubpb.Subscription{
+			Name:               subName,
+			Topic:              topicName,
+			AckDeadlineSeconds: 20,
 		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create command subscription %s: %w", subID, err)
+		if createErr != nil {
+			return fmt.Errorf("failed to create command subscription %s: %w", subID, createErr)
 		}
 	}
-	return sub, nil
+	return nil
 }
 
-func ensureCompletionTopicExists(ctx context.Context, psClient *pubsub.Client, topicID string, logger zerolog.Logger) (*pubsub.Topic, error) {
-	topic := psClient.Topic(topicID)
-	exists, err := topic.Exists(ctx)
+// REFACTOR: Updated to use the v2 admin client for resource creation.
+func ensureCompletionTopicExists(ctx context.Context, psClient *pubsub.Client, topicID string, logger zerolog.Logger) error {
+	topicAdmin := psClient.TopicAdminClient
+	topicName := fmt.Sprintf("projects/%s/topics/%s", psClient.Project(), topicID)
+
+	_, err := topicAdmin.GetTopic(ctx, &pubsubpb.GetTopicRequest{Topic: topicName})
 	if err != nil {
-		return nil, fmt.Errorf("could not check for completion topic '%s': %w", topicID, err)
-	}
-	if !exists {
 		logger.Info().Str("topic", topicID).Msg("Completion topic not found, creating it now.")
-		topic, err = psClient.CreateTopic(ctx, topicID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create completion topic '%s': %w", topicID, err)
+		_, createErr := topicAdmin.CreateTopic(ctx, &pubsubpb.Topic{Name: topicName})
+		if createErr != nil {
+			return fmt.Errorf("failed to create completion topic '%s': %w", topicID, createErr)
 		}
 	}
-	return topic, nil
+	return nil
 }

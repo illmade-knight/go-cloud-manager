@@ -9,12 +9,15 @@ import (
 	"sync"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-cloud-manager/pkg/iam"
 	"github.com/illmade-knight/go-cloud-manager/pkg/servicemanager"
 	"github.com/rs/zerolog"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type Command struct {
@@ -29,9 +32,8 @@ type FoundationalSetupPayload struct {
 type CommandInstruction string
 
 const (
-	Setup    CommandInstruction = "dataflow-setup"
-	Teardown CommandInstruction = "teardown"
-	// REFACTOR: Added a new, explicit command for dependent resource setup.
+	Setup          CommandInstruction = "dataflow-setup"
+	Teardown       CommandInstruction = "teardown"
 	SetupDependent CommandInstruction = "dependent-resource-setup"
 )
 
@@ -62,8 +64,9 @@ type RemoteDirectorClient struct {
 	logger                 zerolog.Logger
 	psClient               *pubsub.Client
 	cancelFunc             context.CancelFunc
-	commandTopic           *pubsub.Topic
-	completionSubscription *pubsub.Subscription
+	commandPublisher       *pubsub.Publisher
+	completionSubscription *pubsub.Subscriber
+	completionSubID        string // Store the ID for teardown
 	waiters                map[string]chan CompletionEvent
 	waitersMutex           sync.Mutex
 }
@@ -85,6 +88,8 @@ func NewRemoteDirectorClient(ctx context.Context, arch *servicemanager.Microserv
 	}
 
 	if err := client.initialize(internalCtx); err != nil {
+		_ = psClient.Close()
+		cancel()
 		return nil, err
 	}
 	return client, nil
@@ -94,9 +99,6 @@ func NewRemoteDirectorClient(ctx context.Context, arch *servicemanager.Microserv
 func (c *RemoteDirectorClient) initialize(ctx context.Context) error {
 	c.logger.Info().Msg("Initializing remote director client command infrastructure...")
 
-	// REFACTOR: This now correctly resolves the topic names by searching the architecture,
-	// using the ServiceMapping reference as the key. This removes the flawed dependency
-	// on environment variables and respects the single source of truth principle.
 	commandTopicID, err := findTopicNameByMapping(c.arch, c.arch.ServiceManagerSpec.CommandTopic)
 	if err != nil {
 		return fmt.Errorf("could not resolve command topic: %w", err)
@@ -109,26 +111,31 @@ func (c *RemoteDirectorClient) initialize(ctx context.Context) error {
 
 	c.logger.Info().Str("command_topic", commandTopicID).Str("completion_topic", completionTopicID).Msg("Resolved ServiceDirector topics.")
 
-	commandTopic, err := ensureTopicExists(ctx, c.psClient, commandTopicID)
+	// REFACTOR: Restore the "create if not exists" logic for dependent topics.
+	err = ensureTopicExists(ctx, c.psClient, commandTopicID, c.logger)
 	if err != nil {
 		return err
 	}
-	c.commandTopic = commandTopic
-
-	completionTopic, err := ensureTopicExists(ctx, c.psClient, completionTopicID)
+	err = ensureTopicExists(ctx, c.psClient, completionTopicID, c.logger)
 	if err != nil {
 		return err
 	}
 
-	subID := fmt.Sprintf("conductor-listener-%s", uuid.New().String()[:8])
-	sub, err := c.psClient.CreateSubscription(ctx, subID, pubsub.SubscriptionConfig{
-		Topic:       completionTopic,
-		AckDeadline: 10 * time.Second,
+	c.commandPublisher = c.psClient.Publisher(commandTopicID)
+
+	c.completionSubID = fmt.Sprintf("conductor-listener-%s", uuid.New().String()[:8])
+	subAdmin := c.psClient.SubscriptionAdminClient
+	subName := fmt.Sprintf("projects/%s/subscriptions/%s", c.arch.ProjectID, c.completionSubID)
+	topicName := fmt.Sprintf("projects/%s/topics/%s", c.arch.ProjectID, completionTopicID)
+	_, err = subAdmin.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:               subName,
+		Topic:              topicName,
+		AckDeadlineSeconds: 10,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create completion subscription: %w", err)
 	}
-	c.completionSubscription = sub
+	c.completionSubscription = c.psClient.Subscriber(c.completionSubID)
 
 	go c.listenForEvents(ctx)
 	c.logger.Info().Msg("Remote director client initialized and listening for events.")
@@ -155,6 +162,7 @@ func (c *RemoteDirectorClient) listenForEvents(ctx context.Context) {
 		var event CompletionEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			c.logger.Error().Err(err).Msg("Failed to unmarshal completion event")
+			msg.Ack()
 			return
 		}
 		c.logger.Info().Str("status", string(event.Status)).Str("value", event.Value).Msg("Received event")
@@ -216,7 +224,7 @@ func (c *RemoteDirectorClient) sendCommandAndWait(ctx context.Context, waiterKey
 	if err != nil {
 		return CompletionEvent{}, fmt.Errorf("failed to marshal command: %w", err)
 	}
-	result := c.commandTopic.Publish(ctx, &pubsub.Message{Data: cmdMsg})
+	result := c.commandPublisher.Publish(ctx, &pubsub.Message{Data: cmdMsg})
 	_, err = result.Get(ctx)
 	if err != nil {
 		return CompletionEvent{}, fmt.Errorf("failed to publish command: %w", err)
@@ -240,10 +248,18 @@ func (c *RemoteDirectorClient) Teardown(ctx context.Context) error {
 	c.cancelFunc()
 	var allErrors []string
 	if c.completionSubscription != nil {
-		if err := c.completionSubscription.Delete(ctx); err != nil {
+		subAdmin := c.psClient.SubscriptionAdminClient
+		subName := fmt.Sprintf("projects/%s/subscriptions/%s", c.arch.ProjectID, c.completionSubID)
+		err := subAdmin.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subName})
+		if err != nil && status.Code(err) != codes.NotFound {
 			allErrors = append(allErrors, fmt.Sprintf("failed to delete completion subscription: %v", err))
 		}
 	}
+
+	if c.commandPublisher != nil {
+		c.commandPublisher.Stop()
+	}
+
 	if c.psClient != nil {
 		_ = c.psClient.Close()
 	}
@@ -253,14 +269,22 @@ func (c *RemoteDirectorClient) Teardown(ctx context.Context) error {
 	return nil
 }
 
-func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID string) (*pubsub.Topic, error) {
-	topic := client.Topic(topicID)
-	exists, err := topic.Exists(ctx)
+// ensureTopicExists checks if a topic exists, and creates it if it doesn't.
+func ensureTopicExists(ctx context.Context, client *pubsub.Client, topicID string, logger zerolog.Logger) error {
+	topicAdmin := client.TopicAdminClient
+	topicName := fmt.Sprintf("projects/%s/topics/%s", client.Project(), topicID)
+
+	_, err := topicAdmin.GetTopic(ctx, &pubsubpb.GetTopicRequest{Topic: topicName})
 	if err != nil {
-		return nil, fmt.Errorf("failed to check for topic '%s': %w", topicID, err)
+		if status.Code(err) == codes.NotFound {
+			logger.Info().Str("topic", topicID).Msg("Topic not found, creating it now.")
+			_, createErr := topicAdmin.CreateTopic(ctx, &pubsubpb.Topic{Name: topicName})
+			if createErr != nil {
+				return fmt.Errorf("failed to create topic '%s': %w", topicID, createErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to check for topic '%s': %w", topicID, err)
 	}
-	if exists {
-		return topic, nil
-	}
-	return client.CreateTopic(ctx, topicID)
+	return nil
 }

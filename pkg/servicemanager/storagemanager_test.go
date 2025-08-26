@@ -93,12 +93,14 @@ func TestStorageManager_CreateResources(t *testing.T) {
 
 		mockHandle1 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-1").Return(mockHandle1).Once()
-		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
+		// REFACTOR: Use the new generic error to simulate the bucket not existing.
+		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.ErrBucketNotExist).Once()
 		mockHandle1.On("Create", ctx, "test-project", mock.Anything).Return(nil).Once()
 
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
-		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
+		// REFACTOR: Use the new generic error to simulate the bucket not existing.
+		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.ErrBucketNotExist).Once()
 		mockHandle2.On("Create", ctx, "test-project", mock.Anything).Return(nil).Once()
 
 		provisioned, err := manager.CreateResources(ctx, resources)
@@ -140,12 +142,14 @@ func TestStorageManager_CreateResources(t *testing.T) {
 
 		mockHandle1 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-1").Return(mockHandle1).Once()
-		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
+		// REFACTOR: Use the new generic error to simulate the bucket not existing.
+		mockHandle1.On("Attrs", ctx).Return(nil, servicemanager.ErrBucketNotExist).Once()
 		mockHandle1.On("Create", ctx, mock.Anything, mock.Anything).Return(nil).Once()
 
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
-		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
+		// REFACTOR: Use the new generic error to simulate the bucket not existing.
+		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.ErrBucketNotExist).Once()
 		mockHandle2.On("Create", ctx, mock.Anything, mock.Anything).Return(createErr).Once()
 
 		provisioned, err := manager.CreateResources(ctx, resources)
@@ -258,7 +262,8 @@ func TestStorageManager_Verify(t *testing.T) {
 
 		mockHandle2 := new(MockStorageBucketHandle)
 		mockClient.On("Bucket", "test-bucket-2").Return(mockHandle2).Once()
-		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.Done).Once()
+		// REFACTOR: Use the new generic error to simulate the bucket not existing.
+		mockHandle2.On("Attrs", ctx).Return(nil, servicemanager.ErrBucketNotExist).Once()
 
 		err := manager.Verify(ctx, resources)
 
