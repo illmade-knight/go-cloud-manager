@@ -231,3 +231,45 @@ func CleanStaleConfigs(arch *servicemanager.MicroserviceArchitecture, logger zer
 	logger.Info().Msg("✅ Stale configuration files cleaned successfully.")
 	return nil
 }
+
+// GenerateAndWriteServiceSpecificConfigs iterates through the architecture and copies any
+// service-specific configuration files (defined in DeploymentSpec.ConfigTemplates)
+// into the respective service's build directory.
+func GenerateAndWriteServiceSpecificConfigs(arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) error {
+	logger.Info().Msg("Writing service-specific config templates...")
+	allServices := getAllServices(arch)
+
+	for _, service := range allServices {
+		// A service must have a deployment spec to have a build destination.
+		if service.Deployment == nil {
+			continue
+		}
+		// Skip services that don't have any config templates defined.
+		if len(service.Deployment.ConfigTemplates) == 0 {
+			continue
+		}
+
+		buildDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
+
+		for sourcePath, destFilename := range service.Deployment.ConfigTemplates {
+			// 1. Read the source template file.
+			content, err := os.ReadFile(sourcePath)
+			if err != nil {
+				return fmt.Errorf("failed to read config template '%s' for service '%s': %w", sourcePath, service.Name, err)
+			}
+
+			// 2. Define the final destination path for the config file.
+			destPath := filepath.Join(buildDir, destFilename)
+
+			// 3. Write the file to the service's build directory.
+			logger.Debug().Str("service", service.Name).Str("source", sourcePath).Str("destination", destPath).Msg("Copying config template.")
+			err = os.WriteFile(destPath, content, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to write config template to '%s' for service '%s': %w", destPath, service.Name, err)
+			}
+		}
+	}
+
+	logger.Info().Msg("✅ All service-specific config templates written successfully.")
+	return nil
+}

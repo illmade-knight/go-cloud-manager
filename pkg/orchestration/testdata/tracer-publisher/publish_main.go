@@ -20,6 +20,9 @@ import (
 //go:embed resources.yaml
 var resourcesYAML []byte
 
+//go:embed tracer-config.yaml
+var tracerConfigYAML []byte
+
 // serviceConfig holds all the application configuration.
 type serviceConfig struct {
 	ProjectID           string
@@ -28,10 +31,14 @@ type serviceConfig struct {
 	AutoPublishEnabled  bool
 	AutoPublishInterval time.Duration
 	AutoPublishCount    int
+	TestParameter       string // REFACTOR: Field for the new config value.
+}
+
+type tracerConfig struct {
+	TestParameter string `yaml:"test_parameter"`
 }
 
 func readResourcesYAML(yamlBytes []byte) (*serviceConfig, error) {
-
 	// --- 1. Load resource links from embedded YAML ---
 	resources := &servicemanager.CloudResourcesSpec{}
 	err := yaml.Unmarshal(yamlBytes, resources)
@@ -51,22 +58,26 @@ func readResourcesYAML(yamlBytes []byte) (*serviceConfig, error) {
 	if ok {
 		cfg.TopicID = v
 	} else {
-		return nil, fmt.Errorf("failed to find commands-topic-id in resources.yaml")
+		return nil, fmt.Errorf("failed to find tracer-topic-id in resources.yaml")
 	}
 	return cfg, nil
 }
 
 // loadAndValidateConfig centralizes all configuration loading and validation.
-// It is now a testable helper function.
-func loadAndValidateConfig(yamlBytes []byte) (*serviceConfig, error) {
-
-	// --- 2. Load runtime yaml config  ---
-	cfg, err := readResourcesYAML(yamlBytes)
+func loadAndValidateConfig(resYAML, tracerYAML []byte) (*serviceConfig, error) {
+	cfg, err := readResourcesYAML(resYAML)
 	if err != nil {
-		return cfg, fmt.Errorf("error reading yaml: %w", err)
+		return cfg, fmt.Errorf("error reading resources.yaml: %w", err)
 	}
 
-	// --- 2. Load runtime env config  ---
+	// REFACTOR: Load the new tracer-specific config.
+	var tracerCfg tracerConfig
+	err = yaml.Unmarshal(tracerYAML, &tracerCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse embedded tracer-config.yaml: %w", err)
+	}
+	cfg.TestParameter = tracerCfg.TestParameter
+
 	cfg.ProjectID = os.Getenv("PROJECT_ID")
 	if cfg.ProjectID == "" {
 		return cfg, fmt.Errorf("missing required environment variable: PROJECT_ID")
@@ -99,19 +110,20 @@ func loadAndValidateConfig(yamlBytes []byte) (*serviceConfig, error) {
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "trace-publisher").Logger()
 
-	cfg, err := loadAndValidateConfig(resourcesYAML)
+	cfg, err := loadAndValidateConfig(resourcesYAML, tracerConfigYAML)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Configuration error")
 	}
+
+	// REFACTOR: Log the value from the new config file for verification.
+	logger.Info().Str("test_parameter", cfg.TestParameter).Msg("Tracer config loaded.")
 
 	ctx := context.Background()
 	client, err := pubsub.NewClient(ctx, cfg.ProjectID)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create pubsub client")
 	}
-	defer func() {
-		_ = client.Close()
-	}()
+	defer func() { _ = client.Close() }()
 
 	topic := client.Topic(cfg.TopicID)
 

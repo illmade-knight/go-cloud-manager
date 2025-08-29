@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,14 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 	// The sourcePath for the build is the self-contained testdata module.
 	sourcePath, err := filepath.Abs("./testdata")
 	require.NoError(t, err)
+
+	// REFACTOR: Create a temporary config file to test the template copying.
+	tempDir := t.TempDir()
+	tracerConfigFile, err := os.Create(filepath.Join(tempDir, "temp-tracer-config.yaml"))
+	require.NoError(t, err)
+	_, err = tracerConfigFile.WriteString("test_parameter: \"hello from conductor test\"")
+	require.NoError(t, err)
+	_ = tracerConfigFile.Close()
 
 	// Build paths are now relative to the testdata directory.
 	sdBuildPath := "servicedirector"
@@ -111,6 +120,9 @@ func TestConductor_Dataflow_CloudIntegration(t *testing.T) {
 						Deployment: &servicemanager.DeploymentSpec{
 							SourcePath:          sourcePath,
 							BuildableModulePath: pubBuildPath,
+							ConfigTemplates: map[string]string{
+								tracerConfigFile.Name(): "tracer-config.yaml",
+							},
 						},
 					},
 				},

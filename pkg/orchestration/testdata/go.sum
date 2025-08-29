@@ -165,8 +165,8 @@ github.com/googleapis/gax-go/v2 v2.15.0 h1:SyjDc1mGgZU5LncH8gimWo9lW1DtIfPibOG81
 github.com/googleapis/gax-go/v2 v2.15.0/go.mod h1:zVVkkxAQHa1RQpg9z2AUCMnKhi0Qld9rcmyfL1OZhoc=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
-github.com/illmade-knight/go-cloud-manager v0.3.1-beta h1:jhPraNbZ+km4vRP7ju4nF1ZYffPFY5yVHFtuluF/6jw=
-github.com/illmade-knight/go-cloud-manager v0.3.1-beta/go.mod h1:h4ULTprxEoSNANswLP9pH2hXwqZzl/JTu+nNUQI2Qn0=
+github.com/illmade-knight/go-cloud-manager v0.3.6-beta h1:uLVD1jn2Yx+opiJZTy31Gsa+pyBn37aZry5flNgdIfU=
+github.com/illmade-knight/go-cloud-manager v0.3.6-beta/go.mod h1:h4ULTprxEoSNANswLP9pH2hXwqZzl/JTu+nNUQI2Qn0=
 github.com/illmade-knight/go-dataflow v0.3.1-beta h1:8VE2P0WoGiUI6krnJI9yxtYoe4a8rd2gKOAG2WaISjM=
 github.com/illmade-knight/go-dataflow v0.3.1-beta/go.mod h1:N2Kx+QcUm/BFoi7baTXvg4xeM+6b0db7FGkqPHXwg+s=
 github.com/illmade-knight/go-test v0.0.6-beta h1:AVbltVceceCPySvDiTDqGmcroqHSx92z+FpWh7jZ+P4=
@@ -243,8 +243,8 @@ github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/
 github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
-github.com/stretchr/testify v1.11.0 h1:ib4sjIrwZKxE5u/Japgo/7SJV3PvgjGiRNAvTVGqQl8=
-github.com/stretchr/testify v1.11.0/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/testcontainers/testcontainers-go v0.38.0 h1:d7uEapLcv2P8AvH8ahLqDMMxda2W9gQN1nRbHS28HBw=
 github.com/testcontainers/testcontainers-go v0.38.0/go.mod h1:C52c9MoHpWO+C4aqmgSU+hxlR5jlEayWtgYrb8Pzz1w=
 github.com/tklauser/go-sysconf v0.3.15 h1:VE89k0criAymJ/Os65CSn1IXaol+1wrsFHEB8Ol49K4=

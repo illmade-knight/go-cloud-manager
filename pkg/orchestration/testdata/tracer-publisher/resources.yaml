@@ -1,7 +1,7 @@
 topics:
-    - name: tracer-topic-1870e767
+    - name: tracer-topic-ad2679d2
       producer_service:
-        name: tracer-publisher-1870e767
+        name: tracer-publisher-ad2679d2
         lookup:
             key: tracer-topic-id
             method: yaml
