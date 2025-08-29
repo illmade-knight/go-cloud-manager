@@ -81,6 +81,10 @@ type DeploymentSpec struct {
 	// e.g., "./cmd/myservice"
 	BuildableModulePath string `yaml:"buildable_module_path,omitempty"`
 
+	// ConfigTemplates maps a source file path (the key) to its
+	// desired destination filename within the build directory (the value).
+	ConfigTemplates map[string]string `yaml:"config_templates,omitempty"`
+	
 	// REFACTOR_NOTE: The following fields are populated during hydration.
 	// They are not typically set in the source YAML file.
 

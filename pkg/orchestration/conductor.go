@@ -289,6 +289,12 @@ func (c *Conductor) prepareBuildArtifactsPhase() error {
 		return fmt.Errorf("failed to write service config files: %w", err)
 	}
 
+	// NEW STEP
+	// This new function will handle the copying of files like routes.yaml.
+	if err := GenerateAndWriteServiceSpecificConfigs(c.arch, c.logger); err != nil {
+		return fmt.Errorf("failed to generate service-specific configs: %w", err)
+	}
+
 	if err := PrepareServiceDirectorSource(c.arch, c.logger); err != nil {
 		return fmt.Errorf("failed to prepare ServiceDirector source: %w", err)
 	}

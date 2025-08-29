@@ -1,15 +1,15 @@
 topics:
-    - name: verify-topic-1870e767
+    - name: verify-topic-ad2679d2
       producer_service:
-        name: tracer-subscriber-1870e767
+        name: tracer-subscriber-ad2679d2
         lookup:
             key: verify-topic-id
             method: yaml
 subscriptions:
-    - name: tracer-sub-1870e767
-      topic: tracer-topic-1870e767
+    - name: tracer-sub-ad2679d2
+      topic: tracer-topic-ad2679d2
       consumer_service:
-        name: tracer-subscriber-1870e767
+        name: tracer-subscriber-ad2679d2
         lookup:
             key: tracer-subscription-id
             method: yaml
