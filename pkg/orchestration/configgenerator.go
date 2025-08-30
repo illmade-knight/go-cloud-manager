@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -198,7 +199,61 @@ func WriteServiceConfigFiles(
 	return nil
 }
 
-// In orchestration/configgenerator.go
+// REFACTOR: This new function handles the copying of service-specific templates.
+// GenerateAndWriteServiceSpecificConfigs iterates through all services and copies their
+// defined configuration templates into their respective build directories.
+func GenerateAndWriteServiceSpecificConfigs(arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) error {
+	logger.Info().Msg("Writing service-specific template files (e.g., routes.yaml)...")
+	allServices := getAllServices(arch)
+
+	for serviceName, service := range allServices {
+		if service.Deployment == nil || len(service.Deployment.ConfigTemplates) == 0 {
+			continue
+		}
+
+		// The destination directory is the service's buildable module path.
+		destDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
+
+		for src, dest := range service.Deployment.ConfigTemplates {
+			// The source path is relative to the service's buildable module path.
+			sourcePath := filepath.Join(destDir, src)
+			destPath := filepath.Join(destDir, dest)
+
+			logger.Info().Str("service", serviceName).Str("source", sourcePath).Str("destination", destPath).Msg("Copying config template")
+
+			if err := copyFile(sourcePath, destPath); err != nil {
+				return fmt.Errorf("failed to copy config template for service '%s': %w", serviceName, err)
+			}
+		}
+	}
+	logger.Info().Msg("✅ All service-specific template files written successfully.")
+	return nil
+}
+
+// copyFile is a utility function to copy a file from a source to a destination.
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("could not open source file %s: %w", src, err)
+	}
+	defer func() {
+		_ = sourceFile.Close()
+	}()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("could not create destination file %s: %w", dst, err)
+	}
+	defer func() {
+		_ = destFile.Close()
+	}()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return fmt.Errorf("could not copy from %s to %s: %w", src, dst, err)
+	}
+	return nil
+}
 
 // CleanStaleConfigs removes any leftover resources.yaml or services.yaml files
 // from the source directories of all services defined in the architecture. This
@@ -229,47 +284,5 @@ func CleanStaleConfigs(arch *servicemanager.MicroserviceArchitecture, logger zer
 	}
 
 	logger.Info().Msg("✅ Stale configuration files cleaned successfully.")
-	return nil
-}
-
-// GenerateAndWriteServiceSpecificConfigs iterates through the architecture and copies any
-// service-specific configuration files (defined in DeploymentSpec.ConfigTemplates)
-// into the respective service's build directory.
-func GenerateAndWriteServiceSpecificConfigs(arch *servicemanager.MicroserviceArchitecture, logger zerolog.Logger) error {
-	logger.Info().Msg("Writing service-specific config templates...")
-	allServices := getAllServices(arch)
-
-	for _, service := range allServices {
-		// A service must have a deployment spec to have a build destination.
-		if service.Deployment == nil {
-			continue
-		}
-		// Skip services that don't have any config templates defined.
-		if len(service.Deployment.ConfigTemplates) == 0 {
-			continue
-		}
-
-		buildDir := filepath.Join(service.Deployment.SourcePath, service.Deployment.BuildableModulePath)
-
-		for sourcePath, destFilename := range service.Deployment.ConfigTemplates {
-			// 1. Read the source template file.
-			content, err := os.ReadFile(sourcePath)
-			if err != nil {
-				return fmt.Errorf("failed to read config template '%s' for service '%s': %w", sourcePath, service.Name, err)
-			}
-
-			// 2. Define the final destination path for the config file.
-			destPath := filepath.Join(buildDir, destFilename)
-
-			// 3. Write the file to the service's build directory.
-			logger.Debug().Str("service", service.Name).Str("source", sourcePath).Str("destination", destPath).Msg("Copying config template.")
-			err = os.WriteFile(destPath, content, 0644)
-			if err != nil {
-				return fmt.Errorf("failed to write config template to '%s' for service '%s': %w", destPath, service.Name, err)
-			}
-		}
-	}
-
-	logger.Info().Msg("✅ All service-specific config templates written successfully.")
 	return nil
 }
